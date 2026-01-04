@@ -488,9 +488,9 @@ export class CaptchaKrakenSolver {
     const {
       repoPath,
       pythonCommand = 'python',
-      apiProvider = 'gemini',
-      model = apiProvider === 'openrouter' ? 'google/gemini-2.0-flash-lite-preview-02-05:free' : 'gemini-2.5-flash-lite',
-      apiKey = apiProvider === 'openrouter' ? process.env.OPENROUTER_KEY : (apiProvider === 'gemini' ? process.env.GEMINI_API_KEY : undefined)
+      apiProvider = 'vllm',
+      model = apiProvider === 'vllm' ? 'Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16' : undefined,
+      apiKey
     } = this.config;
 
     const cliRoot = repoPath ?? getBundledCliRoot();
@@ -510,9 +510,13 @@ export class CaptchaKrakenSolver {
       '-m',
       'src.cli',
       `"${imagePath}"`,
-      model,
-      apiProvider
     ];
+
+    if (model) {
+      cmdParts.push(model);
+    }
+
+    cmdParts.push(apiProvider);
 
     if (apiKey) {
       cmdParts.push(apiKey);

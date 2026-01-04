@@ -14,7 +14,9 @@
     "test": "CAPTCHA_DEBUG=1 npx playwright test tests/solving.spec.ts --grep \"Recaptcha\"",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup-python.js",
-    "update-cli": "node scripts/update-cli.js"
+    "update-cli": "node scripts/update-cli.js",
+    "capture:hcaptcha": "node newCaptchas/capture_hcaptcha.js",
+    "collect:hcaptcha": "node newCaptchas/collect_hcaptcha.js"
   },
   "repository": {
     "type": "git",

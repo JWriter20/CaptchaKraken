@@ -34,9 +34,9 @@ if (!PYTHON_COMMAND) {
   PYTHON_COMMAND = 'python3';
 }
 
-const MODEL = process.env.MODEL || 'gemini-2.5-flash-lite';
-const API_PROVIDER = (process.env.API_PROVIDER || 'gemini') as 'ollama' | 'gemini';
-const API_KEY = process.env.API_KEY || process.env.GEMINI_API_KEY;
+const MODEL = process.env.MODEL;
+const API_PROVIDER = (process.env.API_PROVIDER || 'vllm') as 'vllm' | 'transformers';
+const API_KEY = process.env.API_KEY;
 
 const testWithSolver = test.extend<{ solver: CaptchaKrakenSolver }>({
   browser: [async ({ }, use) => {
@@ -89,17 +89,13 @@ testWithSolver.describe('Token Usage Reporting', () => {
 
     expect(tokenUsage).toBeDefined();
     if (tokenUsage) {
-      if (API_PROVIDER === 'gemini') {
-        console.log(`Model: ${tokenUsage.modelName}`);
-        console.log(`Input Tokens: ${tokenUsage.inputTokens}`);
-        console.log(`Output Tokens: ${tokenUsage.outputTokens}`);
-        console.log(`Estimated Cost: $${tokenUsage.estimatedCost}`);
+      console.log(`Model: ${tokenUsage.modelName}`);
+      console.log(`Input Tokens: ${tokenUsage.inputTokens}`);
+      console.log(`Output Tokens: ${tokenUsage.outputTokens}`);
 
-        // We expect non-zero if an LLM was actually used
-        // In my previous run, I saw loop 2 and 4 and 6 and 8 and 10 used tokens
-        expect(tokenUsage.inputTokens).toBeGreaterThan(0);
-        expect(tokenUsage.outputTokens).toBeGreaterThan(0);
-      }
+      // We expect non-zero if an LLM was actually used
+      expect(tokenUsage.inputTokens).toBeGreaterThan(0);
+      expect(tokenUsage.outputTokens).toBeGreaterThan(0);
     }
   });
 });
