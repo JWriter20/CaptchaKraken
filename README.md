@@ -16,6 +16,7 @@ Other kinds of captchas have not really been tested. Development will primarily 
 
 1.  **Node.js** and **npm**.
 2.  **Python 3.10+** installed.
+3.  **CUDA-capable GPU** (recommended for local `vllm` or `transformers` inference).
 
 ## Installation
 
@@ -35,8 +36,6 @@ Python dependencies via an `npm postinstall` hook.
 - **Skip python setup**: set `CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP=1`
 - **Use a specific python**: set `CAPTCHA_KRAKEN_PYTHON=/path/to/python3`
 
-**Note:** Setup your environment variables (API keys) in `.env` if needed or pass them in config.
-
 ## Usage
 
 ```typescript
@@ -49,20 +48,13 @@ import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
   
   // Configure the solver
   const solver = new CaptchaKrakenSolver({
-    // Optional overrides:
-    // repoPath: '/absolute/path/to/CaptchaKraken-cli', // Usually not needed (auto-resolved from npm package)
-    // model: 'gemini-2.5-flash-lite',      // Default
-    // apiProvider: 'gemini',               // Default
-    // apiKey: 'YOUR_API_KEY',              // Defaults to process.env.GEMINI_API_KEY
-    // pythonCommand: 'python3',            // Usually not needed (auto-uses venv python)
+    apiProvider: 'vllm', // or 'transformers'
+    // model: 'Jake-Writer-Jobharvest/qwen3-vl-8b-merged-bf16', // Default for vllm
   });
 
   await page.goto('https://www.google.com/recaptcha/api2/demo');
 
   // Attempt to solve the captcha
-  // This will detect the captcha, screenshot it, call the CLI, and execute clicks.
-  // It will also automatically re-check for newly opened next-step challenges
-  // (e.g., checkbox -> image grid) and keep solving until solved (or loop limit).
   await solver.solve(page);
 
   await browser.close();
@@ -75,20 +67,11 @@ import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
 |---|---|---|---|
 | `repoPath` | `string` | *(auto)* | Path to the bundled `CaptchaKraken-cli` directory (usually not needed). |
 | `pythonCommand` | `string` | *(auto)* | Python command to use. Usually not needed - automatically uses the venv python created during installation. |
-| `model` | `string` | `'gemini-2.5-flash-lite'` (Gemini) or `'google/gemini-2.0-flash-lite-preview-02-05:free'` (OpenRouter) | The vision model to use. |
-| `apiProvider` | `'ollama' \| 'gemini' \| 'openrouter'` | `'gemini'` | The API provider. |
-| `apiKey` | `string` | `process.env.GEMINI_API_KEY` or `process.env.OPENROUTER_KEY` | API Key (required for Gemini and OpenRouter). |
+| `model` | `string` | *(auto)* | The vision model to use. |
+| `apiProvider` | `'vllm' \| 'transformers'` | `'vllm'` | The backend provider. |
 | `maxSolveLoops` | `number` | `10` | Max number of detect→solve iterations in a single `solve()` call. |
 | `postSolveDelayMs` | `number` | `1200` | Delay after each iteration before re-detecting. |
 | `overallSolveTimeoutMs` | `number` | `120000` | Overall time limit for the whole `solve()` call. |
-
-## Coming Soon
-
-We're actively working on several improvements to enhance the solver's capabilities:
-
-- **Stronger default model**: Replacing `gemini-2.5-flash-lite` with a more capable default model that better handles complex image recognition tasks
-- **Improved reCAPTCHA accuracy**: Finetuned custom model to boost reCAPTCHA image captcha success rate from ~60% to 95%+
-- **hCaptcha complex drag puzzle solving**: Full support for hCaptcha's drag-and-drop puzzle challenges
 
 ## Testing
 
@@ -100,17 +83,11 @@ npm test
 
 ### End-to-End Solving Tests
 
-To run the real-world solving tests (which connect to your local `CaptchaKraken-cli`), you can optionally provide environment variables to override defaults:
+To run the real-world solving tests (which connect to your local `CaptchaKraken-cli`):
 
 ```bash
-MODEL="llama3.2-vision" \
-API_PROVIDER="ollama" \
+API_PROVIDER="vllm" \
 npx playwright test tests/solving.spec.ts
 ```
 
 Note: The tests will automatically use `./CaptchaKraken-cli` as the default path. You can override it with `CAPTCHA_KRAKEN_REPO_PATH` if needed.
-
-These tests will:
-1.  Navigate to demo pages (Recaptcha, hCaptcha, Turnstile).
-2.  Attempt to solve the captcha using your local CLI setup.
-3.  Verify that the solution was accepted.

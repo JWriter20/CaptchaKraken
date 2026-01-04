@@ -37,9 +37,9 @@ if (!PYTHON_COMMAND) {
   PYTHON_COMMAND = 'python3';
 }
 
-const MODEL = process.env.MODEL || 'gemini-2.5-flash-lite';
-const API_PROVIDER = (process.env.API_PROVIDER || 'gemini') as 'ollama' | 'gemini' | 'openrouter';
-const API_KEY = process.env.API_KEY || (API_PROVIDER === 'openrouter' ? process.env.OPENROUTER_KEY : process.env.GEMINI_API_KEY);
+const MODEL = process.env.MODEL;
+const API_PROVIDER = (process.env.API_PROVIDER || 'vllm') as 'vllm' | 'transformers';
+const API_KEY = process.env.API_KEY;
 
 // Skip tests if REPO_PATH is not configured
 const testWithSolver = test.extend<{ solver: CaptchaKrakenSolver }>({

@@ -11,13 +11,13 @@ export interface CaptchaKrakenConfig {
    */
   pythonCommand?: string;
   /**
-   * Model to use (default: 'gemini-2.5-flash-lite').
+   * Model to use (default: auto-selected by provider).
    */
   model?: string;
   /**
-   * API provider (default: 'gemini').
+   * API provider (default: 'vllm').
    */
-  apiProvider?: 'ollama' | 'gemini' | 'openrouter';
+  apiProvider?: 'transformers' | 'vllm';
   /**
    * API Key for the provider (if required).
    */

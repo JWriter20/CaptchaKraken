@@ -8,3 +8,4 @@ test-results
 playwright-report
 debug_runs/
 test_logs/
+newCaptchas/
