@@ -11,15 +11,12 @@ export interface CaptchaKrakenConfig {
    */
   pythonCommand?: string;
   /**
-   * Model to use (default: 'gemini-2.5-flash-lite').
+   * vLLM LoRA name to invoke (default: 'captcha' — our bbox-aware LoRA).
+   * Override if you've registered a different module with the vLLM server.
    */
   model?: string;
   /**
-   * API provider (default: 'gemini').
-   */
-  apiProvider?: 'ollama' | 'gemini' | 'openrouter';
-  /**
-   * API Key for the provider (if required).
+   * Bearer token for the vLLM server (also picked up from VLLM_API_KEY env).
    */
   apiKey?: string;
 
@@ -63,9 +60,26 @@ export interface BoundingBox {
 
 export interface ClickAction {
   action: 'click';
-  target_number: number | null;
-  target_bounding_box: [number, number, number, number] | null;
-  target_coordinates: [number, number] | null;
+  /**
+   * One or more normalized [x1, y1, x2, y2] bboxes (0–1 fractions of the
+   * screenshot). Each entry produces one click. Emitted by v2 CLI for both
+   * grid selections and click-puzzle points.
+   */
+  target_bounding_boxes?: Array<[number, number, number, number]>;
+  /** Legacy v1 fields kept for backwards-compat with older CLI builds. */
+  target_number?: number | null;
+  target_bounding_box?: [number, number, number, number] | null;
+  target_coordinates?: [number, number] | null;
+}
+
+export interface DragAction {
+  action: 'drag';
+  source_bounding_box: [number, number, number, number];
+  target_bounding_box: [number, number, number, number];
+}
+
+export interface DoneAction {
+  action: 'done';
 }
 
 export interface WaitAction {
@@ -73,7 +87,7 @@ export interface WaitAction {
   duration_ms: number;
 }
 
-export type CaptchaAction = ClickAction | WaitAction;
+export type CaptchaAction = ClickAction | WaitAction | DragAction | DoneAction;
 
 export type SolverResult = CaptchaAction | CaptchaAction[];
 

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { Camoufox } from 'camoufox-js';
+import { Camoufox } from '@jobharvest/camoufox-js';
 
 const testWithCamoufox = test.extend({
   browser: [async ({ }, use) => {

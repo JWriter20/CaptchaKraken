@@ -3,7 +3,7 @@ import { CaptchaKrakenSolver } from '../src/solver.js';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
-import { Camoufox } from 'camoufox-js';
+import { Camoufox } from '@jobharvest/camoufox-js';
 
 // Load environment variables
 dotenv.config();

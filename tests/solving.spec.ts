@@ -3,7 +3,7 @@ import { CaptchaKrakenSolver } from '../src/solver.js';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
-import { Camoufox } from 'camoufox-js';
+import { Camoufox } from '@jobharvest/camoufox-js';
 
 // Load environment variables
 dotenv.config();
@@ -37,14 +37,18 @@ if (!PYTHON_COMMAND) {
   PYTHON_COMMAND = 'python3';
 }
 
-const MODEL = process.env.MODEL || 'gemini-2.5-flash-lite';
-const API_PROVIDER = (process.env.API_PROVIDER || 'gemini') as 'ollama' | 'gemini' | 'openrouter';
-const API_KEY = process.env.API_KEY || (API_PROVIDER === 'openrouter' ? process.env.OPENROUTER_KEY : process.env.GEMINI_API_KEY);
+const MODEL = process.env.CAPTCHA_LORA_NAME || 'captcha';
+const API_KEY = process.env.VLLM_API_KEY;
 
 // Skip tests if REPO_PATH is not configured
 const testWithSolver = test.extend<{ solver: CaptchaKrakenSolver }>({
   browser: [async ({ }, use) => {
-    const browser = await Camoufox({ headless: false });
+    // Linux server flow: "virtual" → camoufox-js spawns its own Xvfb. macOS / local
+    // dev with a display: pass CAPTCHA_HEADED=1 to launch headed; otherwise true.
+    const headless: boolean | 'virtual' =
+      process.platform === 'linux' ? 'virtual' :
+      process.env.CAPTCHA_HEADED === '1' ? false : true;
+    const browser = await Camoufox({ headless } as any);
     await use(browser);
     await browser.close();
   }, { scope: 'worker' }],
@@ -59,13 +63,16 @@ const testWithSolver = test.extend<{ solver: CaptchaKrakenSolver }>({
       repoPath: REPO_PATH!,
       pythonCommand: PYTHON_COMMAND,
       model: MODEL,
-      apiProvider: API_PROVIDER,
       apiKey: API_KEY,
-      // Multi-step captchas often require several iterations (checkbox -> challenge -> verify).
-      // The solver now loops internally; keep these generous for real-world tests.
-      maxSolveLoops: 15,
-      postSolveDelayMs: 2000,
-      overallSolveTimeoutMs: 180_000
+      // Recaptcha can throw 3-4 puzzles in a row before passing, and 3x3
+      // dynamic puzzles refresh tiles after each click. Each refresh ~ one
+      // new puzzle = one new chance. 25 loops gives us enough budget while
+      // keeping the test under 4 minutes.
+      maxSolveLoops: 25,
+      // 3x3 dynamic tiles fade in over ~1.5s after a click. Screenshotting
+      // before they're fully drawn yields washed-out images. Bump to 3s.
+      postSolveDelayMs: 3000,
+      overallSolveTimeoutMs: 240_000,
     });
 
     await use(solver);
@@ -77,25 +84,47 @@ testWithSolver.describe('Real World Solving Tests', () => {
   testWithSolver.slow();
 
   testWithSolver('Recaptcha (Google Demo) - Solve', async ({ page, solver }) => {
-    await page.goto('https://nopecha.com/captcha/recaptcha#moderate');
+    await page.goto('https://www.google.com/recaptcha/api2/demo');
 
-    // Attempt to solve (internal loop handles checkbox->challenge->verify)
     await solver.solve(page as any);
 
-    // Final Verification
+    // Signal 1: the anchor iframe's checkbox gains the `-checked` class.
+    // (`-checkmark` is the green check graphic and is always in the DOM —
+    // do not check that one; check the parent state class.)
     const anchorFrame = page.frames().find(f => f.url().includes('recaptcha/api2/anchor'));
-    const isChecked = await anchorFrame?.locator('.recaptcha-checkbox-checked').count();
-    expect(isChecked).toBeGreaterThan(0);
+    const isChecked = await anchorFrame?.locator('.recaptcha-checkbox-checked').count() ?? 0;
+
+    // Signal 2: the hidden `g-recaptcha-response` textarea on the main page
+    // is filled with the JWT recaptcha would post to a real backend. This is
+    // the canonical server-side success indicator.
+    const token = await page.$eval(
+      'textarea#g-recaptcha-response, textarea[name="g-recaptcha-response"]',
+      el => (el as HTMLTextAreaElement).value,
+    ).catch(() => '');
+
+    expect(isChecked, 'anchor checkbox should have .recaptcha-checkbox-checked').toBeGreaterThan(0);
+    expect(token, 'g-recaptcha-response textarea should hold a token').toBeTruthy();
+    expect(token.length, 'token should be non-trivial length').toBeGreaterThan(20);
   });
 
   testWithSolver('hCaptcha (Demo) - Solve', async ({ page, solver }) => {
-    await page.goto('https://democaptcha.com/demo-form-eng/hcaptcha.html');
+    // accounts.hcaptcha.com/demo uses a high-difficulty sitekey; the
+    // democaptcha mirror uses the always-pass sitekey 10000000-ffff-...,
+    // which actually validates real model output. Toggle via env if needed.
+    const url = process.env.HCAPTCHA_DEMO_URL
+      ?? 'https://accounts.hcaptcha.com/demo';
+    await page.goto(url);
 
-    // Attempt to solve (internal loop handles checkbox->challenge->verify)
     await solver.solve(page as any);
 
-    const response = await page.$eval('[name="h-captcha-response"]', el => (el as HTMLTextAreaElement).value);
-    expect(response).toBeTruthy();
+    // hCaptcha's success token. Server-side validation only accepts non-empty
+    // JWTs; a stale/empty value here means the captcha was not actually solved.
+    const response = await page.$eval(
+      '[name="h-captcha-response"]',
+      el => (el as HTMLTextAreaElement).value,
+    ).catch(() => '');
+    expect(response, 'h-captcha-response token').toBeTruthy();
+    expect(response.length).toBeGreaterThan(20);
   });
 
   testWithSolver('Cloudflare Turnstile (2Captcha Demo) - Solve', async ({ page, solver }) => {
