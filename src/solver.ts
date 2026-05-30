@@ -279,6 +279,20 @@ export class CaptchaKrakenSolver {
     }
   }
 
+  private async isHcaptchaAnchorChecked(anchorIframe: ElementHandle): Promise<boolean> {
+    // hCaptcha's anchor sets <div id="checkbox" aria-checked="true"> when
+    // the puzzle has been solved. We use this as a solve signal because the
+    // h-captcha-response token isn't always populated on demo pages.
+    try {
+      const frame = await anchorIframe.contentFrame();
+      if (!frame) return false;
+      const ariaChecked = await frame.$('#checkbox[aria-checked="true"]');
+      return !!(ariaChecked && await ariaChecked.isVisible());
+    } catch {
+      return false;
+    }
+  }
+
   public async detectCaptcha(page: Page): Promise<ElementHandle | null> {
     // Prioritize open challenges (the grid/images) over the initial checkbox
 
@@ -286,14 +300,12 @@ export class CaptchaKrakenSolver {
     const recaptchaChallenge = await page.$('iframe[src*="recaptcha/api2/bframe"]');
     if (recaptchaChallenge && await recaptchaChallenge.isVisible()) return recaptchaChallenge;
 
-    // hCaptcha Challenge
-    // Try matching by src (frame=challenge)
-    const hcaptchaChallenge = await page.$('iframe[src*="hcaptcha.com"][src*="frame=challenge"]');
+    // hCaptcha Challenge — match the `frame=challenge` URL fragment.
+    // The anchor iframe's title is "Widget containing checkbox for hCaptcha
+    // security challenge" so a title-based fallback would mis-classify it
+    // as the challenge frame. The URL fragment is unambiguous.
+    const hcaptchaChallenge = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
     if (hcaptchaChallenge && await hcaptchaChallenge.isVisible()) return hcaptchaChallenge;
-
-    // Fallback: title containing "content" or "challenge" (sometimes title varies)
-    const hcaptchaChallengeTitle = await page.$('iframe[src*="hcaptcha.com"][title*="challenge"]');
-    if (hcaptchaChallengeTitle && await hcaptchaChallengeTitle.isVisible()) return hcaptchaChallengeTitle;
 
     // Recaptcha Checkbox
     const recaptchaCheckbox = await page.$('iframe[src*="recaptcha/api2/anchor"]');
@@ -303,12 +315,15 @@ export class CaptchaKrakenSolver {
       if (!checked) return recaptchaCheckbox;
     }
 
-    // hCaptcha Checkbox
-    const hcaptchaCheckbox = await page.$('iframe[src*="hcaptcha.com"]:not([title*="challenge"])');
+    // hCaptcha Checkbox (anchor) — match the `frame=checkbox` URL fragment.
+    const hcaptchaCheckbox = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
     if (hcaptchaCheckbox && await hcaptchaCheckbox.isVisible()) {
-      // If we already have a token, treat as solved and continue searching.
+      // Solved if EITHER the h-captcha-response token is set OR the anchor
+      // has flipped to aria-checked="true". Demo pages don't always populate
+      // the token, so the visual state is the necessary tie-breaker.
       const hasToken = await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]');
-      if (!hasToken) return hcaptchaCheckbox;
+      const checked = await this.isHcaptchaAnchorChecked(hcaptchaCheckbox);
+      if (!hasToken && !checked) return hcaptchaCheckbox;
     }
 
     // Cloudflare Turnstile
