@@ -187,11 +187,21 @@ export class CaptchaKrakenSolver {
         // 'done' actions intentionally fall through to the Verify-button block below.
       }
 
-      if (!performedAction) {
-        // ... existing button clicking code ...
-        console.log('No active actions performed (empty or done). Checking for Verify/Next button...');
+      // Submit policy:
+      //   - hCaptcha: every puzzle is one-shot. Tiles don't refresh in place;
+      //     we must click Verify after our selection to submit and advance.
+      //   - reCAPTCHA: tiles refresh in place ("select all squares with X"
+      //     keeps going as new tiles fade in). Only submit when the LoRA
+      //     returned no actions (empty selection / 'done').
+      const shouldClickSubmit = !performedAction || puzzleSource === 'hcaptcha';
+      if (shouldClickSubmit) {
+        console.log(performedAction
+          ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
+          : 'No active actions performed (empty or done). Checking for Verify/Next button...');
         const contentFrame = await captchaElement.contentFrame();
         if (contentFrame) {
+          let submitted = false;
+
           // 1. Try generic button selectors by text
           const buttonTexts = ['Verify', 'Next', 'Submit', 'Skip'];
           for (const text of buttonTexts) {
@@ -203,7 +213,7 @@ export class CaptchaKrakenSolver {
               if (btn && await btn.isVisible()) {
                 console.log(`Clicking button with text "${text}"`);
                 await this.moveAndClick(page, btn);
-                performedAction = true;
+                submitted = true;
                 break;
               }
             } catch (e) {
@@ -211,25 +221,27 @@ export class CaptchaKrakenSolver {
             }
           }
 
-          if (!performedAction) {
+          if (!submitted) {
             // 2. Try specific ID (Recaptcha)
             const recaptchaVerify = await contentFrame.$('#recaptcha-verify-button');
             if (recaptchaVerify && await recaptchaVerify.isVisible()) {
               console.log('Clicking Recaptcha Verify/Next button by ID');
               await this.moveAndClick(page, recaptchaVerify);
-              performedAction = true;
+              submitted = true;
             }
           }
 
-          if (!performedAction) {
+          if (!submitted) {
             // 3. Try specific class (hCaptcha)
             const hcaptchaVerify = await contentFrame.$('.button-submit');
             if (hcaptchaVerify && await hcaptchaVerify.isVisible()) {
               console.log('Clicking hCaptcha Verify/Submit button by Class');
               await this.moveAndClick(page, hcaptchaVerify);
-              performedAction = true;
+              submitted = true;
             }
           }
+
+          if (submitted) performedAction = true;
         }
       }
     } finally {
