@@ -115,27 +115,6 @@ export class CaptchaKrakenSolver {
   }
 
   private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
-    const src = await captchaElement.getAttribute('src').catch(() => null);
-
-    // Fast-path: if detectCaptcha handed us the anchor checkbox (the tiny
-    // "I'm not a robot" frame), don't waste a model call screenshotting it —
-    // the universal-action LoRA can't interpret an iframe that small. Just
-    // click its center to re-open the challenge frame. This unblocks the
-    // VERIFYING → IN_CHALLENGE transition after a failed verify cycle.
-    const isAnchor = !!src && (
-      src.includes('recaptcha/api2/anchor') ||
-      (src.includes('hcaptcha.com') && !src.includes('frame=challenge'))
-    );
-    if (isAnchor) {
-      console.log(`Anchor checkbox detected (${src}); clicking to (re-)open challenge.`);
-      try {
-        await this.moveAndClick(page, captchaElement);
-        return { didInteract: true, tokenUsage: [] };
-      } catch (e) {
-        console.warn(`Failed to click anchor: ${e}; falling through to normal solve.`);
-      }
-    }
-
     // 1. Take Screenshot
     const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
     await captchaElement.screenshot({ path: screenshotPath });
@@ -146,6 +125,7 @@ export class CaptchaKrakenSolver {
     // Vendor hint helps the CLI route to the right pipeline (hCaptcha click
     // puzzles must never go through grid detection — find_grid false-positives
     // on the header+footer bands).
+    const src = await captchaElement.getAttribute('src').catch(() => null);
     const puzzleSource = src && src.includes('hcaptcha.com')
       ? 'hcaptcha'
       : src && src.includes('recaptcha/api2')
