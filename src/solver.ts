@@ -122,12 +122,22 @@ export class CaptchaKrakenSolver {
     // Save image to debug directory if debugging is enabled
     this.saveImageForDebug(screenshotPath);
 
+    // Vendor hint helps the CLI route to the right pipeline (hCaptcha click
+    // puzzles must never go through grid detection — find_grid false-positives
+    // on the header+footer bands).
+    const src = await captchaElement.getAttribute('src').catch(() => null);
+    const puzzleSource = src && src.includes('hcaptcha.com')
+      ? 'hcaptcha'
+      : src && src.includes('recaptcha/api2')
+        ? 'recaptcha'
+        : 'unknown';
+
     let performedAction = false;
     let allTokenUsage: TokenUsage[] = [];
 
     try {
       // 2. Call CLI
-      const response = await this.getSolution(screenshotPath);
+      const response = await this.getSolution(screenshotPath, puzzleSource);
       const actions = response.actions;
       allTokenUsage = response.token_usage;
 
@@ -147,9 +157,25 @@ export class CaptchaKrakenSolver {
 
       for (const action of actionList) {
         if (action.action === 'click') {
-          await this.executeClick(page, captchaElement, action as ClickAction, elementBox);
-          // Small delay between clicks
-          await delay(Math.random() * 20 + 30);
+          const c = action as ClickAction;
+          // v2 emits `target_bounding_boxes` (plural). v1 fields kept as fallbacks.
+          const bboxes: Array<[number, number, number, number]> = c.target_bounding_boxes
+            ?? (c.target_bounding_box ? [c.target_bounding_box] : []);
+          if (!bboxes.length && !c.target_coordinates) {
+            console.warn('Click action has no bboxes or coordinates', c);
+            continue;
+          }
+          if (bboxes.length) {
+            for (const bbox of bboxes) {
+              await this.executeClick(page, captchaElement, { ...c, target_bounding_box: bbox } as ClickAction, elementBox);
+              await delay(Math.random() * 80 + 80);
+            }
+          } else {
+            await this.executeClick(page, captchaElement, c, elementBox);
+          }
+          performedAction = true;
+        } else if (action.action === 'drag') {
+          await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
         } else if (action.action === 'wait') {
           if ((action as any).duration_ms > 0) {
@@ -158,6 +184,7 @@ export class CaptchaKrakenSolver {
             performedAction = true;
           }
         }
+        // 'done' actions intentionally fall through to the Verify-button block below.
       }
 
       if (!performedAction) {
@@ -360,13 +387,14 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  private async getSolution(imagePath: string): Promise<CliResponse> {
+  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown'): Promise<CliResponse> {
+    // v2 ships a single provider: local vLLM via the bundled CaptchaKraken CLI.
+    // The CLI's planner reads VLLM_BASE_URL / VLLM_API_KEY from the environment.
     const {
       repoPath,
       pythonCommand = 'python',
-      apiProvider = 'gemini',
-      model = apiProvider === 'openrouter' ? 'google/gemini-2.0-flash-lite-preview-02-05:free' : 'gemini-2.5-flash-lite',
-      apiKey = apiProvider === 'openrouter' ? process.env.OPENROUTER_KEY : (apiProvider === 'gemini' ? process.env.GEMINI_API_KEY : undefined)
+      model = 'captcha',  // vLLM LoRA name (see /etc/systemd/system/vllm.service)
+      apiKey = process.env.VLLM_API_KEY,
     } = this.config;
 
     const cliRoot = repoPath ?? getBundledCliRoot();
@@ -387,12 +415,16 @@ export class CaptchaKrakenSolver {
       'src.cli',
       `"${imagePath}"`,
       model,
-      apiProvider
+      'captchaKrakenApi',
     ];
 
     if (apiKey) {
       cmdParts.push(apiKey);
     }
+
+    // Always pass the vendor hint at the end as --puzzle-source=<vendor>; the
+    // CLI's argparse falls through to the flag form for unknown trailing args.
+    cmdParts.push(`--puzzle-source=${puzzleSource}`);
 
     const command = cmdParts.join(' ');
     console.log(`Executing CaptchaKraken CLI: ${command}`);
@@ -613,6 +645,28 @@ export class CaptchaKrakenSolver {
     // Perform click
     await page.mouse.down();
     await page.waitForTimeout(Math.random() * 30 + 20); // Random hold duration
+    await page.mouse.up();
+  }
+
+  private async executeDrag(
+    page: Page,
+    _element: ElementHandle,
+    action: { source_bounding_box: [number, number, number, number]; target_bounding_box: [number, number, number, number] },
+    elementBox: { x: number, y: number, width: number, height: number }
+  ) {
+    const bboxCenter = (bbox: [number, number, number, number]) => {
+      const cx = elementBox.x + ((bbox[0] + bbox[2]) / 2) * elementBox.width;
+      const cy = elementBox.y + ((bbox[1] + bbox[3]) / 2) * elementBox.height;
+      return { x: cx, y: cy };
+    };
+    const src = bboxCenter(action.source_bounding_box);
+    const dst = bboxCenter(action.target_bounding_box);
+
+    await this.performSmoothMove(page, src.x, src.y);
+    await page.mouse.down();
+    await page.waitForTimeout(Math.random() * 50 + 50);
+    await this.performSmoothMove(page, dst.x, dst.y);
+    await page.waitForTimeout(Math.random() * 50 + 50);
     await page.mouse.up();
   }
 }

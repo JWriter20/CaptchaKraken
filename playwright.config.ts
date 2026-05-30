@@ -12,7 +12,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
   use: {
-    headless: false, // Run in headed mode by default
+    headless: true, // Run in headless mode by default for server compatibility
     trace: 'on-first-retry',
     screenshot: 'on',
     video: 'retain-on-failure',
