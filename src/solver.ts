@@ -74,6 +74,14 @@ export class CaptchaKrakenSolver {
       log(`Session debug directory: ${this.sessionDebugDir}`);
     }
 
+    // Set to "missed-tiles" for the next iteration when we detect that the
+    // captcha vendor rejected our submission with an under-selection error
+    // (reCAPTCHA "Please select all matching images"). Used once, then
+    // cleared. If the error appears again after the retry, we abort —
+    // burning loops on a stuck model only delays the inevitable fail.
+    let pendingRetryMode: string | null = null;
+    let alreadyRetriedRecaptchaError = false;
+
     for (let attempt = 1; attempt <= maxSolveLoops; attempt++) {
       if (Date.now() - start > overallSolveTimeoutMs) {
         throw new Error(`Captcha solve timed out after ${overallSolveTimeoutMs}ms (attempt ${attempt}/${maxSolveLoops}).`);
@@ -90,11 +98,36 @@ export class CaptchaKrakenSolver {
       }
 
       console.log(`\n--- Captcha Solve Loop ${attempt}/${maxSolveLoops} ---`);
-      const { didInteract, tokenUsage } = await this.solveSingle(page, captchaElement, attempt);
+      const retryModeThisLoop = pendingRetryMode;
+      pendingRetryMode = null;
+      const { didInteract, tokenUsage } = await this.solveSingle(
+        page, captchaElement, attempt, retryModeThisLoop,
+      );
       cumulativeTokenUsage.push(...tokenUsage);
 
       // Let the page update (challenge frame open, images refresh, verification, etc.)
       await delay(postSolveDelayMs + Math.random() * 300);
+
+      // Detect reCAPTCHA's under-selection error banner. If present, the
+      // vendor rejected our last submission because the model missed at
+      // least one matching tile. Set the retry flag for the next loop so
+      // the CLI augments the grid prompt with an explicit "you missed
+      // some" instruction. If we've already retried once and the error is
+      // STILL showing, bail — the model is stuck and the loop will just
+      // keep flipping between "done" and Verify until timeout.
+      const recaptchaUnderselect = await this.hasRecaptchaUnderselectError(page);
+      if (recaptchaUnderselect) {
+        if (alreadyRetriedRecaptchaError) {
+          throw new Error(
+            'reCAPTCHA still showing the under-selection error after retry; '
+            + 'aborting (model unable to identify the missed tile). Total usage: '
+            + JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))
+          );
+        }
+        console.log('reCAPTCHA returned under-selection error; retrying with missed-tiles prompt.');
+        pendingRetryMode = 'missed-tiles';
+        alreadyRetriedRecaptchaError = true;
+      }
 
       const after = await this.detectCaptcha(page);
       if (!after) {
@@ -114,7 +147,7 @@ export class CaptchaKrakenSolver {
     throw new Error(`Captcha still detected after ${maxSolveLoops} solve loops. Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
   }
 
-  private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
+  private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: string | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
     // 1. Take Screenshot
     const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
     await captchaElement.screenshot({ path: screenshotPath });
@@ -137,7 +170,7 @@ export class CaptchaKrakenSolver {
 
     try {
       // 2. Call CLI
-      const response = await this.getSolution(screenshotPath, puzzleSource);
+      const response = await this.getSolution(screenshotPath, puzzleSource, retryMode);
       const actions = response.actions;
       allTokenUsage = response.token_usage;
 
@@ -263,6 +296,47 @@ export class CaptchaKrakenSolver {
         return typeof anyNode.value === 'string' ? anyNode.value : '';
       });
       return typeof value === 'string' && value.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Detect reCAPTCHA's "Please select all matching images" error banner
+   * (and the related "Please try again" / "Please also check the new images"
+   * variants). These appear in the bframe AFTER clicking Verify with an
+   * incomplete selection. The tiles do NOT refresh on this error — without
+   * special handling the LoRA sees the same image, returns "done" (because
+   * to it everything matching IS selected), we click Verify again, and we
+   * loop until the session times out. We use this signal to switch the next
+   * grid call into "missed-tiles" retry mode.
+   */
+  private async hasRecaptchaUnderselectError(page: Page): Promise<boolean> {
+    try {
+      const bframe = await page.$('iframe[src*="recaptcha/api2/bframe"]');
+      if (!bframe) return false;
+      const frame = await bframe.contentFrame();
+      if (!frame) return false;
+      // Three selector variants reCAPTCHA uses for the same family of errors.
+      const selectors = [
+        '.rc-imageselect-error-select-more',
+        '.rc-imageselect-error-dynamic-more',
+        '.rc-imageselect-incorrect-response',
+      ];
+      for (const sel of selectors) {
+        const el = await frame.$(sel);
+        if (el) {
+          // reCAPTCHA toggles these elements between visible / hidden via
+          // an `aria-hidden` attribute on a wrapper — checking isVisible()
+          // alone misses cases where the element is in the layout tree but
+          // currently being faded in. Treat presence + non-empty text as
+          // enough.
+          const visible = await el.isVisible().catch(() => false);
+          const text = (await el.textContent().catch(() => null)) ?? '';
+          if (visible && text.trim().length > 0) return true;
+        }
+      }
+      return false;
     } catch {
       return false;
     }
@@ -414,7 +488,7 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown'): Promise<CliResponse> {
+  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null): Promise<CliResponse> {
     // v2 ships a single provider: local vLLM via the bundled CaptchaKraken CLI.
     // The CLI's planner reads VLLM_BASE_URL / VLLM_API_KEY from the environment.
     const {
@@ -452,6 +526,9 @@ export class CaptchaKrakenSolver {
     // Always pass the vendor hint at the end as --puzzle-source=<vendor>; the
     // CLI's argparse falls through to the flag form for unknown trailing args.
     cmdParts.push(`--puzzle-source=${puzzleSource}`);
+    if (retryMode) {
+      cmdParts.push(`--retry-mode=${retryMode}`);
+    }
 
     const command = cmdParts.join(' ');
     console.log(`Executing CaptchaKraken CLI: ${command}`);
