@@ -8,3 +8,10 @@ test-results
 playwright-report
 debug_runs/
 test_logs/
+
+# test-run artifacts
+hcaptcha_5x_attempt_*.png
+hcaptcha_5x_summary.json
+captcha_video_summary.json
+server_log.txt
+=*
