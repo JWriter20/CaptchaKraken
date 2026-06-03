@@ -1,6 +1,6 @@
 import { Page, ElementHandle, Frame } from 'patchright-core';
 import { generate_trajectory, } from 'cursory-ts';
-import { exec, execFile } from 'child_process';
+import { exec, execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -74,6 +74,14 @@ export class CaptchaKrakenSolver {
   // (independent of CAPTCHA_DEBUG) so we capture the hard-to-reproduce timing.
   private gridDebugDir: string | null = null;
   private gridDebugSeq: number = 0;
+  // Persistent CV worker (`python -m src.cli serve`) — one long-lived process
+  // that answers find-grid / grid-cell-states polls over stdin/stdout, so the
+  // hot poll loops pay one ~0.4s interpreter+cv2 import ONCE instead of per poll.
+  private cvWorker: ChildProcessWithoutNullStreams | null = null;
+  private cvWorkerReady: Promise<boolean> | null = null;
+  private cvWorkerSeq: number = 0;
+  private cvWorkerPending: Map<number, { resolve: (v: any) => void; reject: (e: any) => void }> = new Map();
+  private cvWorkerBuf: string = '';
 
   constructor(config: CaptchaKrakenConfig) {
     this.config = config;
@@ -81,6 +89,17 @@ export class CaptchaKrakenSolver {
   }
 
   async solve(page: Page): Promise<SolveResult | void> {
+    try {
+      return await this.solveImpl(page);
+    } finally {
+      // Always shut the persistent CV worker down when a solve ends (success,
+      // failure, or timeout) so we never leak a python process between solves.
+      this.teardownCvWorker();
+      this.cvWorkerReady = null;
+    }
+  }
+
+  private async solveImpl(page: Page): Promise<SolveResult | void> {
     const maxSolveLoops = this.config.maxSolveLoops ?? 10;
     const postSolveDelayMs = this.config.postSolveDelayMs ?? 1200;
     const overallSolveTimeoutMs = this.config.overallSolveTimeoutMs ?? 120_000;
@@ -633,10 +652,15 @@ export class CaptchaKrakenSolver {
   /**
    * Initialize a fresh dump directory for one reCAPTCHA 3x3 dynamic-driver
    * session. Frames + a state.jsonl log land here so the click/fade/wait timing
-   * can be replayed offline. Captured unconditionally (the timing bugs don't
-   * reproduce on demand). Best-effort.
+   * can be replayed offline. Gated on CAPTCHA_DEBUG=1 — the per-frame dumps and
+   * extra state queries add latency, so they stay off in normal runs. Set
+   * CAPTCHA_DEBUG=1 to capture them when diagnosing timing. Best-effort.
    */
   private initGridDebug(): void {
+    if (process.env.CAPTCHA_DEBUG !== '1') {
+      this.gridDebugDir = null;
+      return;
+    }
     try {
       const cliRoot = this.config.repoPath ?? getBundledCliRoot();
       const base = path.join(cliRoot, 'latestDebugRun_grid');
@@ -658,10 +682,11 @@ export class CaptchaKrakenSolver {
    * record can be matched to the exact pixels the detector saw. Best-effort.
    */
   private gridDebug(event: string, data: Record<string, any> = {}, framePath?: string): void {
-    const seq = ++this.gridDebugSeq;
-    const line = `[grid-debug #${seq}] ${event} ${JSON.stringify(data)}`;
-    console.log(line);
+    // No-op unless grid debugging is active (CAPTCHA_DEBUG=1). Keeps the verbose
+    // per-poll trace + frame dumps off the hot path in normal runs.
     if (!this.gridDebugDir) return;
+    const seq = ++this.gridDebugSeq;
+    console.log(`[grid-debug #${seq}] ${event} ${JSON.stringify(data)}`);
     try {
       let savedFrame: string | undefined;
       if (framePath && fs.existsSync(framePath)) {
@@ -789,6 +814,113 @@ export class CaptchaKrakenSolver {
   }
 
   /**
+   * Lazily start the persistent CV worker (`python -m src.cli serve`) and resolve
+   * once it has imported cv2/numpy and emitted its `{"ready":true}` handshake.
+   * Returns false if it can't be started (caller then falls back to one-shot
+   * subprocesses). Idempotent: subsequent calls await the same readiness promise.
+   */
+  private ensureCvWorker(): Promise<boolean> {
+    if (this.cvWorkerReady) return this.cvWorkerReady;
+    this.cvWorkerReady = new Promise<boolean>((resolve) => {
+      try {
+        const { cliRoot, py } = this.resolveCli();
+        const proc = spawn(py, ['-m', 'src.cli', 'serve'], { cwd: cliRoot, env: process.env });
+        this.cvWorker = proc;
+
+        let settled = false;
+        const fail = () => {
+          if (!settled) { settled = true; resolve(false); }
+          this.teardownCvWorker();
+        };
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+          this.cvWorkerBuf += chunk.toString();
+          let nl: number;
+          while ((nl = this.cvWorkerBuf.indexOf('\n')) >= 0) {
+            const line = this.cvWorkerBuf.slice(0, nl).trim();
+            this.cvWorkerBuf = this.cvWorkerBuf.slice(nl + 1);
+            if (!line) continue;
+            let msg: any;
+            try { msg = JSON.parse(line); } catch { continue; }
+            if (!settled && msg.ready === true) { settled = true; resolve(true); continue; }
+            if (typeof msg.id === 'number' && this.cvWorkerPending.has(msg.id)) {
+              const p = this.cvWorkerPending.get(msg.id)!;
+              this.cvWorkerPending.delete(msg.id);
+              if (msg.ok) p.resolve(msg.result);
+              else p.reject(new Error(msg.error || 'cv worker error'));
+            }
+          }
+        });
+        proc.on('error', fail);
+        proc.on('exit', () => {
+          // Reject any in-flight requests so callers fall back rather than hang.
+          for (const [, p] of this.cvWorkerPending) p.reject(new Error('cv worker exited'));
+          this.cvWorkerPending.clear();
+          fail();
+        });
+        // Bounded readiness wait — if imports stall, fall back to one-shot.
+        setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, 8000);
+      } catch {
+        resolve(false);
+      }
+    });
+    return this.cvWorkerReady;
+  }
+
+  /** Send one request to the CV worker and await its JSON result. Throws on any
+   *  worker failure so callers can fall back to the one-shot path. */
+  private cvWorkerRequest(payload: Record<string, any>, timeoutMs = 10000): Promise<any> {
+    const proc = this.cvWorker;
+    if (!proc || proc.exitCode !== null) return Promise.reject(new Error('cv worker not running'));
+    const id = ++this.cvWorkerSeq;
+    return new Promise<any>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.cvWorkerPending.delete(id)) reject(new Error('cv worker request timeout'));
+      }, timeoutMs);
+      this.cvWorkerPending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      try {
+        proc.stdin.write(JSON.stringify({ id, ...payload }) + '\n');
+      } catch (e) {
+        this.cvWorkerPending.delete(id);
+        clearTimeout(timer);
+        reject(e);
+      }
+    });
+  }
+
+  /** Kill the worker and clear state. Safe to call repeatedly. */
+  private teardownCvWorker(): void {
+    const proc = this.cvWorker;
+    this.cvWorker = null;
+    if (proc) { try { proc.kill(); } catch { /* best-effort */ } }
+  }
+
+  /**
+   * Run a CV tool through the persistent worker when available, falling back to a
+   * one-shot `runCliTool` subprocess otherwise. `cmd`/`payload` map to the
+   * worker's protocol; `fallbackArgs` is the equivalent one-shot argv. Worker
+   * results are wrapped to match the one-shot JSON shape:
+   *   - grid-cell-states[-fixed]: worker returns the states object directly, or
+   *     {grid:null}; the one-shot returns the same shape, so just pass through.
+   *   - find-grid: worker returns the array (or null) as `result`.
+   * Best-effort: never throws.
+   */
+  private async runCvTool(cmd: string, payload: Record<string, any>, fallbackArgs: string[]): Promise<any> {
+    try {
+      if (await this.ensureCvWorker()) {
+        const result = await this.cvWorkerRequest({ cmd, ...payload });
+        return result;
+      }
+    } catch {
+      // fall through to one-shot
+    }
+    return this.runCliTool(fallbackArgs);
+  }
+
+  /**
    * Block until a reCAPTCHA grid's cells have settled — none blank, none
    * mid-fade — before we screenshot it for the model. reCAPTCHA fades new tiles
    * in over ~1s; capturing mid-fade feeds the LoRA a blank/partial grid.
@@ -804,7 +936,7 @@ export class CaptchaKrakenSolver {
     captchaElement: ElementHandle,
     opts?: { intervalMs?: number; timeoutMs?: number },
   ): Promise<boolean> {
-    const interval = opts?.intervalMs ?? this.config.gridLoadPollIntervalMs ?? 500;
+    const interval = opts?.intervalMs ?? this.config.gridLoadPollIntervalMs ?? 250;
     const timeout = opts?.timeoutMs ?? this.config.gridLoadTimeoutMs ?? 8000;
     const start = Date.now();
     const frames: string[] = [];
@@ -821,7 +953,7 @@ export class CaptchaKrakenSolver {
         if (frames.length >= 2) {
           const a = frames[frames.length - 2];
           const b = frames[frames.length - 1];
-          const res = await this.runCliTool(['grid-cell-states', a, b]);
+          const res = await this.runCvTool('grid-cell-states', { a, b }, ['grid-cell-states', a, b]);
           // `{grid: null}` => grid not painted yet; keep polling. A real grid
           // result with no empty/changing cells and >=1 loaded cell => settled.
           const gridFound = res && res.grid !== null && Array.isArray(res.loaded);
@@ -894,7 +1026,7 @@ export class CaptchaKrakenSolver {
     const f = path.join(os.tmpdir(), `findgrid_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
     try {
       await captchaElement.screenshot({ path: f });
-      const res = await this.runCliTool(['find-grid', f]);
+      const res = await this.runCvTool('find-grid', { image: f }, ['find-grid', f]);
       if (!Array.isArray(res) || (res.length !== 9 && res.length !== 16)) {
         return null;
       }
@@ -981,7 +1113,11 @@ export class CaptchaKrakenSolver {
     frameB: string,
   ): Promise<GridCellStates | null> {
     const boxesJson = JSON.stringify(session.gridBoxes);
-    const res = await this.runCliTool(['grid-cell-states-fixed', frameA, frameB, boxesJson]);
+    const res = await this.runCvTool(
+      'grid-cell-states-fixed',
+      { a: frameA, b: frameB, grid_boxes: session.gridBoxes },
+      ['grid-cell-states-fixed', frameA, frameB, boxesJson],
+    );
     if (!res || !Array.isArray(res.empty)) return null;
     return {
       empty: res.empty ?? [],
@@ -1020,6 +1156,7 @@ export class CaptchaKrakenSolver {
     priority: number[] = [],
   ): Promise<number[]> {
     const grace = this.config.recaptchaFadeOnsetGraceMs ?? 4000;
+    const interval = this.config.recaptchaDynamicFadePollMs ?? 250;
     const start = Date.now();
     const frames: string[] = [];
     const tmp = () => path.join(os.tmpdir(), `loadchk_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
@@ -1038,11 +1175,17 @@ export class CaptchaKrakenSolver {
 
       let polls = 0;
       while (Date.now() - start < grace) {
-        // Keep the mouse moving over a clicked tile during the wait.
+        // Keep the mouse moving over a clicked tile during the wait, and enforce
+        // a minimum inter-frame gap so the change detector has a real diff (the
+        // worker query is near-instant, so without this polls could fire back-to-
+        // back on near-identical frames and miss a slow fade).
+        const iterStart = Date.now();
         if (priority.length) {
           await this.hoverCell(page, session, priority[hoverIdx % priority.length]).catch(() => {});
           hoverIdx++;
         }
+        const elapsed = Date.now() - iterStart;
+        if (elapsed < interval) await delay(interval - elapsed);
         const f = tmp();
         await captchaElement.screenshot({ path: f });
         frames.push(f);
@@ -1099,7 +1242,7 @@ export class CaptchaKrakenSolver {
     fadingCells: number[],
   ): Promise<boolean> {
     if (!fadingCells.length) return true;
-    const interval = this.config.recaptchaDynamicFadePollMs ?? 400;
+    const interval = this.config.recaptchaDynamicFadePollMs ?? 250;
     const timeout = this.config.recaptchaDynamicFadeWaitMs ?? 6000;
     const hoverEnabled = this.config.recaptchaTileHoverEnabled ?? true;
     const start = Date.now();
@@ -1111,12 +1254,16 @@ export class CaptchaKrakenSolver {
     try {
       while (Date.now() - start < timeout) {
         // Move over a fading tile each iteration — human waiting for the image.
+        // Always enforce a minimum inter-frame gap so the change detector has a
+        // real diff to work with even when the (now near-instant) worker query
+        // would otherwise let polls fire back-to-back.
+        const iterStart = Date.now();
         if (hoverEnabled) {
           await this.hoverCell(page, session, fadingCells[hoverIdx % fadingCells.length]).catch(() => {});
           hoverIdx++;
-        } else {
-          await delay(interval);
         }
+        const elapsed = Date.now() - iterStart;
+        if (elapsed < interval) await delay(interval - elapsed);
         const f = tmp();
         await captchaElement.screenshot({ path: f });
         frames.push(f);
@@ -1210,14 +1357,18 @@ export class CaptchaKrakenSolver {
       const shotA = path.join(os.tmpdir(), `recap_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
       await captchaElement.screenshot({ path: shotA });
       this.saveImageForDebug(shotA);
-      // Log the grid state the model is about to see.
-      const preState = await this.gridCellStates(session, shotA, shotA);
-      this.gridDebug(`round-${round}:pre-solve`, {
-        round, pendingRetry,
-        empty: preState?.empty ?? null, changing: preState?.changing ?? null,
-        loaded: preState?.loaded ?? null, selected: preState?.selected ?? null,
-        clickedOrder: [...clickedOrder],
-      }, shotA);
+      // Log the grid state the model is about to see — diagnostic only, so we
+      // skip the extra state query unless grid debugging is active (keeps it off
+      // the critical path in normal runs).
+      if (this.gridDebugDir) {
+        const preState = await this.gridCellStates(session, shotA, shotA);
+        this.gridDebug(`round-${round}:pre-solve`, {
+          round, pendingRetry,
+          empty: preState?.empty ?? null, changing: preState?.changing ?? null,
+          loaded: preState?.loaded ?? null, selected: preState?.selected ?? null,
+          clickedOrder: [...clickedOrder],
+        }, shotA);
+      }
 
       let action: CaptchaAction | null = null;
       try {
