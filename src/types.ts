@@ -53,8 +53,10 @@ export interface CaptchaKrakenConfig {
   /**
    * Poll interval (ms) for the reCAPTCHA grid-cell-load wait — how often the
    * solver re-screenshots the grid while waiting for tiles to stop fading in.
+   * Doubles as the inter-frame gap for the settle change-detector, so keep it
+   * comfortably above zero.
    *
-   * Default: 500
+   * Default: 250
    */
   gridLoadPollIntervalMs?: number;
 
@@ -77,11 +79,13 @@ export interface CaptchaKrakenConfig {
   recaptchaDynamicFadeWaitMs?: number;
 
   /**
-   * reCAPTCHA 3x3 dynamic puzzles only. Poll cadence (ms) for the post-click
-   * tile-settle detection in waitForAnyClickedTileLoaded and the fade-onset
-   * detection in currentLoadingCells.
+   * reCAPTCHA 3x3 dynamic puzzles only. Minimum gap (ms) between the two frames
+   * the fade detectors diff, and the poll cadence for waitForAnyClickedTileLoaded
+   * / currentLoadingCells. Kept comfortably above zero so two consecutive frames
+   * during a slow fade differ enough for the change detector to fire (frames
+   * captured back-to-back can look identical mid-fade and read as "loaded").
    *
-   * Default: 400
+   * Default: 250
    */
   recaptchaDynamicFadePollMs?: number;
 
