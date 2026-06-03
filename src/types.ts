@@ -49,6 +49,73 @@ export interface CaptchaKrakenConfig {
    * Default: 120000 (2 minutes)
    */
   overallSolveTimeoutMs?: number;
+
+  /**
+   * Poll interval (ms) for the reCAPTCHA grid-cell-load wait — how often the
+   * solver re-screenshots the grid while waiting for tiles to stop fading in.
+   *
+   * Default: 500
+   */
+  gridLoadPollIntervalMs?: number;
+
+  /**
+   * Overall timeout (ms) for the reCAPTCHA grid-cell-load wait. On timeout the
+   * solver proceeds to screenshot anyway (best-effort).
+   *
+   * Default: 8000
+   */
+  gridLoadTimeoutMs?: number;
+
+  /**
+   * reCAPTCHA 3x3 dynamic puzzles only. After clicking a round of tiles, the
+   * max time (ms) to wait for at least one clicked blank/fading tile to finish
+   * loading before re-screenshotting and re-solving. On timeout the solver
+   * proceeds anyway (best-effort, backstopped by overallSolveTimeoutMs).
+   *
+   * Default: 6000
+   */
+  recaptchaDynamicFadeWaitMs?: number;
+
+  /**
+   * reCAPTCHA 3x3 dynamic puzzles only. Poll cadence (ms) for the post-click
+   * tile-settle detection in waitForAnyClickedTileLoaded and the fade-onset
+   * detection in currentLoadingCells.
+   *
+   * Default: 400
+   */
+  recaptchaDynamicFadePollMs?: number;
+
+  /**
+   * reCAPTCHA 3x3 dynamic puzzles only. Grace window (ms) after clicking during
+   * which the solver watches the clicked tiles for the ONSET of a blank/fade
+   * before deciding the puzzle is solved. reCAPTCHA keeps a clicked tile
+   * SELECTED (showing its old image + a blue badge) for a couple of seconds and
+   * only THEN blanks it to swap in a replacement, so the window must comfortably
+   * exceed that delay or we submit while the refresh is still pending. If no
+   * clicked tile goes blank/changing within this window, the puzzle is treated
+   * as solved.
+   *
+   * Default: 4000
+   */
+  recaptchaFadeOnsetGraceMs?: number;
+
+  /**
+   * reCAPTCHA 3x3 dynamic puzzles only. Cap on the number of
+   * click → refresh → re-solve rounds within a single puzzle, independent of
+   * maxSolveLoops.
+   *
+   * Default: 8
+   */
+  recaptchaMaxDynamicRounds?: number;
+
+  /**
+   * reCAPTCHA 3x3 dynamic puzzles only. When true, the solver hovers the mouse
+   * over the just-clicked blank/fading tiles (in click order) while waiting for
+   * them to reload, mimicking a human. Disable to skip the hover behavior.
+   *
+   * Default: true
+   */
+  recaptchaTileHoverEnabled?: boolean;
 }
 
 export interface BoundingBox {

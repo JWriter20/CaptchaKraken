@@ -1,6 +1,6 @@
 import { Page, ElementHandle, Frame } from 'patchright-core';
-import { generate_trajectory } from 'cursory-ts';
-import { exec } from 'child_process';
+import { generate_trajectory, } from 'cursory-ts';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -9,6 +9,7 @@ import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveRes
 import { aggregateTokenUsage } from './token-usage';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 function getBundledCliRoot(): string {
   // When installed from npm, this file is in `<pkgRoot>/dist` (compiled) or `<pkgRoot>/src` (dev).
@@ -38,6 +39,28 @@ interface TimedVector {
   timestamp?: number;
 }
 
+/** Cached geometry for one reCAPTCHA 3x3 dynamic-puzzle session. */
+interface GridSession {
+  /** Grid cell boxes in SCREENSHOT pixel space, row-major, 0-indexed array. */
+  gridBoxes: number[][];
+  /** Playwright element box in PAGE css px (for mouse coords). */
+  elementBox: { x: number; y: number; width: number; height: number };
+  /** screenshot px -> page px. */
+  scaleX: number;
+  scaleY: number;
+  /** Screenshot dimensions the gridBoxes were computed against. */
+  screenshotW: number;
+  screenshotH: number;
+}
+
+/** Per-cell grid state from grid-cell-states-fixed (1-indexed cell numbers). */
+interface GridCellStates {
+  empty: number[];
+  changing: number[];
+  loaded: number[];
+  selected: number[];
+}
+
 const log = (message: string, ...args: any[]) => console.log(`[Solver] ${message}`, ...args);
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -46,6 +69,11 @@ export class CaptchaKrakenSolver {
   private lastMousePosition: Vector; // Start at safe position
   private imageCounter: number = 0; // Track images sent to CLI for debugging
   private sessionDebugDir: string | null = null;
+  // Dedicated dump dir for the reCAPTCHA 3x3 dynamic driver — frames + a JSONL
+  // state log so the click/fade/wait flow can be diagnosed offline. Always set
+  // (independent of CAPTCHA_DEBUG) so we capture the hard-to-reproduce timing.
+  private gridDebugDir: string | null = null;
+  private gridDebugSeq: number = 0;
 
   constructor(config: CaptchaKrakenConfig) {
     this.config = config;
@@ -81,6 +109,12 @@ export class CaptchaKrakenSolver {
     // burning loops on a stuck model only delays the inevitable fail.
     let pendingRetryMode: string | null = null;
     let alreadyRetriedRecaptchaError = false;
+    // Track whether we've interacted with the captcha at least once. Before any
+    // interaction, a null detectCaptcha() means "not rendered yet", not "solved".
+    let hasInteracted = false;
+    // Bounded wait for an in-DOM-but-still-rendering widget (Stage 1).
+    let renderWaits = 0;
+    const MAX_RENDER_WAITS = 6;
 
     for (let attempt = 1; attempt <= maxSolveLoops; attempt++) {
       if (Date.now() - start > overallSolveTimeoutMs) {
@@ -89,20 +123,64 @@ export class CaptchaKrakenSolver {
 
       const captchaElement = await this.detectCaptcha(page);
       if (!captchaElement) {
-        console.log('No supported captcha found.');
-        return {
-          isSolved: true,
-          finalMousePosition: this.lastMousePosition,
-          tokenUsage: aggregateTokenUsage(cumulativeTokenUsage)
-        };
+        // Two-stage detection. detectCaptcha() returns null when there's no
+        // VISIBLE, unsolved widget — but that splits into two cases:
+        if (hasInteracted) {
+          // We already clicked/solved something and now nothing actionable
+          // remains → treat as solved.
+          console.log('No supported captcha found (post-interaction); considering solved.');
+          return {
+            isSolved: true,
+            finalMousePosition: this.lastMousePosition,
+            tokenUsage: aggregateTokenUsage(cumulativeTokenUsage)
+          };
+        }
+
+        // No interaction yet. Stage 1: is an interactive widget present in the
+        // DOM but simply not finished rendering?
+        if (await this.hasInteractiveWidgetInDom(page) && renderWaits < MAX_RENDER_WAITS) {
+          renderWaits++;
+          console.log(
+            `Captcha widget present in DOM but not yet rendered; waiting `
+            + `(${renderWaits}/${MAX_RENDER_WAITS}).`
+          );
+          await delay(800 + Math.random() * 300);
+          continue;
+        }
+
+        // No interactive widget in the DOM (reCAPTCHA v3 / invisible, or an
+        // hCaptcha that only triggers on user action), or it never rendered.
+        // Fail fast rather than burning the whole loop budget.
+        throw new Error(
+          'No interactive captcha widget detected (likely reCAPTCHA v3 / '
+          + 'invisible or a click-triggered challenge). Failing fast.'
+        );
       }
 
       console.log(`\n--- Captcha Solve Loop ${attempt}/${maxSolveLoops} ---`);
       const retryModeThisLoop = pendingRetryMode;
       pendingRetryMode = null;
-      const { didInteract, tokenUsage } = await this.solveSingle(
-        page, captchaElement, attempt, retryModeThisLoop,
-      );
+
+      let didInteract: boolean;
+      let tokenUsage: TokenUsage[];
+      try {
+        ({ didInteract, tokenUsage } = await this.solveSingle(
+          page, captchaElement, attempt, retryModeThisLoop,
+        ));
+      } catch (e: any) {
+        // Stage 2: the widget rendered and we screenshotted it, but the CLI
+        // says the puzzle TYPE is unsupported (e.g. hCaptcha click/drag). This
+        // is a definitive verdict on a rendered frame — fail fast, don't retry.
+        if (e?.unsupported) {
+          throw new Error(
+            'Cannot solve this kind of captcha — the rendered puzzle is not a '
+            + 'supported grid or checkbox (likely an hCaptcha click/drag puzzle).'
+          );
+        }
+        throw e;
+      }
+      hasInteracted = hasInteracted || didInteract;
+      renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
 
       // Let the page update (challenge frame open, images refresh, verification, etc.)
@@ -148,13 +226,6 @@ export class CaptchaKrakenSolver {
   }
 
   private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: string | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
-    // 1. Take Screenshot
-    const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-    await captchaElement.screenshot({ path: screenshotPath });
-
-    // Save image to debug directory if debugging is enabled
-    this.saveImageForDebug(screenshotPath);
-
     // Vendor hint helps the CLI route to the right pipeline (hCaptcha click
     // puzzles must never go through grid detection — find_grid false-positives
     // on the header+footer bands).
@@ -164,6 +235,56 @@ export class CaptchaKrakenSolver {
       : src && src.includes('recaptcha/api2')
         ? 'recaptcha'
         : 'unknown';
+
+    // hCaptcha swaps the challenge images in asynchronously — the iframe is
+    // "visible" the instant the frame opens, but the task tiles paint a beat
+    // later. Screenshotting that gap captures a blank/partial grid, which the
+    // CLI then classifies as an unsupported puzzle and fails fast. Block until
+    // the tiles have actually loaded before grabbing the frame.
+    if (puzzleSource === 'hcaptcha' && src && src.includes('frame=challenge')) {
+      await this.waitForHcaptchaChallengeImages(captchaElement);
+    }
+
+    // Only the image-challenge frame (bframe) holds a grid. The anchor checkbox
+    // (api2/anchor) has none — running the grid settle/detect on it just wastes
+    // an 8s timeout + a find-grid subprocess before the checkbox click. Gate the
+    // grid handling to the bframe.
+    const isRecaptchaChallenge = puzzleSource === 'recaptcha'
+      && !!src && src.includes('recaptcha/api2/bframe');
+
+    // reCAPTCHA fades new tiles in over ~1s (initial load and the in-place
+    // dynamic refresh after a click). Screenshotting mid-fade feeds the LoRA a
+    // blank/partial grid. Poll until the grid's cells have settled before
+    // grabbing the frame. Best-effort — falls through on timeout. The in-place
+    // refresh re-enters solveSingle each loop, so this guard covers it too.
+    // True only for a one-shot reCAPTCHA grid (4x4): click all matching tiles,
+    // then submit in the same pass — these never blank/fade, so there's no
+    // dynamic-refresh loop to run.
+    let isRecaptchaOneShotGrid = false;
+    if (isRecaptchaChallenge) {
+      await this.waitForGridCellsLoaded(captchaElement);
+      // 3x3 reCAPTCHA puzzles refresh tiles in place (blank/fade → new image),
+      // so they need the multi-round driver: click → hover/wait for fades →
+      // re-solve, submitting only when the CLI says `done`. 4x4 puzzles only ever
+      // return `checked` (no in-place refresh) and are one-shot like hCaptcha.
+      // Falls through if the grid can't be established.
+      const grid = await this.getGridBoxes(captchaElement);
+      if (grid && grid.size === 3) {
+        const elementBox = await captchaElement.boundingBox();
+        if (elementBox) {
+          return this.solveRecaptchaGrid(page, captchaElement, attempt, retryMode, grid, elementBox);
+        }
+      } else if (grid && grid.size === 4) {
+        isRecaptchaOneShotGrid = true;
+      }
+    }
+
+    // 1. Take Screenshot
+    const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    await captchaElement.screenshot({ path: screenshotPath });
+
+    // Save image to debug directory if debugging is enabled
+    this.saveImageForDebug(screenshotPath);
 
     let performedAction = false;
     let allTokenUsage: TokenUsage[] = [];
@@ -187,6 +308,8 @@ export class CaptchaKrakenSolver {
       }
 
       console.log(`Executing ${actionList.length} actions.`);
+      const frame = await captchaElement.contentFrame();
+      let verifyButton: ElementHandle | null = null;
 
       for (const action of actionList) {
         if (action.action === 'click') {
@@ -217,65 +340,31 @@ export class CaptchaKrakenSolver {
             performedAction = true;
           }
         }
+        if (frame) {
+          verifyButton = await this.getVerifyButton(frame);
+          if (verifyButton) {
+            await this.move(page, verifyButton);
+          }
+        }
         // 'done' actions intentionally fall through to the Verify-button block below.
       }
 
       // Submit policy:
       //   - hCaptcha: every puzzle is one-shot. Tiles don't refresh in place;
       //     we must click Verify after our selection to submit and advance.
-      //   - reCAPTCHA: tiles refresh in place ("select all squares with X"
-      //     keeps going as new tiles fade in). Only submit when the LoRA
-      //     returned no actions (empty selection / 'done').
-      const shouldClickSubmit = !performedAction || puzzleSource === 'hcaptcha';
-      if (shouldClickSubmit) {
+      //   - reCAPTCHA 4x4: one-shot too — never blanks/fades — so submit right
+      //     after clicking. (3x3 is dynamic and never reaches this path; it's
+      //     handled by solveRecaptchaGrid above.)
+      //   - Otherwise (no action / 'done'): submit to advance.
+      const shouldClickSubmit = !performedAction
+        || puzzleSource === 'hcaptcha'
+        || isRecaptchaOneShotGrid;
+      if (shouldClickSubmit && frame && verifyButton) {
         console.log(performedAction
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
           : 'No active actions performed (empty or done). Checking for Verify/Next button...');
-        const contentFrame = await captchaElement.contentFrame();
-        if (contentFrame) {
-          let submitted = false;
+        await this.moveAndClick(page, verifyButton);
 
-          // 1. Try generic button selectors by text
-          const buttonTexts = ['Verify', 'Next', 'Submit', 'Skip'];
-          for (const text of buttonTexts) {
-            try {
-              // Case-insensitive contains for text
-              const btn = await contentFrame.$(
-                `xpath=//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')] | //div[@role="button" and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`
-              );
-              if (btn && await btn.isVisible()) {
-                console.log(`Clicking button with text "${text}"`);
-                await this.moveAndClick(page, btn);
-                submitted = true;
-                break;
-              }
-            } catch (e) {
-              // Ignore locator errors
-            }
-          }
-
-          if (!submitted) {
-            // 2. Try specific ID (Recaptcha)
-            const recaptchaVerify = await contentFrame.$('#recaptcha-verify-button');
-            if (recaptchaVerify && await recaptchaVerify.isVisible()) {
-              console.log('Clicking Recaptcha Verify/Next button by ID');
-              await this.moveAndClick(page, recaptchaVerify);
-              submitted = true;
-            }
-          }
-
-          if (!submitted) {
-            // 3. Try specific class (hCaptcha)
-            const hcaptchaVerify = await contentFrame.$('.button-submit');
-            if (hcaptchaVerify && await hcaptchaVerify.isVisible()) {
-              console.log('Clicking hCaptcha Verify/Submit button by Class');
-              await this.moveAndClick(page, hcaptchaVerify);
-              submitted = true;
-            }
-          }
-
-          if (submitted) performedAction = true;
-        }
       }
     } finally {
       // Cleanup
@@ -285,6 +374,43 @@ export class CaptchaKrakenSolver {
     }
 
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
+  }
+
+  private async getVerifyButton(frame: Frame): Promise<ElementHandle | null> {
+    let submitted = false;
+
+    // 1. Try generic button selectors by text
+    const buttonTexts = ['Verify', 'Next', 'Submit', 'Skip'];
+    for (const text of buttonTexts) {
+      try {
+        // Case-insensitive contains for text
+        const btn = await frame.$(
+          `xpath=//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')] | //div[@role="button" and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`
+        );
+        if (btn && await btn.isVisible()) {
+          return btn;
+        }
+      } catch (e) {
+        // Ignore locator errors
+      }
+    }
+
+    if (!submitted) {
+      // 2. Try specific ID (Recaptcha)
+      const recaptchaVerify = await frame.$('#recaptcha-verify-button');
+      if (recaptchaVerify && await recaptchaVerify.isVisible()) {
+        return recaptchaVerify;
+      }
+    }
+
+    if (!submitted) {
+      // 3. Try specific class (hCaptcha)
+      const hcaptchaVerify = await frame.$('.button-submit');
+      if (hcaptchaVerify && await hcaptchaVerify.isVisible()) {
+        return hcaptchaVerify;
+      }
+    }
+    return null;
   }
 
   private async hasNonEmptyFieldValue(page: Page, selector: string): Promise<boolean> {
@@ -367,6 +493,92 @@ export class CaptchaKrakenSolver {
     }
   }
 
+  /**
+   * Block until the hCaptcha challenge frame's task images have actually
+   * painted, so we don't screenshot a blank/half-loaded grid.
+   *
+   * hCaptcha renders each grid tile as a `.task-image .image` div whose
+   * `background-image` is set once the asset loads; the prompt sits in
+   * `.prompt-text`. Image-select (click/drag) challenges use a single
+   * `.challenge-example` / `canvas` surface instead. We wait for either family
+   * to be present AND for the background-image URLs to be populated (not the
+   * empty `url("")` placeholder hCaptcha ships before the asset arrives).
+   *
+   * Best-effort: a timeout or a missing content frame just falls through to the
+   * screenshot rather than throwing — the existing fail-fast path still covers a
+   * genuinely unsupported puzzle.
+   */
+  private async waitForHcaptchaChallengeImages(challengeIframe: ElementHandle): Promise<void> {
+    try {
+      const frame = await challengeIframe.contentFrame();
+      if (!frame) return;
+
+      // Prompt must be present and non-empty first — it's the cheapest signal
+      // that the challenge frame has rendered its content at all.
+      await frame.waitForSelector('.prompt-text', { state: 'visible', timeout: 8000 });
+
+      // Then wait for the actual imagery to load. Grid tiles expose a
+      // background-image; click/drag puzzles expose a canvas or example image.
+      await frame.waitForFunction(() => {
+        const tiles = Array.from(
+          document.querySelectorAll('.task-image .image, .task .image'),
+        ) as HTMLElement[];
+        if (tiles.length > 0) {
+          // Every visible tile must have a real background-image URL.
+          return tiles.every((el) => {
+            const bg = getComputedStyle(el).backgroundImage;
+            return bg && bg !== 'none' && !/url\(["']?["']?\)/.test(bg);
+          });
+        }
+        // Non-grid (click/drag) challenge: a painted canvas or loaded example img.
+        const canvas = document.querySelector('canvas');
+        if (canvas instanceof HTMLCanvasElement && canvas.width > 0 && canvas.height > 0) {
+          return true;
+        }
+        const example = document.querySelector(
+          '.challenge-example img, .image-wrapper img',
+        ) as HTMLImageElement | null;
+        return !!(example && example.complete && example.naturalWidth > 0);
+      }, { timeout: 8000 });
+    } catch {
+      // Timed out or frame detached mid-load; fall through to the screenshot.
+    }
+  }
+
+  /**
+   * Stage-1 detection: is an *interactive* captcha widget present in the DOM at
+   * all — even if its iframe hasn't finished rendering yet?
+   *
+   * This is deliberately broader than detectCaptcha (which only returns a
+   * VISIBLE, not-yet-solved element). We use it to distinguish two cases that
+   * detectCaptcha() === null cannot tell apart:
+   *
+   *   - A reCAPTCHA-v2 / hCaptcha widget IS in the DOM but is still loading
+   *     (iframe present, glyph not painted) → we should WAIT for it.
+   *   - There is no interactive widget — reCAPTCHA v3 (score-based, invisible)
+   *     or an hCaptcha that only triggers on a user action → we must FAIL FAST.
+   *
+   * reCAPTCHA v3 injects only `iframe[src*="recaptcha/api2/anchor"]` with
+   * `size=invisible` in the src, and never an `api2/bframe` challenge frame, so
+   * we exclude the invisible variant here.
+   */
+  public async hasInteractiveWidgetInDom(page: Page): Promise<boolean> {
+    // reCAPTCHA v2 anchor, but NOT the invisible (v3 / invisible-v2) variant.
+    const recaptchaAnchors = await page.$$('iframe[src*="recaptcha/api2/anchor"]');
+    for (const a of recaptchaAnchors) {
+      const src = (await a.getAttribute('src')) ?? '';
+      if (!/[?&]size=invisible/.test(src)) return true;
+    }
+    // reCAPTCHA challenge frame present at all → definitely interactive.
+    if (await page.$('iframe[src*="recaptcha/api2/bframe"]')) return true;
+
+    // hCaptcha checkbox or challenge frame present (visible or not yet).
+    if (await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]')) return true;
+    if (await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]')) return true;
+
+    return false;
+  }
+
   public async detectCaptcha(page: Page): Promise<ElementHandle | null> {
     // Prioritize open challenges (the grid/images) over the initial checkbox
 
@@ -416,6 +628,51 @@ export class CaptchaKrakenSolver {
     }
 
     return null;
+  }
+
+  /**
+   * Initialize a fresh dump directory for one reCAPTCHA 3x3 dynamic-driver
+   * session. Frames + a state.jsonl log land here so the click/fade/wait timing
+   * can be replayed offline. Captured unconditionally (the timing bugs don't
+   * reproduce on demand). Best-effort.
+   */
+  private initGridDebug(): void {
+    try {
+      const cliRoot = this.config.repoPath ?? getBundledCliRoot();
+      const base = path.join(cliRoot, 'latestDebugRun_grid');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      this.gridDebugDir = path.join(base, `griddrv_${stamp}_${Math.floor(Math.random() * 1e6)}`);
+      this.gridDebugSeq = 0;
+      fs.mkdirSync(this.gridDebugDir, { recursive: true });
+      console.log(`[grid-debug] dumping driver frames + state to: ${this.gridDebugDir}`);
+    } catch (e) {
+      this.gridDebugDir = null;
+      console.warn(`[grid-debug] could not init debug dir: ${e}`);
+    }
+  }
+
+  /**
+   * Log a structured event for the grid driver: prints a one-line summary to the
+   * console and appends a JSON record to state.jsonl. If `framePath` is given,
+   * copies that frame into the dump dir under a sequenced, labeled name so the
+   * record can be matched to the exact pixels the detector saw. Best-effort.
+   */
+  private gridDebug(event: string, data: Record<string, any> = {}, framePath?: string): void {
+    const seq = ++this.gridDebugSeq;
+    const line = `[grid-debug #${seq}] ${event} ${JSON.stringify(data)}`;
+    console.log(line);
+    if (!this.gridDebugDir) return;
+    try {
+      let savedFrame: string | undefined;
+      if (framePath && fs.existsSync(framePath)) {
+        savedFrame = `${String(seq).padStart(3, '0')}_${event}.png`;
+        fs.copyFileSync(framePath, path.join(this.gridDebugDir, savedFrame));
+      }
+      const record = { seq, t: new Date().toISOString(), event, ...data, frame: savedFrame };
+      fs.appendFileSync(path.join(this.gridDebugDir, 'state.jsonl'), JSON.stringify(record) + '\n');
+    } catch {
+      // best-effort; never fail the solve over debug I/O
+    }
   }
 
   private saveImageForDebug(imagePath: string): void {
@@ -488,16 +745,14 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null): Promise<CliResponse> {
-    // v2 ships a single provider: local vLLM via the bundled CaptchaKraken CLI.
-    // The CLI's planner reads VLLM_BASE_URL / VLLM_API_KEY from the environment.
-    const {
-      repoPath,
-      pythonCommand = 'python',
-      model = 'captcha',  // vLLM LoRA name (see /etc/systemd/system/vllm.service)
-      apiKey = process.env.VLLM_API_KEY,
-    } = this.config;
-
+  /**
+   * Resolve the bundled CaptchaKraken CLI root and the python interpreter to
+   * run it with. Prefers the packaged venv python (postinstall bootstrap),
+   * falling back to the configured/`python` command. Throws if the CLI folder
+   * is missing — callers that must not throw (e.g. runCliTool) wrap this.
+   */
+  private resolveCli(): { cliRoot: string; py: string } {
+    const { repoPath, pythonCommand = 'python' } = this.config;
     const cliRoot = repoPath ?? getBundledCliRoot();
     if (!fs.existsSync(cliRoot)) {
       throw new Error(
@@ -505,10 +760,581 @@ export class CaptchaKrakenSolver {
         `If you installed from npm, ensure the package ships 'CaptchaKraken-cli/'.`
       );
     }
+    const py = getVenvPython(cliRoot) ?? pythonCommand;
+    return { cliRoot, py };
+  }
 
-    // Prefer the packaged venv python if present (postinstall bootstrap), otherwise fall back.
-    const venvPython = getVenvPython(cliRoot);
-    const py = venvPython ?? pythonCommand;
+  /**
+   * Run an OpenCV tool subcommand of the CLI (e.g. `grid-cell-states a.png
+   * b.png`) and return its parsed single-line JSON. These subcommands print
+   * exactly one JSON object on stdout (timing records go to stderr), so we
+   * parse the whole trimmed stdout. Best-effort: returns `{}` on any failure so
+   * polling callers can treat it as "inconclusive, keep going" without throwing.
+   */
+  private async runCliTool(args: string[]): Promise<any> {
+    try {
+      const { cliRoot, py } = this.resolveCli();
+      // Use execFile (no shell) so args containing JSON / brackets / spaces —
+      // e.g. the grid_boxes payload for grid-cell-states-fixed — are passed
+      // literally without any shell quoting/globbing hazards.
+      const { stdout } = await execFileAsync(py, ['-m', 'src.cli', ...args], {
+        cwd: cliRoot,
+        env: process.env,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      return JSON.parse(stdout.trim());
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Block until a reCAPTCHA grid's cells have settled — none blank, none
+   * mid-fade — before we screenshot it for the model. reCAPTCHA fades new tiles
+   * in over ~1s; capturing mid-fade feeds the LoRA a blank/partial grid.
+   *
+   * We poll: screenshot the challenge element, keep the last two frames, and ask
+   * the CLI's batched `grid-cell-states` (one subprocess per poll) which cells
+   * are empty/changing/loaded. We return as soon as every cell is loaded, or on
+   * timeout. Best-effort, mirroring `waitForHcaptchaChallengeImages`: never
+   * throws, and falls through on timeout so a stuck/odd grid still proceeds to
+   * the normal screenshot path. Temp frames are always cleaned up.
+   */
+  private async waitForGridCellsLoaded(
+    captchaElement: ElementHandle,
+    opts?: { intervalMs?: number; timeoutMs?: number },
+  ): Promise<boolean> {
+    const interval = opts?.intervalMs ?? this.config.gridLoadPollIntervalMs ?? 500;
+    const timeout = opts?.timeoutMs ?? this.config.gridLoadTimeoutMs ?? 8000;
+    const start = Date.now();
+    const frames: string[] = [];
+    const tmp = () => path.join(
+      os.tmpdir(),
+      `gridpoll_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
+    );
+    try {
+      while (Date.now() - start < timeout) {
+        const f = tmp();
+        await captchaElement.screenshot({ path: f });
+        frames.push(f);
+
+        if (frames.length >= 2) {
+          const a = frames[frames.length - 2];
+          const b = frames[frames.length - 1];
+          const res = await this.runCliTool(['grid-cell-states', a, b]);
+          // `{grid: null}` => grid not painted yet; keep polling. A real grid
+          // result with no empty/changing cells and >=1 loaded cell => settled.
+          const gridFound = res && res.grid !== null && Array.isArray(res.loaded);
+          if (
+            gridFound
+            && Array.isArray(res.empty) && res.empty.length === 0
+            && Array.isArray(res.changing) && res.changing.length === 0
+            && res.loaded.length > 0
+          ) {
+            return true;
+          }
+          // Drop the older frame so disk use stays bounded to one prior frame.
+          const stale = frames.shift();
+          if (stale && fs.existsSync(stale)) fs.unlinkSync(stale);
+        }
+
+        await delay(interval);
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      for (const f of frames) {
+        if (fs.existsSync(f)) {
+          try { fs.unlinkSync(f); } catch { /* best-effort cleanup */ }
+        }
+      }
+    }
+  }
+
+  /**
+   * Read a PNG's pixel dimensions from its IHDR chunk (bytes 16-23, big-endian).
+   * Avoids pulling in an image-size dependency. Returns null if the file isn't a
+   * readable PNG.
+   */
+  private readPngDimensions(filePath: string): { width: number; height: number } | null {
+    try {
+      const fd = fs.openSync(filePath, 'r');
+      try {
+        const buf = new Uint8Array(24);
+        const read = fs.readSync(fd, buf, 0, 24, 0);
+        if (read < 24) return null;
+        // PNG signature is 8 bytes; IHDR length+type is 8 more; then width/height
+        // as big-endian uint32s at byte offsets 16 and 20.
+        const isPng = buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47; // "PNG"
+        if (!isPng) return null;
+        const beU32 = (o: number) => (buf[o] << 24 | buf[o + 1] << 16 | buf[o + 2] << 8 | buf[o + 3]) >>> 0;
+        const width = beU32(16);
+        const height = beU32(20);
+        if (!width || !height) return null;
+        return { width, height };
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Detect the reCAPTCHA grid once for a puzzle session: screenshot the element,
+   * run `find-grid`, and read the screenshot's pixel dimensions. Grid boxes are
+   * pixel coords in SCREENSHOT space (not page CSS space). Returns null if no
+   * grid is detected. The geometry is stable across the in-place dynamic refresh
+   * (only tile images change), so callers cache the result for the session.
+   */
+  private async getGridBoxes(
+    captchaElement: ElementHandle,
+  ): Promise<{ boxes: number[][]; size: 3 | 4; screenshotW: number; screenshotH: number } | null> {
+    const f = path.join(os.tmpdir(), `findgrid_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    try {
+      await captchaElement.screenshot({ path: f });
+      const res = await this.runCliTool(['find-grid', f]);
+      if (!Array.isArray(res) || (res.length !== 9 && res.length !== 16)) {
+        return null;
+      }
+      const dims = this.readPngDimensions(f);
+      if (!dims) return null;
+      return {
+        boxes: res as number[][],
+        size: res.length === 16 ? 4 : 3,
+        screenshotW: dims.width,
+        screenshotH: dims.height,
+      };
+    } catch {
+      return null;
+    } finally {
+      if (fs.existsSync(f)) {
+        try { fs.unlinkSync(f); } catch { /* best-effort cleanup */ }
+      }
+    }
+  }
+
+  /**
+   * Map a model-returned normalized bbox (fractions of the element/screenshot)
+   * to a 1-indexed grid cell. Uses the bbox center, converts to screenshot
+   * pixels, and returns the cell whose pixel box contains it. Cell numbering is
+   * row-major (matches the CLI's find_grid output). Returns null if the center
+   * falls outside every cell (e.g. in a gutter) — callers click the raw bbox
+   * anyway and skip per-tile tracking.
+   */
+  private bboxToCell(
+    bbox: [number, number, number, number],
+    gridBoxes: number[][],
+    screenshotW: number,
+    screenshotH: number,
+  ): number | null {
+    const [x1, y1, x2, y2] = bbox;
+    const cx = ((x1 + x2) / 2) * screenshotW;
+    const cy = ((y1 + y2) / 2) * screenshotH;
+    for (let i = 0; i < gridBoxes.length; i++) {
+      const [bx1, by1, bx2, by2] = gridBoxes[i];
+      if (cx >= bx1 && cx <= bx2 && cy >= by1 && cy <= by2) {
+        return i + 1; // 1-indexed
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Center of a 1-indexed grid cell in PAGE pixel space, for mouse moves.
+   * Converts the cached screenshot-pixel box to page coords via the session's
+   * scaleX/scaleY (screenshot px -> page px) and element origin.
+   */
+  private cellCenterPage(cell: number, session: GridSession): { x: number; y: number } {
+    const [x1, y1, x2, y2] = session.gridBoxes[cell - 1];
+    const cxPx = (x1 + x2) / 2;
+    const cyPx = (y1 + y2) / 2;
+    return {
+      x: session.elementBox.x + cxPx * session.scaleX,
+      y: session.elementBox.y + cyPx * session.scaleY,
+    };
+  }
+
+  /** Smooth-move the mouse over one cell's center with intra-cell jitter. */
+  private async hoverCell(page: Page, session: GridSession, cell: number): Promise<void> {
+    const cellWPage = (session.gridBoxes[0][2] - session.gridBoxes[0][0]) * session.scaleX;
+    const cellHPage = (session.gridBoxes[0][3] - session.gridBoxes[0][1]) * session.scaleY;
+    const center = this.cellCenterPage(cell, session);
+    const jitterX = (Math.random() - 0.5) * cellWPage * 0.4;
+    const jitterY = (Math.random() - 0.5) * cellHPage * 0.4;
+    await this.performSmoothMove(page, center.x + jitterX, center.y + jitterY);
+  }
+
+  /**
+   * Query per-cell grid state using the SESSION'S CACHED grid boxes via the
+   * `grid-cell-states-fixed` CLI command. This is critical: the dynamic refresh
+   * blanks tiles to near-white, which makes find_grid fail on that frame, so the
+   * self-detecting `grid-cell-states` would return {grid:null} mid-fade and a
+   * naive caller would misread that as "nothing loading / solved". Passing the
+   * cached boxes keeps empty/changing/selected correct even while tiles are
+   * blank. Returns null only on a genuine CLI failure. Best-effort.
+   */
+  private async gridCellStates(
+    session: GridSession,
+    frameA: string,
+    frameB: string,
+  ): Promise<GridCellStates | null> {
+    const boxesJson = JSON.stringify(session.gridBoxes);
+    const res = await this.runCliTool(['grid-cell-states-fixed', frameA, frameB, boxesJson]);
+    if (!res || !Array.isArray(res.empty)) return null;
+    return {
+      empty: res.empty ?? [],
+      changing: res.changing ?? [],
+      loaded: res.loaded ?? [],
+      selected: res.selected ?? [],
+    };
+  }
+
+  /** Order a loading set so `priority` cells (just-clicked) come first. */
+  private orderByPriority(loading: number[], priority: number[]): number[] {
+    const set = new Set(loading);
+    const ordered: number[] = [];
+    for (const c of priority) {
+      if (set.has(c)) { ordered.push(c); set.delete(c); }
+    }
+    for (const c of set) ordered.push(c);
+    return ordered;
+  }
+
+  /**
+   * Detect whether any tiles are blank or fading, watching for the ONSET of the
+   * reCAPTCHA refresh over a short grace window. The blank/fade transition lags
+   * the click by a beat, so a single snapshot right after clicking misses it
+   * (the tile still shows its old image — not yet white, not yet changing). We
+   * poll consecutive frames and mark a cell loading if it is `empty` (≥97%
+   * near-white) OR `changing` (>2% pixels differ). HOVERS a clicked tile each
+   * poll so the mouse keeps moving (no unnatural pauses). Returns the loading
+   * cells (priority/clicked first) as soon as any appears, or [] if the whole
+   * window passes with nothing loading (→ solved). Logs every poll + frame.
+   */
+  private async currentLoadingCells(
+    page: Page,
+    captchaElement: ElementHandle,
+    session: GridSession,
+    priority: number[] = [],
+  ): Promise<number[]> {
+    const grace = this.config.recaptchaFadeOnsetGraceMs ?? 4000;
+    const start = Date.now();
+    const frames: string[] = [];
+    const tmp = () => path.join(os.tmpdir(), `loadchk_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    // We care specifically about the tiles we just clicked (priority). reCAPTCHA
+    // holds them selected (old image visible) for ~1-3s, THEN blanks them to swap
+    // in a replacement. So we must watch the CLICKED cells across the whole grace
+    // window — the onset is delayed, not immediate.
+    const watch = priority.length ? priority : null; // null => watch all cells
+    this.gridDebug('fade-onset:start', { grace, priority, watching: watch ?? 'all' });
+    let hoverIdx = 0;
+    try {
+      const first = tmp();
+      await captchaElement.screenshot({ path: first });
+      frames.push(first);
+      this.gridDebug('fade-onset:baseline', {}, first);
+
+      let polls = 0;
+      while (Date.now() - start < grace) {
+        // Keep the mouse moving over a clicked tile during the wait.
+        if (priority.length) {
+          await this.hoverCell(page, session, priority[hoverIdx % priority.length]).catch(() => {});
+          hoverIdx++;
+        }
+        const f = tmp();
+        await captchaElement.screenshot({ path: f });
+        frames.push(f);
+        polls++;
+
+        const a = frames[frames.length - 2];
+        const b = frames[frames.length - 1];
+        const st = await this.gridCellStates(session, a, b);
+        // Restrict the loading signal to the cells we clicked (if known): a
+        // background tile changing is irrelevant; a clicked tile going blank/
+        // changing means the refresh has begun.
+        const inScope = (c: number) => !watch || watch.includes(c);
+        const emptyW = (st?.empty ?? []).filter(inScope);
+        const changingW = (st?.changing ?? []).filter(inScope);
+        this.gridDebug('fade-onset:poll', {
+          poll: polls, elapsedMs: Date.now() - start,
+          watchedEmpty: emptyW, watchedChanging: changingW,
+          empty: st?.empty ?? null, changing: st?.changing ?? null,
+          loaded: st?.loaded ?? null, selected: st?.selected ?? null,
+        }, b);
+        const loading = [...new Set([...emptyW, ...changingW])];
+        if (loading.length) {
+          const ordered = this.orderByPriority(loading, priority);
+          this.gridDebug('fade-onset:loading-detected', { loading: ordered, afterMs: Date.now() - start });
+          return ordered;
+        }
+
+        const stale = frames.shift();
+        if (stale && fs.existsSync(stale)) fs.unlinkSync(stale);
+      }
+      this.gridDebug('fade-onset:none', { afterMs: Date.now() - start, polls });
+      return [];
+    } catch (e) {
+      this.gridDebug('fade-onset:error', { error: String(e) });
+      return [];
+    } finally {
+      for (const f of frames) {
+        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
+      }
+    }
+  }
+
+  /**
+   * After loading is detected, wait until at least one of the given blank/fading
+   * cells reaches the `loaded` state, HOVERING those cells (in order) the whole
+   * time so the mouse never sits still. Returns true once a tile loads, false on
+   * timeout (caller proceeds anyway). Uses the session's cached grid boxes so it
+   * works while tiles are blank. Logs every poll + frame.
+   */
+  private async waitForAnyClickedTileLoaded(
+    page: Page,
+    captchaElement: ElementHandle,
+    session: GridSession,
+    fadingCells: number[],
+  ): Promise<boolean> {
+    if (!fadingCells.length) return true;
+    const interval = this.config.recaptchaDynamicFadePollMs ?? 400;
+    const timeout = this.config.recaptchaDynamicFadeWaitMs ?? 6000;
+    const hoverEnabled = this.config.recaptchaTileHoverEnabled ?? true;
+    const start = Date.now();
+    const frames: string[] = [];
+    const tmp = () => path.join(os.tmpdir(), `fadepoll_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    this.gridDebug('wait-load:start', { fadingCells, timeout, interval });
+    let hoverIdx = 0;
+    let polls = 0;
+    try {
+      while (Date.now() - start < timeout) {
+        // Move over a fading tile each iteration — human waiting for the image.
+        if (hoverEnabled) {
+          await this.hoverCell(page, session, fadingCells[hoverIdx % fadingCells.length]).catch(() => {});
+          hoverIdx++;
+        } else {
+          await delay(interval);
+        }
+        const f = tmp();
+        await captchaElement.screenshot({ path: f });
+        frames.push(f);
+
+        if (frames.length >= 2) {
+          const a = frames[frames.length - 2];
+          const b = frames[frames.length - 1];
+          const st = await this.gridCellStates(session, a, b);
+          polls++;
+          const loadedNow = st ? fadingCells.filter(c => st.loaded.includes(c)) : [];
+          this.gridDebug('wait-load:poll', {
+            poll: polls, elapsedMs: Date.now() - start,
+            empty: st?.empty ?? null, changing: st?.changing ?? null,
+            loaded: st?.loaded ?? null, loadedTargets: loadedNow,
+          }, b);
+          if (loadedNow.length) {
+            this.gridDebug('wait-load:loaded', { loadedNow, afterMs: Date.now() - start });
+            return true;
+          }
+          const stale = frames.shift();
+          if (stale && fs.existsSync(stale)) fs.unlinkSync(stale);
+        }
+      }
+      this.gridDebug('wait-load:timeout', { afterMs: Date.now() - start, polls });
+      return false;
+    } catch (e) {
+      this.gridDebug('wait-load:error', { error: String(e) });
+      return false;
+    } finally {
+      for (const f of frames) {
+        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
+      }
+    }
+  }
+
+  /**
+   * Multi-round driver for reCAPTCHA 3x3 dynamic puzzles ("click all X" where
+   * tiles refresh in place). One invocation = one puzzle session.
+   *
+   * The CLI is authoritative about WHAT to do — it runs the blue-badge detector,
+   * filters out already-selected and still-loading tiles, and returns one of:
+   *   - `click`: click these tiles (already filtered to fresh, ready tiles)
+   *   - `wait` : nothing to click yet, tiles are still loading — do NOT submit
+   *   - `done` : nothing matching remains — submit (click Verify)
+   *
+   * This driver owns the HUMAN-LIKE WAITING the CLI can't: after a click round,
+   * and on a `wait`, it hovers the just-clicked / currently blank+fading tiles
+   * (in click order) and waits for at least one to finish reloading before
+   * re-screenshotting and re-solving — so we don't burn a solver call on a grid
+   * that's still mid-fade. It submits only on `done`.
+   *
+   * Returns the same shape as solveSingle so the outer solve loop — including the
+   * under-selection retry and post-solve detectCaptcha — wraps it unchanged.
+   */
+  private async solveRecaptchaGrid(
+    page: Page,
+    captchaElement: ElementHandle,
+    attempt: number,
+    retryMode: string | null,
+    grid: { boxes: number[][]; size: 3 | 4; screenshotW: number; screenshotH: number },
+    elementBox: { x: number; y: number; width: number; height: number },
+  ): Promise<{ didInteract: boolean; tokenUsage: TokenUsage[] }> {
+    const maxRounds = this.config.recaptchaMaxDynamicRounds ?? 8;
+
+    const session: GridSession = {
+      gridBoxes: grid.boxes,
+      elementBox,
+      scaleX: elementBox.width / grid.screenshotW,
+      scaleY: elementBox.height / grid.screenshotH,
+      screenshotW: grid.screenshotW,
+      screenshotH: grid.screenshotH,
+    };
+
+    const clickedOrder: number[] = [];
+    let performedAction = false;
+    let shouldSubmit = false;
+    const allTokenUsage: TokenUsage[] = [];
+    let pendingRetry = retryMode;
+
+    this.initGridDebug();
+    this.gridDebug('session:init', {
+      attempt, retryMode, size: grid.size,
+      screenshotW: grid.screenshotW, screenshotH: grid.screenshotH,
+      scaleX: session.scaleX, scaleY: session.scaleY,
+      elementBox, gridBoxes: session.gridBoxes,
+    });
+
+    for (let round = 1; round <= maxRounds; round++) {
+      // 1. Settle and screenshot.
+      await this.waitForGridCellsLoaded(captchaElement);
+      const shotA = path.join(os.tmpdir(), `recap_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+      await captchaElement.screenshot({ path: shotA });
+      this.saveImageForDebug(shotA);
+      // Log the grid state the model is about to see.
+      const preState = await this.gridCellStates(session, shotA, shotA);
+      this.gridDebug(`round-${round}:pre-solve`, {
+        round, pendingRetry,
+        empty: preState?.empty ?? null, changing: preState?.changing ?? null,
+        loaded: preState?.loaded ?? null, selected: preState?.selected ?? null,
+        clickedOrder: [...clickedOrder],
+      }, shotA);
+
+      let action: CaptchaAction | null = null;
+      try {
+        // 2. Solve. The CLI returns a single action for grid puzzles.
+        const response = await this.getSolution(shotA, 'recaptcha', pendingRetry);
+        pendingRetry = null; // only the first round carries the inbound retry hint
+        this.archiveLatestDebugRun(attempt, response.actions);
+        allTokenUsage.push(...response.token_usage);
+        const actionList = Array.isArray(response.actions) ? response.actions : [response.actions];
+        action = actionList[0] ?? null;
+        this.gridDebug(`round-${round}:action`, { action });
+      } finally {
+        if (fs.existsSync(shotA)) {
+          try { fs.unlinkSync(shotA); } catch { /* best-effort cleanup */ }
+        }
+      }
+
+      // 3. Dispatch on the action type.
+      if (!action || action.action === 'done') {
+        // Nothing matching remains → submit.
+        console.log(`[recaptcha-grid] round ${round}: done; submitting.`);
+        this.gridDebug(`round-${round}:done`, {});
+        shouldSubmit = true;
+        break;
+      }
+
+      if (action.action === 'wait') {
+        // Tiles are still loading; the CLI explicitly told us NOT to submit.
+        // Find what's loading, hover it, and wait for at least one to settle.
+        console.log(`[recaptcha-grid] round ${round}: CLI says wait (${(action as any).duration_ms ?? 0}ms).`);
+        const loadingCells = await this.currentLoadingCells(page, captchaElement, session, clickedOrder);
+        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loadingCells);
+        continue;
+      }
+
+      if (action.action === 'click') {
+        const c = action as ClickAction;
+        const bboxes = c.target_bounding_boxes
+          ?? (c.target_bounding_box ? [c.target_bounding_box] : []);
+        if (!bboxes.length) {
+          // Malformed click with no targets — treat as a soft wait so we don't
+          // submit prematurely; re-solve next round.
+          console.warn(`[recaptcha-grid] round ${round}: click action with no bboxes; re-solving.`);
+          this.gridDebug(`round-${round}:click-no-bboxes`, {});
+          await delay(500);
+          continue;
+        }
+
+        // 4. Click the tiles in order, tracking cell numbers for hover ordering.
+        const clickedThisRound: number[] = [];
+        for (const bbox of bboxes) {
+          const cell = this.bboxToCell(bbox, session.gridBoxes, session.screenshotW, session.screenshotH);
+          await this.executeClick(page, captchaElement, { action: 'click', target_bounding_box: bbox } as ClickAction, elementBox);
+          if (cell != null) {
+            clickedOrder.push(cell);
+            clickedThisRound.push(cell);
+          }
+          await delay(Math.random() * 80 + 80);
+        }
+        performedAction = true;
+        console.log(`[recaptcha-grid] round ${round}: clicked ${bboxes.length} tile(s) -> cells ${JSON.stringify(clickedThisRound)}.`);
+        this.gridDebug(`round-${round}:clicked`, { bboxes, clickedThisRound });
+
+        // 5. The clicked tiles may go blank / fade out for a replacement
+        //    (dynamic puzzle), or they may just stay checked (the puzzle is
+        //    fully solved). reCAPTCHA's blank/fade transition lags the click, so
+        //    we watch a grace window (not a single instant-after snapshot).
+        const loadingCells = await this.currentLoadingCells(page, captchaElement, session, clickedThisRound);
+        if (!loadingCells.length) {
+          // Nothing is loading/fading within the grace window → the model fully
+          // solved it; submit immediately rather than burning another round.
+          console.log(`[recaptcha-grid] round ${round}: no tiles loading after click; submitting.`);
+          this.gridDebug(`round-${round}:no-loading-submit`, {});
+          shouldSubmit = true;
+          break;
+        }
+        // Tiles are reloading — wait (while hovering) for at least one to settle
+        // before re-solving, so we don't feed the model a mid-fade grid.
+        console.log(`[recaptcha-grid] round ${round}: tiles loading ${JSON.stringify(loadingCells)}; waiting.`);
+        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loadingCells);
+        continue;
+      }
+
+      // Unexpected action type for a grid (drag/type) — re-solve.
+      console.warn(`[recaptcha-grid] round ${round}: unexpected action '${(action as any).action}'; re-solving.`);
+      this.gridDebug(`round-${round}:unexpected-action`, { action });
+    }
+
+    // Submit: click Verify if present (no-op if the grid is gone). Only when the
+    // CLI signalled `done` — never on a timeout/round-cap exit, which leaves the
+    // outer loop to re-detect and decide.
+    if (shouldSubmit) {
+      const frame = await captchaElement.contentFrame();
+      if (frame) {
+        const verifyButton = await this.getVerifyButton(frame);
+        if (verifyButton) {
+          console.log('[recaptcha-grid] clicking Verify to submit.');
+          await this.moveAndClick(page, verifyButton);
+        }
+      }
+    }
+
+    return { didInteract: performedAction, tokenUsage: allTokenUsage };
+  }
+
+  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null): Promise<CliResponse> {
+    // v2 ships a single provider: the JobHarvest vLLM server via the bundled
+    // CaptchaKraken CLI. The CLI's planner reads VLLM_BASE_URL and the bearer
+    // token (CAPTCHA_KRAKEN_API_KEY, falling back to VLLM_API_KEY) from the
+    // environment; we also forward the key explicitly as a CLI arg below so it
+    // works even when the subprocess doesn't inherit it.
+    const {
+      model = 'captcha',  // vLLM LoRA name (see /etc/systemd/system/vllm.service)
+      apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
+    } = this.config;
+
+    const { cliRoot, py } = this.resolveCli();
 
     const cmdParts = [
       py,
@@ -582,6 +1408,17 @@ export class CaptchaKrakenSolver {
       }
 
     } catch (error: any) {
+      // The CLI emits {"unsupported": true} (exit 2) when the current frame is
+      // neither a grid nor a checkbox — e.g. an hCaptcha click/drag puzzle.
+      // Surface that as a distinct error the solve loop can recognize and fail
+      // fast on (only the puzzle TYPE is unsupported; a not-yet-rendered widget
+      // is handled separately by DOM-presence waiting before we ever get here).
+      const stderr: string = error.stderr ?? '';
+      if (/"unsupported"\s*:\s*true/.test(stderr)) {
+        const e = new Error('UNSUPPORTED_CAPTCHA: Cannot solve this kind of captcha');
+        (e as any).unsupported = true;
+        throw e;
+      }
       console.error('Error executing CaptchaKraken CLI:', error);
       if (error.stdout) console.log('CLI stdout on error:', error.stdout);
       if (error.stderr) console.error('CLI stderr on error:', error.stderr);
