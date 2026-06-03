@@ -15,10 +15,12 @@ const PYTHON_COMMAND = fs.existsSync(CLI_VENV) ? CLI_VENV : 'python3';
 
 const RECAPTCHA_URL = 'https://nopecha.com/captcha/recaptcha#moderate';
 const NUM_SOLVES = parseInt(process.env.NUM_SOLVES || '10', 10);
+// Set HEADLESS=false (or use the --headed Playwright flag) to watch the browser run.
+const HEADLESS = process.env.HEADLESS !== 'false' && !process.argv.includes('--headed');
 
 const testWithSolver = test.extend<{ solver: CaptchaKrakenSolver }>({
   browser: [async ({}, use) => {
-    const browser = await Camoufox({ headless: true });
+    const browser = await Camoufox({ headless: HEADLESS });
     await use(browser);
     await browser.close();
   }, { scope: 'worker' }],

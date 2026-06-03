@@ -36,7 +36,6 @@
   },
   "dependencies": {
     "@jobharvest/camoufox-js": "0.11.4",
-    "@jobharvest/stealthmouse": "1.8.1",
     "cursory-ts": "^1.0.0",
     "patchright": "1.52.5",
     "patchright-core": "1.51.2"

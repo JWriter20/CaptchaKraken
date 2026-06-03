@@ -76,7 +76,10 @@ for (let i = 1; i <= N; i++) {
         overallSolveTimeoutMs: 60_000,
       });
 
-      await page.goto(HCAPTCHA_URL);
+      await page.goto(HCAPTCHA_URL, { waitUntil: 'networkidle' });
+      // Give the hCaptcha checkbox widget time to render before solving —
+      // an early screenshot catches a blank/unpainted iframe.
+      await page.waitForTimeout(2500);
       await solver.solve(page as any);
 
       token = await page.$eval(
