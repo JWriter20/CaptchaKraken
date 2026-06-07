@@ -1,4 +1,54 @@
+/**
+ * Lifecycle event emitted by {@link CaptchaKrakenConfig.onStep}. One is fired
+ * before any interaction (`stage: 'initial'`) and one after every executed
+ * action (click batch, drag, wait, submit) plus per dynamic-grid round, so a
+ * caller can record the exact sequence of intermediate stages, time them, and
+ * count steps without scraping CAPTCHA_DEBUG dumps.
+ */
+export interface SolveStepEvent {
+  /** 1-based monotonically increasing step index across the whole solve. */
+  index: number;
+  /**
+   * Coarse stage kind:
+   *  - `initial`  : screenshot taken before any action (baseline)
+   *  - `click`    : after a click (or batch of clicks) was executed
+   *  - `drag`     : after a drag was executed
+   *  - `wait`     : after a CLI-requested wait elapsed
+   *  - `submit`   : after the Verify/Next/Submit button was clicked
+   *  - `round`    : a dynamic reCAPTCHA 3x3 round boundary (pre-solve snapshot)
+   */
+  stage: 'initial' | 'click' | 'drag' | 'wait' | 'submit' | 'round';
+  /** Short human label, e.g. "round-2:clicked 3 tile(s)". */
+  label: string;
+  /**
+   * Absolute path to a PNG screenshot of the captcha element at this step.
+   * The file is owned by the callback once emitted — the solver does NOT
+   * delete it (copy/move it where you need it). Null if the screenshot failed.
+   */
+  screenshotPath: string | null;
+  /** Detected puzzle vendor, if known. */
+  puzzleSource?: 'hcaptcha' | 'recaptcha' | 'unknown';
+  /** Outer solve-loop attempt this step belongs to. */
+  attempt: number;
+  /** ms since solve() started. */
+  elapsedMs: number;
+  /** Free-form per-stage detail (action payload, clicked cells, etc.). */
+  meta?: Record<string, any>;
+}
+
 export interface CaptchaKrakenConfig {
+  /**
+   * Optional observer fired at each intermediate solve stage. Receives a
+   * baseline screenshot before any action and one after every executed action.
+   * Use it to capture intermediate-stage screenshots, count steps, and time
+   * each phase. The callback may be async; the solver awaits it. Errors thrown
+   * by the callback are swallowed (never fail a solve because logging failed).
+   *
+   * The PNG at `event.screenshotPath` is owned by the callback once emitted —
+   * the solver will not delete it.
+   */
+  onStep?: (event: SolveStepEvent) => void | Promise<void>;
+
   /**
    * Path to the bundled CaptchaKraken CLI root.
    *

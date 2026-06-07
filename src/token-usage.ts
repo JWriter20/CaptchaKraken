@@ -54,14 +54,27 @@ export const PRICING: Record<string, ModelPricing> = {
   }
 };
 
+// The CaptchaKraken CLI (vLLM/OpenAI shape) emits `prompt_tokens` /
+// `completion_tokens`, while older Gemini-path usages used `input_tokens` /
+// `output_tokens`. Normalize both so aggregation never produces NaN.
+function inTok(u: TokenUsage): number {
+  return (u.input_tokens ?? (u as any).prompt_tokens ?? 0) as number;
+}
+function outTok(u: TokenUsage): number {
+  return (u.output_tokens ?? (u as any).completion_tokens ?? 0) as number;
+}
+function cachedTok(u: TokenUsage): number {
+  return (u.cached_input_tokens ?? (u as any).prompt_tokens_details?.cached_tokens ?? 0) as number;
+}
+
 export function estimateCost(usage: TokenUsage): number {
   const model = usage.model;
   // Default to gemini-2.5-flash pricing if unknown
   const pricing = PRICING[model] || PRICING['gemini-2.5-flash'];
 
-  const inputCost = (usage.input_tokens / 1_000_000) * pricing.inputPricePerM;
-  const outputCost = (usage.output_tokens / 1_000_000) * pricing.outputPricePerM;
-  const cachedCost = ((usage.cached_input_tokens || 0) / 1_000_000) * pricing.cachedInputPricePerM;
+  const inputCost = (inTok(usage) / 1_000_000) * pricing.inputPricePerM;
+  const outputCost = (outTok(usage) / 1_000_000) * pricing.outputPricePerM;
+  const cachedCost = (cachedTok(usage) / 1_000_000) * pricing.cachedInputPricePerM;
 
   return inputCost + outputCost + cachedCost;
 }
@@ -84,9 +97,9 @@ export function aggregateTokenUsage(usages: TokenUsage[]) {
   let estimatedCost = 0;
 
   for (const usage of usages) {
-    inputTokens += usage.input_tokens;
-    outputTokens += usage.output_tokens;
-    cachedInputTokens += usage.cached_input_tokens || 0;
+    inputTokens += inTok(usage);
+    outputTokens += outTok(usage);
+    cachedInputTokens += cachedTok(usage);
     estimatedCost += estimateCost(usage);
   }
 
