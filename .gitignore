@@ -14,4 +14,11 @@ hcaptcha_5x_attempt_*.png
 hcaptcha_5x_summary.json
 captcha_video_summary.json
 server_log.txt
-=*
+
+# demo recorder (tests/record_demos.spec.ts) transients — keep curated
+# captcha_videos/*.mp4 (the README embeds them), drop everything else.
+record_demos_summary.json
+record_demos_run.log
+*_video_attempt_*.png
+captcha_videos/*_frames/
+captcha_videos/*/encode.py

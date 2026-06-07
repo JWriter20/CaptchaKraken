@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector } from './types';
+import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 
 const execAsync = promisify(exec);
@@ -69,6 +69,10 @@ export class CaptchaKrakenSolver {
   private lastMousePosition: Vector; // Start at safe position
   private imageCounter: number = 0; // Track images sent to CLI for debugging
   private sessionDebugDir: string | null = null;
+  // onStep instrumentation: monotonic step index + solve-start wall clock.
+  // Reset at the top of each solveImpl() so indices/elapsed are per-solve.
+  private stepIndex: number = 0;
+  private solveStartMs: number = 0;
   // Dedicated dump dir for the reCAPTCHA 3x3 dynamic driver — frames + a JSONL
   // state log so the click/fade/wait flow can be diagnosed offline. Always set
   // (independent of CAPTCHA_DEBUG) so we capture the hard-to-reproduce timing.
@@ -107,6 +111,8 @@ export class CaptchaKrakenSolver {
     const start = Date.now();
     let cumulativeTokenUsage: TokenUsage[] = [];
     this.imageCounter = 0;
+    this.stepIndex = 0;
+    this.solveStartMs = start;
 
     // Initialize session debug directory if debugging is enabled
     if (process.env.CAPTCHA_DEBUG === '1') {
@@ -244,6 +250,49 @@ export class CaptchaKrakenSolver {
     throw new Error(`Captcha still detected after ${maxSolveLoops} solve loops. Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
   }
 
+  /**
+   * Fire the optional onStep observer with a fresh screenshot of the captcha
+   * element. No-op (beyond a cheap early return) when no callback is set, so it
+   * stays off the critical path in normal runs. The emitted PNG is owned by the
+   * callback — we never delete it. Best-effort: a screenshot or callback error
+   * never fails the solve.
+   */
+  private async emitStep(
+    captchaElement: ElementHandle,
+    stage: SolveStepEvent['stage'],
+    label: string,
+    puzzleSource: SolveStepEvent['puzzleSource'],
+    attempt: number,
+    meta?: Record<string, any>,
+  ): Promise<void> {
+    const cb = this.config.onStep;
+    if (!cb) return;
+    this.stepIndex++;
+    let screenshotPath: string | null = path.join(
+      os.tmpdir(),
+      `step_${this.stepIndex}_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
+    );
+    try {
+      await captchaElement.screenshot({ path: screenshotPath });
+    } catch {
+      screenshotPath = null;
+    }
+    try {
+      await cb({
+        index: this.stepIndex,
+        stage,
+        label,
+        screenshotPath,
+        puzzleSource,
+        attempt,
+        elapsedMs: this.solveStartMs ? Date.now() - this.solveStartMs : 0,
+        meta,
+      });
+    } catch (e: any) {
+      log(`onStep callback threw (ignored): ${e?.message ?? e}`);
+    }
+  }
+
   private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: string | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
     // Vendor hint helps the CLI route to the right pipeline (hCaptcha click
     // puzzles must never go through grid detection — find_grid false-positives
@@ -280,6 +329,10 @@ export class CaptchaKrakenSolver {
     // then submit in the same pass — these never blank/fade, so there's no
     // dynamic-refresh loop to run.
     let isRecaptchaOneShotGrid = false;
+    // Grid size the solver establishes for this challenge, surfaced in the
+    // baseline step's meta so callers (e.g. the demo recorder) can bucket
+    // reCAPTCHA attempts into 3x3 vs 4x4 without scraping debug logs.
+    let establishedGridSize: number | null = null;
     if (isRecaptchaChallenge) {
       await this.waitForGridCellsLoaded(captchaElement);
       // 3x3 reCAPTCHA puzzles refresh tiles in place (blank/fade → new image),
@@ -289,11 +342,13 @@ export class CaptchaKrakenSolver {
       // Falls through if the grid can't be established.
       const grid = await this.getGridBoxes(captchaElement);
       if (grid && grid.size === 3) {
+        establishedGridSize = 3;
         const elementBox = await captchaElement.boundingBox();
         if (elementBox) {
           return this.solveRecaptchaGrid(page, captchaElement, attempt, retryMode, grid, elementBox);
         }
       } else if (grid && grid.size === 4) {
+        establishedGridSize = 4;
         isRecaptchaOneShotGrid = true;
       }
     }
@@ -304,6 +359,14 @@ export class CaptchaKrakenSolver {
 
     // Save image to debug directory if debugging is enabled
     this.saveImageForDebug(screenshotPath);
+
+    // Baseline screenshot before any action is taken. Emitted once per solve
+    // (the first time we reach a one-shot/checkbox screenshot); later loops are
+    // covered by the post-action 'submit'/'round' steps.
+    if (this.stepIndex === 0) {
+      await this.emitStep(captchaElement, 'initial', 'initial (pre-action)', puzzleSource, attempt,
+        establishedGridSize ? { gridSize: establishedGridSize } : undefined);
+    }
 
     let performedAction = false;
     let allTokenUsage: TokenUsage[] = [];
@@ -349,14 +412,17 @@ export class CaptchaKrakenSolver {
             await this.executeClick(page, captchaElement, c, elementBox);
           }
           performedAction = true;
+          await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, attempt, { bboxes });
         } else if (action.action === 'drag') {
           await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
+          await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, attempt, { action });
         } else if (action.action === 'wait') {
           if ((action as any).duration_ms > 0) {
             console.log(`Waiting for ${(action as any).duration_ms}ms as requested by CLI`);
             await delay((action as any).duration_ms);
             performedAction = true;
+            await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, attempt, { action });
           }
         }
         if (frame) {
@@ -383,7 +449,7 @@ export class CaptchaKrakenSolver {
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
           : 'No active actions performed (empty or done). Checking for Verify/Next button...');
         await this.moveAndClick(page, verifyButton);
-
+        await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, attempt);
       }
     } finally {
       // Cleanup
@@ -1357,6 +1423,9 @@ export class CaptchaKrakenSolver {
       const shotA = path.join(os.tmpdir(), `recap_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
       await captchaElement.screenshot({ path: shotA });
       this.saveImageForDebug(shotA);
+      // Per-round boundary snapshot for onStep observers. Round 1's snapshot is
+      // the baseline (pre-action) for the 3x3 dynamic path.
+      await this.emitStep(captchaElement, round === 1 ? 'initial' : 'round', `round-${round}:pre-solve`, 'recaptcha', attempt, { round });
       // Log the grid state the model is about to see — diagnostic only, so we
       // skip the extra state query unless grid debugging is active (keeps it off
       // the critical path in normal runs).
@@ -1431,6 +1500,7 @@ export class CaptchaKrakenSolver {
         performedAction = true;
         console.log(`[recaptcha-grid] round ${round}: clicked ${bboxes.length} tile(s) -> cells ${JSON.stringify(clickedThisRound)}.`);
         this.gridDebug(`round-${round}:clicked`, { bboxes, clickedThisRound });
+        await this.emitStep(captchaElement, 'click', `round-${round}:clicked ${bboxes.length} tile(s)`, 'recaptcha', attempt, { round, clickedThisRound, bboxes });
 
         // 5. The clicked tiles may go blank / fade out for a replacement
         //    (dynamic puzzle), or they may just stay checked (the puzzle is
@@ -1467,6 +1537,7 @@ export class CaptchaKrakenSolver {
         if (verifyButton) {
           console.log('[recaptcha-grid] clicking Verify to submit.');
           await this.moveAndClick(page, verifyButton);
+          await this.emitStep(captchaElement, 'submit', 'submitted (Verify)', 'recaptcha', attempt);
         }
       }
     }
@@ -1481,7 +1552,10 @@ export class CaptchaKrakenSolver {
     // environment; we also forward the key explicitly as a CLI arg below so it
     // works even when the subprocess doesn't inherit it.
     const {
-      model = 'captcha',  // vLLM LoRA name (see /etc/systemd/system/vllm.service)
+      // vLLM LoRA name. Defaults to the published grid adapter; override in
+      // code or via CAPTCHA_LORA_NAME (rarely needed — most users only set the
+      // endpoint URL and, for the hosted API, CAPTCHA_KRAKEN_API_KEY).
+      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha-grid',
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
 
