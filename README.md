@@ -42,9 +42,17 @@ reject even correct answers once they distrust your IP.
 Live solves, recorded straight from the browser:
 
 <!-- BEGIN DEMOS -->
-- ▶️ [reCAPTCHA 3×3 — fast solve (~14 s)](docs/demos/recaptcha_3x3_demo_1.mp4)
-- ▶️ [reCAPTCHA 3×3 — multi-round refresh](docs/demos/recaptcha_3x3_demo_2.mp4)
-- ▶️ [reCAPTCHA 4×4 — one-shot "select all"](docs/demos/recaptcha_4x4_demo_1.mp4)
+**reCAPTCHA 3×3 — fast solve (~14 s)**
+
+https://github.com/user-attachments/assets/e5e63787-1e5f-46e6-aa7e-f74af9962233
+
+**reCAPTCHA 3×3 — multi-round refresh**
+
+https://github.com/user-attachments/assets/0545f3ff-15cd-4bde-9b5d-bd3112bb032a
+
+**reCAPTCHA 4×4 — one-shot "select all"**
+
+https://github.com/user-attachments/assets/93b5dd43-c634-4644-8754-fb5f8ab8b9c9
 <!-- END DEMOS -->
 
 ### Not supported yet
@@ -200,7 +208,6 @@ LICENSE                             source-available (see "License")
 CONTRIBUTING.md                     how to contribute + dev setup
 src/                                the browser solver (TypeScript)
 tests/record_demos.spec.ts          live-solve recorder (numbers + demos)
-captcha_videos/                     curated demo clips embedded above
 CaptchaKraken-cli/                  find_grid + vLLM grid planner (Python submodule)
 ```
 

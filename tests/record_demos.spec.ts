@@ -136,19 +136,48 @@ class FrameRecorder {
   discard() { fs.rmSync(this.framesDir, { recursive: true, force: true }); }
   async encode(outPath: string): Promise<boolean> {
     if (this.frameIdx === 0) { this.discard(); return false; }
+    // Encode to H.264 + yuv420p + faststart so the clip plays in browsers and
+    // embeds inline on GitHub (drag the .mp4 into an issue/PR → user-attachments
+    // URL → README <video>). OpenCV's mp4v/FMP4 writer produces files browsers
+    // REFUSE to play ("No video with supported format"), so we feed the PNG
+    // frames to ffmpeg (the static binary bundled with imageio-ffmpeg) instead,
+    // and fall back to the mp4v writer only if ffmpeg isn't importable.
     const script = `
-import cv2, glob, sys, os
+import cv2, glob, sys, os, subprocess
 frames = sorted(glob.glob(os.path.join(${JSON.stringify(this.framesDir)}, "*.png")))
 if not frames: sys.exit(1)
-first = cv2.imread(frames[0]); h, w = first.shape[:2]
-out = cv2.VideoWriter(${JSON.stringify(outPath)}, cv2.VideoWriter_fourcc(*"mp4v"), ${this.fps}, (w, h))
-for fp in frames:
-    img = cv2.imread(fp)
-    if img is None: continue
-    if img.shape[:2] != (h, w): img = cv2.resize(img, (w, h))
-    out.write(img)
-out.release()
-print(f"encoded {len(frames)} frames -> {${JSON.stringify(outPath)}}")
+h, w = cv2.imread(frames[0]).shape[:2]
+out_path = ${JSON.stringify(outPath)}
+fps = ${this.fps}
+try:
+    import imageio_ffmpeg
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    # h//2*2, w//2*2: yuv420p needs even dimensions.
+    H, W = h - h % 2, w - w % 2
+    p = subprocess.Popen([ff, "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", str(fps),
+        "-i", "-", "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-crf", "23", "-movflags", "+faststart", out_path],
+        stdin=subprocess.PIPE)
+    for fp in frames:
+        img = cv2.imread(fp)
+        if img is None: continue
+        if img.shape[:2] != (h, w): img = cv2.resize(img, (w, h))
+        p.stdin.write(img[:H, :W].tobytes())
+    p.stdin.close(); p.wait()
+    if p.returncode != 0: raise RuntimeError("ffmpeg failed")
+    print(f"encoded {len(frames)} frames (h264) -> {out_path}")
+except Exception as e:
+    # Fallback: OpenCV mp4v (NOT browser-playable, but better than nothing).
+    sys.stderr.write(f"h264 encode failed ({e}); falling back to mp4v\\n")
+    out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    for fp in frames:
+        img = cv2.imread(fp)
+        if img is None: continue
+        if img.shape[:2] != (h, w): img = cv2.resize(img, (w, h))
+        out.write(img)
+    out.release()
+    print(f"encoded {len(frames)} frames (mp4v fallback) -> {out_path}")
 `;
     const scriptPath = path.join(this.framesDir, 'encode.py');
     fs.writeFileSync(scriptPath, script);
