@@ -201,6 +201,25 @@ await browser.close();
 That's it — no model name to pass, no provider to choose. The solver defaults to
 the published grid LoRA and the endpoint from your env.
 
+### Rate limiting & IP reputation
+
+> ⚠️ **Solving many captchas quickly from the same IP will degrade your success
+> rate.** This is normal anti-abuse behavior: once a captcha provider's risk
+> scoring flags an IP, it will start rejecting submissions **even when the answer
+> is correct**, and escalate to harder or unsolvable challenges. CaptchaKraken
+> only produces the answer — it does not manage your IP reputation or pacing.
+
+Handling this is **your responsibility**. In production you'll typically want to:
+
+- **Spread load across IPs** — rotating / residential proxies rather than one IP.
+- **Pace requests** with human-like gaps; avoid bursts.
+- **Back off when you see the signature** of a flagged IP: correct answers that
+  keep getting rejected, or a sudden jump in challenge difficulty — rotate the IP
+  instead of retrying on the same one.
+
+The model's per-grid accuracy is independent of all this; IP reputation only
+affects whether the provider *accepts* an otherwise-correct solve.
+
 ---
 
 ## How it works
