@@ -1,0 +1,104 @@
+CaptchaKraken Source-Available License v1.0
+Copyright (c) 2026 JobHarvest / JWriter20. All rights reserved.
+
+This license governs use of the CaptchaKraken software in this repository and of
+the associated machine-learning model weights and LoRA adapters published by the
+copyright holder (collectively, the "Software"). By using the Software you agree
+to these terms. If you do not agree, do not use the Software.
+
+================================================================================
+1. GRANT
+================================================================================
+Subject to the restrictions below, you are granted a worldwide, royalty-free,
+non-exclusive license to use, copy, modify, and distribute the Software, and to
+incorporate it into your own products and services.
+
+================================================================================
+2. PERMITTED USES
+================================================================================
+You MAY use the Software for:
+
+  (a) Personal, non-commercial use, research, and education.
+
+  (b) Commercial use INSIDE a larger product or service that delivers
+      substantial value BEYOND captcha solving itself — that is, where captcha
+      solving is an internal, enabling component rather than the product.
+
+  Illustrative (non-exhaustive) examples of PERMITTED commercial use:
+      - Web scrapers and data-collection pipelines.
+      - Stealth / anti-detection browsers and browser automation frameworks
+        that use the Software as one internal capability.
+      - QA, testing, and accessibility tooling.
+      - Any application where the captcha solve is a means to an end the user
+        is actually paying for.
+
+================================================================================
+3. PROHIBITED USES
+================================================================================
+You MAY NOT, without a separate written commercial agreement from the copyright
+holder:
+
+  (a) Sell, resell, rent, or otherwise offer for a fee any captcha-SOLVING
+      service, product, or API whose primary value is solving captchas,
+      where that service is powered by the Software or its model outputs.
+
+  (b) Distribute "thin wrappers" around the Software whose primary purpose is
+      captcha solving — including but not limited to browser extensions,
+      hosted endpoints, SaaS products, or CLIs that simply expose the
+      Software's solving capability to end users.
+
+  (c) Expose, proxy, or relay the responses or outputs of the Software's LoRA
+      models (e.g. bounding boxes, tile selections, click plans) through a paid
+      or public API as a captcha-solving service.
+
+  In short: you may BUILD WITH this Software, but you may not SELL THE SOLVE.
+
+================================================================================
+4. MODEL OUTPUTS
+================================================================================
+Outputs produced by the model weights/adapters are subject to Sections 2 and 3
+to the same extent as the Software itself. Reselling or API-relaying those
+outputs as a captcha-solving service is prohibited under Section 3(c).
+
+================================================================================
+5. REDISTRIBUTION
+================================================================================
+If you redistribute the Software (modified or not), you must retain this license
+and this notice, and you must not remove or alter the restrictions in Section 3.
+
+================================================================================
+6. TRADEMARKS
+================================================================================
+This license does not grant permission to use the trade names, trademarks, or
+product names of the copyright holder, except as required to describe the origin
+of the Software.
+
+================================================================================
+7. NO WARRANTY
+================================================================================
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+8. RESPONSIBLE USE
+================================================================================
+You are responsible for ensuring your use of the Software complies with all
+applicable laws, the terms of service of any site you interact with, and
+applicable anti-fraud and computer-access statutes. The copyright holder does
+not endorse using the Software to violate any third party's terms or rights.
+
+================================================================================
+9. COMMERCIAL LICENSING
+================================================================================
+For uses prohibited under Section 3 — including selling captcha-solving as a
+service — contact the copyright holder to discuss a separate commercial license.
+
+--------------------------------------------------------------------------------
+This text is a license, not legal advice. If the boundary between a permitted
+"value-add" product and a prohibited "thin wrapper" is unclear for your use
+case, ask before shipping: https://github.com/JWriter20/CaptchaKrakenFinetune
+--------------------------------------------------------------------------------
