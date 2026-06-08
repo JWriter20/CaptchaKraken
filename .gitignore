@@ -15,10 +15,12 @@ hcaptcha_5x_summary.json
 captcha_video_summary.json
 server_log.txt
 
-# demo recorder (tests/record_demos.spec.ts) transients — keep curated
-# captcha_videos/*.mp4 (the README embeds them), drop everything else.
+# demo recorder (tests/record_demos.spec.ts) transients. Curated clips that the
+# README embeds live in docs/demos/ (committed); everything else is throwaway.
 record_demos_summary.json
-record_demos_run.log
+record_demos_*_summary.json
+record_demos*.log
+run_full_record.out
+run_full_record.sh
 *_video_attempt_*.png
-captcha_videos/*_frames/
-captcha_videos/*/encode.py
+captcha_videos/

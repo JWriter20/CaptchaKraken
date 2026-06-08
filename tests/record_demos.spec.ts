@@ -164,6 +164,120 @@ print(f"encoded {len(frames)} frames -> {${JSON.stringify(outPath)}}")
   }
 }
 
+/** Which grid we're hunting for: 'any', '3x3', or '4x4'. */
+const WANT_GRID = (process.env.WANT_GRID || 'any').toLowerCase();
+/** Max times to click the reCAPTCHA reload button to cycle to the wanted grid. */
+const MAX_SKIPS = parseInt(process.env.MAX_SKIPS || '12', 10);
+
+/**
+ * Open the reCAPTCHA challenge and, if WANT_GRID is set, click the reload/skip
+ * button (`#recaptcha-reload-button`) to cycle challenges in the SAME session
+ * until the wanted grid size appears — instead of tearing the browser down and
+ * re-rolling, which doesn't change reCAPTCHA's session-driven 3x3-vs-4x4 choice.
+ *
+ * Returns the grid size found (3 | 4 | null). Best-effort: a missing frame /
+ * button just falls through and lets the solver run on whatever's shown.
+ */
+async function cycleRecaptchaToGrid(page: any, want: string): Promise<3 | 4 | null> {
+  // Click the anchor checkbox to open the challenge.
+  const anchor = await page.$('iframe[src*="recaptcha/api2/anchor"]');
+  if (anchor) {
+    const f = await anchor.contentFrame();
+    const box = await f?.$('.recaptcha-checkbox');
+    if (box) { await box.click().catch(() => {}); }
+  }
+
+  const wantSize = want === '4x4' ? 4 : want === '3x3' ? 3 : null;
+
+  // Read the challenge grid size from the bframe table classes (rc-imageselect-
+  // table-33 = 3x3, -44 = 4x4); fall back to counting tiles.
+  const readSize = async (): Promise<3 | 4 | null> => {
+    const bframe = await page.$('iframe[src*="recaptcha/api2/bframe"]');
+    if (!bframe) return null;
+    const f = await bframe.contentFrame();
+    if (!f) return null;
+    try {
+      if (await f.$('.rc-imageselect-table-44')) return 4;
+      if (await f.$('.rc-imageselect-table-33')) return 3;
+      const n = await f.$$eval('.rc-imageselect-tile', els => els.length).catch(() => 0);
+      if (n >= 16) return 4;
+      if (n >= 9) return 3;
+    } catch { /* frame detached mid-read */ }
+    return null;
+  };
+
+  let size = await waitFor(readSize, 8000);
+  if (!wantSize) return size; // 'any' — take whatever opened.
+
+  for (let i = 0; i < MAX_SKIPS && size !== wantSize; i++) {
+    const bframe = await page.$('iframe[src*="recaptcha/api2/bframe"]');
+    const f = bframe ? await bframe.contentFrame() : null;
+    const reload = f ? await f.$('#recaptcha-reload-button') : null;
+    if (!reload) break;
+    await reload.click().catch(() => {});
+    await page.waitForTimeout(900); // let the new challenge paint
+    size = await waitFor(readSize, 6000);
+  }
+  return size;
+}
+
+/**
+ * Open the hCaptcha challenge and click its refresh button (`.refresh.button`)
+ * to cycle PAST out-of-scope puzzles (drag / path / "choose the card…") until a
+ * 3x3 property grid ("click each image containing/with a …") appears — same
+ * same-session skipping idea as reCAPTCHA. Returns true if a grid was reached.
+ */
+async function cycleHcaptchaToGrid(page: any): Promise<boolean> {
+  const cb = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
+  if (cb) {
+    const f = await cb.contentFrame();
+    await f?.click('#checkbox').catch(() => {});
+  }
+
+  // A property grid: prompt is "select/click each image …" AND a 3x3 task grid
+  // of image cells is present. Non-grid puzzles ("choose the card…", drag, path)
+  // fail this and get refreshed away.
+  const isGrid = async (): Promise<boolean> => {
+    const ch = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
+    if (!ch) return false;
+    const f = await ch.contentFrame();
+    if (!f) return false;
+    return f.evaluate(() => {
+      const p = (document.querySelector('.prompt-text, h2') as HTMLElement)?.innerText?.toLowerCase() || '';
+      const gridish = /click each|select each|each image (containing|with)/.test(p);
+      const cells = document.querySelectorAll('.task-image, .image-wrapper .image, .task').length;
+      return gridish && cells >= 9;
+    }).catch(() => false);
+  };
+  const refresh = async (): Promise<boolean> => {
+    const ch = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
+    const f = ch ? await ch.contentFrame() : null;
+    const btn = f ? await f.$('.refresh.button, .refresh') : null;
+    if (!btn) return false;
+    await btn.click().catch(() => {});
+    await page.waitForTimeout(900);
+    return true;
+  };
+
+  if (await waitFor(isGrid, 8000)) return true;
+  for (let i = 0; i < MAX_SKIPS; i++) {
+    if (!(await refresh())) break;
+    if (await waitFor(isGrid, 5000)) return true;
+  }
+  return false;
+}
+
+/** Poll fn() until it returns truthy or the timeout elapses. */
+async function waitFor<T>(fn: () => Promise<T>, ms: number): Promise<T | null> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const v = await fn().catch(() => null);
+    if (v) return v;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return (await fn().catch(() => null)) ?? null;
+}
+
 /**
  * One real attempt. Returns the outcome with the bucket the solver actually
  * landed in. `sawGrid` reflects whether any grid round was observed (used to
@@ -203,6 +317,42 @@ async function runOnce(
   try {
     await page.goto(family === 'hcaptcha' ? HCAPTCHA_URL : RECAPTCHA_URL);
     recorder.start();
+
+    // Cycle hCaptcha PAST non-grid puzzles to a property grid (same-session
+    // refresh) instead of discarding+re-rolling. Disable with HCAPTCHA_CYCLE=0.
+    if (family === 'hcaptcha' && process.env.HCAPTCHA_CYCLE !== '0') {
+      const reached = await cycleHcaptchaToGrid(page);
+      if (reached) sawGrid = true;
+      if (!reached) {
+        await recorder.stop(); recorder.discard();
+        await context.close(); await browser.close();
+        return {
+          outcome: { family, bucket: 'discarded', attempt, solved: false, tokenLen: 0,
+            elapsedMs: Date.now() - start, error: 'no hCaptcha grid after skips' },
+          recorder, sawGrid: false,
+        };
+      }
+    }
+
+    // Cycle reCAPTCHA challenges (via the reload button) to the wanted grid type
+    // before solving — keeps us in one session instead of re-rolling the browser.
+    if (family === 'recaptcha' && WANT_GRID !== 'any') {
+      const cycled = await cycleRecaptchaToGrid(page, WANT_GRID);
+      if (cycled) gridSize = cycled;
+      const target = WANT_GRID === '4x4' ? 4 : 3;
+      if (cycled !== target) {
+        // Couldn't reach the wanted grid within MAX_SKIPS — bail this attempt so
+        // it doesn't count against the wanted bucket.
+        await recorder.stop(); recorder.discard();
+        await context.close(); await browser.close();
+        return {
+          outcome: { family, bucket: 'discarded', attempt, solved: false, tokenLen: 0,
+            elapsedMs: Date.now() - start, error: `wanted ${WANT_GRID}, got ${cycled ?? 'none'} after skips` },
+          recorder, sawGrid: false,
+        };
+      }
+    }
+
     const solver = new CaptchaKrakenSolver({
       repoPath: REPO_PATH,
       pythonCommand: PYTHON_COMMAND,
@@ -269,10 +419,12 @@ async function collect(family: 'recaptcha' | 'hcaptcha') {
     }
     const { outcome, recorder, sawGrid } = run;
 
-    if (family === 'hcaptcha' && !sawGrid) {
+    // Discard (don't count) when the demo served the wrong thing: a non-grid
+    // hCaptcha puzzle, or a reCAPTCHA we couldn't cycle to the wanted grid type.
+    if ((family === 'hcaptcha' && !sawGrid) || outcome.bucket === 'discarded') {
       recorder.discard();
       results.push({ ...outcome, bucket: 'discarded', video: null });
-      console.log(`  [${family} #${attempt}] non-grid puzzle → discarded, retrying`);
+      console.log(`  [${family} #${attempt}] ${outcome.error?.startsWith('wanted') ? outcome.error : 'non-grid puzzle'} → discarded, retrying`);
       continue;
     }
 
@@ -290,11 +442,15 @@ async function collect(family: 'recaptcha' | 'hcaptcha') {
   }
 }
 
+// Skip a family with SKIP_RECAPTCHA=1 / SKIP_HCAPTCHA=1 (e.g. when a demo isn't
+// serving grids, to avoid burning the whole budget on discards).
 test('record reCAPTCHA demos', async () => {
   test.setTimeout(0); // the family loop owns its own timing
+  test.skip(process.env.SKIP_RECAPTCHA === '1', 'SKIP_RECAPTCHA=1');
   await collect('recaptcha');
 });
 test('record hCaptcha demos', async () => {
   test.setTimeout(0);
+  test.skip(process.env.SKIP_HCAPTCHA === '1', 'SKIP_HCAPTCHA=1');
   await collect('hcaptcha');
 });
