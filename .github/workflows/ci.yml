@@ -1,13 +1,17 @@
 name: CI
 
-# Fast, hermetic checks on every PR and push to main: no GPU, no network, no
-# model weights. The core guard is grid detection — the foundation of every
-# solve — plus a TypeScript build check on the browser solver.
+# Fast, hermetic checks: no GPU, no network, no model weights. The core guard
+# is grid detection — the foundation of every solve — plus a TypeScript build
+# check on the browser solver.
+#
+# Runs on every PR into main. On pushes to dev/main these same checks run as
+# the pre-publish gate inside publish.yml (via workflow_call) — so we don't
+# also trigger on push here, which would double every run.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  # Reused by publish.yml as the pre-publish gate on dev/main pushes.
+  workflow_call:
 
 jobs:
   grid-detection:

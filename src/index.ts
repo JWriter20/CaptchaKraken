@@ -11,7 +11,7 @@ export { CaptchaKrakenSolver } from './solver';
  * @example
  * ```typescript
  * import puppeteer from 'puppeteer';
- * import { CaptchaKrakenSolver, fromPuppeteer } from 'playwright-captcha-kraken-js';
+ * import { CaptchaKrakenSolver, fromPuppeteer } from 'captcha-kraken-js';
  *
  * const browser = await puppeteer.launch({ headless: false });
  * const page = await browser.newPage();
@@ -42,7 +42,7 @@ export { fromPuppeteer } from './puppeteer-adapter';
  * import { chromium } from 'playwright';          // vanilla
  * // import { chromium } from 'patchright';       // stealth-patched
  * // import { Camoufox } from 'camoufox-js';      // Firefox stealth
- * import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
+ * import { CaptchaKrakenSolver } from 'captcha-kraken-js';
  *
  * const browser = await chromium.launch({ headless: false });
  * const page = await (await browser.newContext()).newPage();
