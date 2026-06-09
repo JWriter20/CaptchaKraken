@@ -20,7 +20,7 @@
 #   bash install.sh --yes           # non-interactive (accept recommended path)
 #
 # This is the SELF-HOSTED path. A hosted cloud API (no GPU required) is coming —
-# watch the repo: https://github.com/JWriter20/PlaywrightCaptchaKrakenJS
+# watch the repo: https://github.com/JWriter20/CaptchaKrakenJS
 set -euo pipefail
 
 # ── Model registry ──────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ BASE_AWQ="cyankiwi/Qwen3.5-9B-AWQ-4bit"       # 4-bit, ~6 GB weights, lighter / 
 GRID_LORA="JobHarvest/qwen3.5-9b-grid-lora"   # the captcha grid adapter (served as `captcha-grid`)
 LORA_NAME="captcha-grid"
 PORT="${VLLM_PORT:-8000}"
-REPO_URL="https://github.com/JWriter20/PlaywrightCaptchaKrakenJS"
+REPO_URL="https://github.com/JWriter20/CaptchaKrakenJS"
 
 # Memory floors (GB). FP8 keeps the vision tower in bf16 → needs more headroom
 # but scores higher; AWQ is the budget path. Below AWQ_MIN we won't serve.

@@ -7,7 +7,7 @@ third-party solving service involved.
 
 > ⭐ **Enjoying CaptchaKraken? Star both repos** — and **watch** them for updates
 > (smaller models, the hosted cloud API, new puzzle types):
-> [PlaywrightCaptchaKrakenJS](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> [CaptchaKrakenJS](https://github.com/JWriter20/CaptchaKrakenJS)
 > (this solver) · [CaptchaKraken-cli](https://github.com/JWriter20/CaptchaKraken-cli)
 > (the detection + grid-planner engine). On GitHub: **Star** = ⭐ top-right,
 > **Watch** = 👁 *Watch → All Activity* for release notifications.
@@ -147,7 +147,7 @@ model — 4070 and below, older Apple **Max** chips (fine on the 4-bit model), A
 
 > ⏳ **Below ~30 tokens/sec, self-hosting feels sluggish.** If that's your card,
 > consider the upcoming **hosted cloud API** instead — it serves the 8-bit model
-> at **~100 tokens/sec** with no GPU to run. ⭐ [Star the repo](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> at **~100 tokens/sec** with no GPU to run. ⭐ [Star the repo](https://github.com/JWriter20/CaptchaKrakenJS)
 > to be notified when it launches. `install.sh` estimates your speed from your
 > device's bandwidth (NVIDIA / AMD / Apple) and flags this automatically.
 
@@ -184,7 +184,7 @@ The solver only needs **two** environment variables (both written by
 ## Usage
 
 ```bash
-npm install playwright-captcha-kraken-js
+npm install captcha-kraken-js
 ```
 
 CaptchaKraken does **not** launch the browser for you — you **bring your own**
@@ -211,7 +211,7 @@ the published grid LoRA, and `solve()` does detect → grid → click → verify
 
 ```typescript
 import { chromium } from 'playwright';
-import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captcha-kraken-js';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -229,7 +229,7 @@ Drop-in for vanilla Playwright — same API, just a stealthier Chromium.
 
 ```typescript
 import { chromium } from 'patchright';
-import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captcha-kraken-js';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -249,7 +249,7 @@ you to fetch its Firefox build: `npx camoufox-js fetch`.)
 
 ```typescript
 import { Camoufox } from 'camoufox-js';
-import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captcha-kraken-js';
 
 const browser = await Camoufox({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -269,7 +269,7 @@ etc.); only the object you hand `solve()` needs wrapping.
 
 ```typescript
 import puppeteer from 'puppeteer';
-import { CaptchaKrakenSolver, fromPuppeteer } from 'playwright-captcha-kraken-js';
+import { CaptchaKrakenSolver, fromPuppeteer } from 'captcha-kraken-js';
 
 const browser = await puppeteer.launch({ headless: false });
 const page = await browser.newPage();
@@ -346,7 +346,7 @@ browser ─▶ detect captcha ─▶ screenshot frame
 
 > 📣 **Watch the repos to hear about these as they ship**, and ⭐ star if the
 > project is useful to you — it genuinely helps:
-> [**PlaywrightCaptchaKrakenJS**](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> [**CaptchaKrakenJS**](https://github.com/JWriter20/CaptchaKrakenJS)
 > (the solver) and [**CaptchaKraken-cli**](https://github.com/JWriter20/CaptchaKraken-cli)
 > (detection + grid planner). Use GitHub's **Watch → All Activity** for release
 > notifications.

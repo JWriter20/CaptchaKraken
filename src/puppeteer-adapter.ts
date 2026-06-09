@@ -21,7 +21,7 @@
  * Usage:
  * ```typescript
  * import puppeteer from 'puppeteer';
- * import { CaptchaKrakenSolver, fromPuppeteer } from 'playwright-captcha-kraken-js';
+ * import { CaptchaKrakenSolver, fromPuppeteer } from 'captcha-kraken-js';
  *
  * const browser = await puppeteer.launch({ headless: false });
  * const page = await browser.newPage();

@@ -20,8 +20,8 @@ repository's [LICENSE](LICENSE) (the CaptchaKraken Source-Available License).
 ## Dev setup
 
 ```bash
-git clone --recursive git@github.com:JWriter20/PlaywrightCaptchaKrakenJS.git
-cd PlaywrightCaptchaKrakenJS
+git clone --recursive git@github.com:JWriter20/CaptchaKrakenJS.git
+cd CaptchaKrakenJS
 npm install        # builds the solver + a local CLI venv (postinstall)
 npm run build
 ```

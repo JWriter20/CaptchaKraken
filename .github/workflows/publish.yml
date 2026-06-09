@@ -1,0 +1,153 @@
+name: Publish
+
+# Release automation for captcha-kraken-js.
+#
+#   push to dev  -> publish a prerelease under the `beta` dist-tag
+#                   (2.0.1-beta.0, 2.0.1-beta.1, ...). Installs as
+#                   `npm i captcha-kraken-js@beta`; `@latest` is untouched.
+#   push to main -> publish the stable version in package.json under `latest`.
+#                   This is the beta-graduates-to-real release; it only happens
+#                   when a PR from dev is merged into main (main is protected).
+#
+# Both paths first run the same hermetic checks as ci.yml, then publish only if
+# those pass. Requires repo secret NPM_TOKEN (an npm automation token).
+on:
+  push:
+    branches: [main, dev]
+
+# Never let two publish runs race on the same branch (the dev path commits a
+# version bump back).
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # --- Reuse the exact CI gate before any publish -------------------------
+  verify:
+    name: Verify (build + grid tests)
+    uses: ./.github/workflows/ci.yml
+
+  # --- dev: prerelease under the `beta` tag -------------------------------
+  publish-beta:
+    name: Publish beta (dev)
+    needs: verify
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # to push the version-bump commit back to dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Use a token that can push back to a (potentially protected) branch
+          # and not retrigger this workflow in a loop (see [skip ci] below).
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install (no python setup)
+        run: npm ci --ignore-scripts
+        env:
+          CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP: '1'
+
+      # Compute the next beta version. Two cases the counter must stay ahead of:
+      #   - the current `@beta` (keep the prerelease counter monotonic), and
+      #   - the current `@latest` stable (once x.y.z ships, betas must move to
+      #     the NEXT patch, else 2.0.1-beta.N would sort *below* released 2.0.1).
+      # We pick the larger target and roll forward until the version is unused.
+      - name: Compute next beta version
+        id: ver
+        run: |
+          PKG_BASE=$(node -p "require('./package.json').version.split('-')[0]")
+          LATEST=$(npm view captcha-kraken-js@latest version 2>/dev/null || true)
+          BETA=$(npm view captcha-kraken-js@beta version 2>/dev/null || true)
+
+          # Candidate 1: bump the published beta's prerelease counter.
+          if [ -n "$BETA" ]; then
+            CAND_BETA=$(npx --yes semver "$BETA" -i prerelease --preid beta)
+          else
+            CAND_BETA="${PKG_BASE}-beta.0"
+          fi
+          # Candidate 2: first beta of the patch after the latest stable.
+          if [ -n "$LATEST" ]; then
+            NEXT_PATCH=$(npx --yes semver "$LATEST" -i patch)
+            CAND_PATCH="${NEXT_PATCH}-beta.0"
+          else
+            CAND_PATCH="${PKG_BASE}-beta.0"
+          fi
+          # Take whichever is the higher semver (semver prints args sorted
+          # ascending, so the last line is the max).
+          NEXT=$(npx --yes semver "$CAND_BETA" "$CAND_PATCH" | tail -1)
+
+          # Guard: never collide with an already-published version.
+          while npm view "captcha-kraken-js@$NEXT" version >/dev/null 2>&1; do
+            NEXT=$(npx --yes semver "$NEXT" -i prerelease --preid beta)
+          done
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next beta version: $NEXT"
+
+      - name: Set version in package.json
+        run: npm version "${{ steps.ver.outputs.next }}" --no-git-tag-version --allow-same-version
+
+      - name: Publish @beta
+        run: npm publish --tag beta --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Persist the bumped version on dev so the next push computes from here
+      # too. [skip ci] keeps this commit from retriggering CI/publish.
+      - name: Commit version bump
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): ${{ steps.ver.outputs.next }} [skip ci]" || exit 0
+          git push origin HEAD:dev
+
+  # --- main: stable release under `latest` --------------------------------
+  publish-latest:
+    name: Publish latest (main)
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install (no python setup)
+        run: npm ci --ignore-scripts
+        env:
+          CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP: '1'
+
+      # Graduate the current line to a stable release: strip any `-beta.N`
+      # suffix that rode in from dev so `latest` is always a clean x.y.z.
+      # (package.json on dev carries the rolling beta version; main publishes
+      # the real thing.) Idempotent: if that stable version is already on npm
+      # (e.g. a main re-run), skip rather than fail.
+      - name: Publish @latest (idempotent)
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          STABLE=${PKG_VER%%-*}
+          echo "package.json=$PKG_VER -> publishing stable $STABLE under @latest"
+          npm version "$STABLE" --no-git-tag-version --allow-same-version
+          if npm view "captcha-kraken-js@$STABLE" version >/dev/null 2>&1; then
+            echo "captcha-kraken-js@$STABLE already published — skipping."
+            exit 0
+          fi
+          npm publish --tag latest --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

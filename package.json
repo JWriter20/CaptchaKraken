@@ -1,7 +1,7 @@
 {
-  "name": "playwright-captcha-kraken-js",
-  "version": "1.0.5",
-  "description": "Playwright wrapper which uses CaptchaKraken-cli to solve captchas.",
+  "name": "captcha-kraken-js",
+  "version": "2.0.0",
+  "description": "Browser-agnostic Playwright/Puppeteer wrapper which uses CaptchaKraken-cli to solve captchas.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -18,16 +18,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JWriter20/PlaywrightCaptchaKrakenJS.git"
+    "url": "git+https://github.com/JWriter20/CaptchaKrakenJS.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/JWriter20/PlaywrightCaptchaKrakenJS/issues"
+    "url": "https://github.com/JWriter20/CaptchaKrakenJS/issues"
   },
-  "homepage": "https://github.com/JWriter20/PlaywrightCaptchaKrakenJS#readme",
+  "homepage": "https://github.com/JWriter20/CaptchaKrakenJS#readme",
   "devDependencies": {
     "@types/node": "^24.10.2",
     "typescript": "^5.9.3"
