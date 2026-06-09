@@ -59,7 +59,7 @@ warn()  { echo "$(c '1;33' '!') $*"; }
 err()   { echo "$(c '1;31' '✗') $*" >&2; }
 
 # ── Hardware detection ──────────────────────────────────────────────────────
-# Sets DETECT_MEM_GB (int, accelerator memory) and DETECT_KIND (nvidia|apple|cpu).
+# Sets DETECT_MEM_GB (int, accelerator memory) and DETECT_KIND (nvidia|amd|apple|cpu).
 detect_hardware() {
   DETECT_MEM_GB=0
   DETECT_KIND="cpu"
@@ -72,6 +72,18 @@ detect_hardware() {
     if [[ -n "$mib" && "$mib" -gt 0 ]]; then
       DETECT_MEM_GB=$(( mib / 1024 ))
       DETECT_KIND="nvidia"
+      return
+    fi
+  fi
+
+  # AMD ROCm: rocm-smi reports VRAM in bytes (--showmeminfo vram).
+  if command -v rocm-smi >/dev/null 2>&1; then
+    local bytes
+    bytes=$(rocm-smi --showmeminfo vram --csv 2>/dev/null \
+            | awk -F, 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' | sort -rn | head -1 || echo 0)
+    if [[ -n "$bytes" && "$bytes" -gt 0 ]]; then
+      DETECT_MEM_GB=$(( bytes / 1024 / 1024 / 1024 ))
+      DETECT_KIND="amd"
       return
     fi
   fi
@@ -116,6 +128,134 @@ insufficient_menu() {
     1) info "Proceeding with download-only (AWQ 4-bit)."; QUANT="awq"; DOWNLOAD_ONLY=1 ;;
     *) info "Opening repo. Star it to be notified at launch: $REPO_URL"; exit 0 ;;
   esac
+}
+
+# ── Speed advisory ──────────────────────────────────────────────────────────
+# LLM token generation is MEMORY-BANDWIDTH bound: each decoded token streams the
+# active weights once, so tok/s ≈ bandwidth ÷ bytes-read-per-token. For this 9B
+# model that's ~9 GB/token on 8-bit (FP8) and ~4.5 GB/token on 4-bit (AWQ); real
+# throughput lands near ~50% of the theoretical ceiling. So we estimate speed
+# from the device's MEMORY BANDWIDTH (not its capacity), which the capacity gate
+# can't see. Calibration (measured on a 5090, 1792 GB/s): FP8 ≈ 100 tok/s,
+# AWQ ≈ 200 tok/s — both fall out of the formula below.
+#
+# Bandwidth (GB/s) for common devices, keyed by a substring of the reported name.
+# Unknown devices fall back to the memory-tier heuristic (Apple / AWQ ⇒ likely slow).
+BW_EFFICIENCY_PCT=50      # fraction of theoretical bandwidth realized in practice
+GB_PER_TOKEN_FP8=9        # ~bytes streamed per decoded token, 8-bit weights
+GB_PER_TOKEN_AWQ_X10=45   # 4-bit ≈ 4.5 GB/token, ×10 so we keep integer math
+SLOW_TOKENS_PER_SEC=30    # below this, self-hosting feels sluggish → suggest cloud
+
+# Echo the device's memory bandwidth in GB/s for a given name, or nothing if unknown.
+# Figures are spec-sheet peak VRAM / unified-memory bandwidth.
+device_bandwidth_gbs() {
+  local name="$1"
+  case "$name" in
+    # ── NVIDIA datacenter ──
+    *H200*)                 echo 4800 ;;   # H200 (HBM3e)
+    *H100*)                 echo 3350 ;;   # H100 (HBM3)
+    *A100*)                 echo 2000 ;;   # A100 (HBM2e)
+    *L40*)                  echo 864  ;;   # L40 / L40S
+    *A6000*|*"RTX 6000"*)   echo 768  ;;   # A6000 / RTX 6000 Ada
+    *A10*)                  echo 600  ;;   # A10
+    *T4*)                   echo 320  ;;   # T4
+    # ── NVIDIA RTX 50 (GDDR7) ──
+    *5090*)                 echo 1792 ;;
+    *"5080"*)               echo 960  ;;
+    *"5070 Ti"*)            echo 896  ;;
+    *5070*)                 echo 672  ;;
+    *5060*)                 echo 448  ;;
+    # ── NVIDIA RTX 40 ──
+    *4090*)                 echo 1008 ;;
+    *4080*)                 echo 717  ;;   # 4080 / 4080 Super
+    *"4070 Ti"*)            echo 672  ;;
+    *4070*)                 echo 504  ;;
+    *4060*)                 echo 272  ;;
+    # ── NVIDIA RTX 30 ──
+    *3090*)                 echo 936  ;;   # 3090 / 3090 Ti
+    *3080*)                 echo 760  ;;   # 3080 (10G) / 3080 Ti ~912, use conservative
+    *3070*)                 echo 448  ;;
+    *3060*)                 echo 360  ;;
+    # ── AMD Radeon RX 7000 / 6000 (RDNA3/2) ──
+    *"7900 XTX"*)           echo 960  ;;
+    *"7900 XT"*)            echo 800  ;;
+    *"7800 XT"*)            echo 624  ;;
+    *"7700 XT"*)            echo 432  ;;
+    *"6950 XT"*|*"6900 XT"*) echo 512 ;;
+    *"6800 XT"*|*"6800"*)   echo 512  ;;
+    *"7600"*|*"6700 XT"*)   echo 384  ;;
+    # ── Apple silicon (unified memory bandwidth) ──
+    # NB: order matters — match "<chip> Max/Pro/Ultra" before the bare "<chip>".
+    *"M3 Ultra"*)           echo 800  ;;
+    *"M2 Ultra"*)           echo 800  ;;
+    *"M5 Max"*)             echo 614  ;;
+    *"M4 Max"*)             echo 546  ;;
+    *"M3 Max"*)             echo 400  ;;
+    *"M2 Max"*)             echo 400  ;;
+    *"M1 Max"*)             echo 400  ;;
+    *"M5 Pro"*)             echo 307  ;;
+    *"M4 Pro"*)             echo 273  ;;
+    *"M3 Pro"*)             echo 150  ;;
+    *"M2 Pro"*)             echo 200  ;;
+    *"M1 Pro"*)             echo 200  ;;
+    *"M5"*)                 echo 154  ;;
+    *"M4"*)                 echo 120  ;;
+    *"M3"*)                 echo 100  ;;
+    *"M2"*)                 echo 100  ;;
+    *"M1"*)                 echo 68   ;;
+    *) echo "" ;;
+  esac
+}
+
+# Estimated tok/s for a bandwidth + the active quant (integer math).
+estimate_tokens_per_sec() {
+  local bw="$1"
+  if [[ "$QUANT" == "fp8" ]]; then
+    echo $(( bw * BW_EFFICIENCY_PCT / 100 / GB_PER_TOKEN_FP8 ))
+  else
+    # bw * eff% / 100 / (GB_PER_TOKEN_AWQ_X10/10)  ==  bw * eff% * 10 / 100 / X10
+    echo $(( bw * BW_EFFICIENCY_PCT * 10 / 100 / GB_PER_TOKEN_AWQ_X10 ))
+  fi
+}
+
+# Best-effort device name: nvidia-smi (NVIDIA), rocm-smi (AMD), sysctl (Apple).
+detect_device_name() {
+  if [[ "$DETECT_KIND" == "nvidia" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort -rn | head -1
+  elif [[ "$DETECT_KIND" == "amd" ]] && command -v rocm-smi >/dev/null 2>&1; then
+    rocm-smi --showproductname --csv 2>/dev/null \
+      | awk -F, 'NR>1 {print $2}' | head -1
+  elif [[ "$DETECT_KIND" == "apple" ]]; then
+    sysctl -n machdep.cpu.brand_string 2>/dev/null
+  fi
+}
+
+speed_advisory() {
+  local name bw est
+  name="$(detect_device_name)"
+  bw="$(device_bandwidth_gbs "$name")"
+
+  if [[ -n "$bw" ]]; then
+    est="$(estimate_tokens_per_sec "$bw")"
+    if (( est >= SLOW_TOKENS_PER_SEC )); then
+      ok "Estimated speed: ~${est} tokens/sec (${name:-device}, ${QUANT}, ~${bw} GB/s) — fast enough to self-host."
+      return 0
+    fi
+    echo
+    warn "Estimated speed: ~${est} tokens/sec (${name:-device}, ${QUANT}, ~${bw} GB/s) — below"
+    warn "~${SLOW_TOKENS_PER_SEC}/s, so each solve will feel slow. Your card may be too slow to self-host comfortably."
+  else
+    # Unknown device → fall back to the memory-tier heuristic.
+    if [[ "$DETECT_KIND" != "apple" && "$QUANT" != "awq" ]]; then
+      return 0   # FP8-capable, non-Apple, unknown card: assume OK, stay quiet.
+    fi
+    echo
+    warn "This setup (${DETECT_KIND}, ${QUANT}) will likely generate well under"
+    warn "~${SLOW_TOKENS_PER_SEC} tokens/sec, so each solve will feel slow."
+  fi
+  echo "  $(c '1;36' '☁')  Want ~100 tok/s without running a GPU? A hosted cloud API (8-bit"
+  echo "     model) is coming — star the repo to be notified at launch:"
+  echo "     $REPO_URL"
 }
 
 # ── Pick quantization from detected memory ──────────────────────────────────
@@ -225,6 +365,7 @@ write_env "$BASE"
 if [[ "$DOWNLOAD_ONLY" == "1" ]]; then
   ok "Download-only complete. Copy the HF cache + captchakraken.env to your server."
 else
+  speed_advisory
   print_serve_hint "$BASE"
 fi
 echo

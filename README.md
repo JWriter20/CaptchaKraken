@@ -5,7 +5,12 @@ the captcha, reads the image grid with a fine-tuned **Qwen3.5-9B** vision model,
 and clicks through to a token. Everything runs on **your** hardware — no
 third-party solving service involved.
 
-> ⭐ If this is useful, please star the repo.
+> ⭐ **Enjoying CaptchaKraken? Star both repos** — and **watch** them for updates
+> (smaller models, the hosted cloud API, new puzzle types):
+> [PlaywrightCaptchaKrakenJS](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> (this solver) · [CaptchaKraken-cli](https://github.com/JWriter20/CaptchaKraken-cli)
+> (the detection + grid-planner engine). On GitHub: **Star** = ⭐ top-right,
+> **Watch** = 👁 *Watch → All Activity* for release notifications.
 
 > **⚠️ v2 is a breaking change.** It's a full rewrite. The old multi-provider
 > setup (Gemini / OpenRouter / Ollama) is gone — v2 runs one purpose-built grid
@@ -53,6 +58,18 @@ https://github.com/user-attachments/assets/0545f3ff-15cd-4bde-9b5d-bd3112bb032a
 **reCAPTCHA 4×4 — one-shot "select all"**
 
 https://github.com/user-attachments/assets/93b5dd43-c634-4644-8754-fb5f8ab8b9c9
+
+**hCaptcha 3×3 grid — "select all" property puzzle (~15 s)**
+
+https://github.com/user-attachments/assets/7df62269-d4fd-4ec8-9562-883409679ab6
+
+**hCaptcha 3×3 grid — another property solve (~14 s)**
+
+https://github.com/user-attachments/assets/8c7416fb-065c-4a0b-8f1b-f2f24fa88852
+
+**hCaptcha 3×3 grid — property solve (~14 s)**
+
+https://github.com/user-attachments/assets/f1b98e31-0162-4a3a-a188-bcf721475642
 <!-- END DEMOS -->
 
 ### Not supported yet
@@ -86,6 +103,53 @@ the grid model, and writes a `captchakraken.env` config file.
 If your hardware is too small, you can still `bash install.sh --download-only`
 (e.g. to copy the model to a bigger server later), or watch the repo for smaller
 models and the cloud API. Force a size with `bash install.sh --quant fp8|awq`.
+
+### A note on speed
+
+Solve time is dominated by how fast your hardware generates tokens, and LLM
+generation is **memory-bandwidth bound** — each token streams the model's weights
+through memory once. So speed tracks your GPU/SoC **memory bandwidth**, not its
+capacity: roughly `tokens/sec ≈ bandwidth × ~50% ÷ bytes-per-token`, where the
+8-bit (FP8) model reads ~9 GB/token and the 4-bit (AWQ) ~4.5 GB/token. (Measured
+on a 5090: ~100 tok/s on FP8, ~200 tok/s on AWQ — both match this formula.)
+
+Estimated throughput for common devices:
+
+| Device | Memory bandwidth | FP8 (8-bit) | AWQ (4-bit) |
+|---|---|---|---|
+| NVIDIA H100 | ~3.35 TB/s | ~186 | ~370 |
+| NVIDIA A100 | ~2.0 TB/s | ~111 | ~222 |
+| **NVIDIA RTX 5090** | **~1.79 TB/s** | **~100** | **~200** |
+| NVIDIA RTX 4090 | ~1.0 TB/s | ~56 | ~112 |
+| NVIDIA RTX 5080 / 3090 | ~0.95 TB/s | ~53 | ~105 |
+| NVIDIA RTX 5070 Ti | ~896 GB/s | ~50 | ~100 |
+| AMD RX 7900 XTX | ~960 GB/s | ~53 | ~106 |
+| NVIDIA RTX 3080 / 4080 | ~0.7–0.76 TB/s | ~40 | ~80 |
+| Apple M2 / M3 Ultra | ~800 GB/s | ~44 | ~88 |
+| NVIDIA RTX 5070 | ~672 GB/s | ~37 | ~74 |
+| Apple M5 Max | ~614 GB/s | ~34 | ~68 |
+| Apple M4 Max | ~546 GB/s | ~30 | ~60 |
+| NVIDIA RTX 4070 | ~504 GB/s | ~28 ⚠️ | ~56 |
+| Apple M1–M3 Max | ~400 GB/s | ~22 ⚠️ | ~44 |
+| Apple M5 Pro | ~307 GB/s | ~17 ⚠️ | ~34 |
+| Apple M4 Pro | ~273 GB/s | ~15 ⚠️ | ~30 |
+| Apple M5 (base) | ~154 GB/s | ~8 ⚠️ | ~17 ⚠️ |
+
+(Rough estimates at ~50% bandwidth efficiency; real numbers vary with batching,
+KV-cache length, and driver. AWQ is faster but slightly less accurate.) Sources:
+NVIDIA / AMD / Apple spec sheets.
+
+**Cards that comfortably self-host** (≥ 30 tok/s): NVIDIA 5090 · 5080 · 5070 Ti ·
+5070 · 4090 · 4080(Ti) · 3090 · 3080; AMD 7900 XTX / 7900 XT; Apple **Ultra**
+chips and the **M4/M5 Max**. Most other cards fall under ~30 tok/s on the 8-bit
+model — 4070 and below, older Apple **Max** chips (fine on the 4-bit model), Apple
+**Pro**/base laptops, and older mid-range AMD.
+
+> ⏳ **Below ~30 tokens/sec, self-hosting feels sluggish.** If that's your card,
+> consider the upcoming **hosted cloud API** instead — it serves the 8-bit model
+> at **~100 tokens/sec** with no GPU to run. ⭐ [Star the repo](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> to be notified when it launches. `install.sh` estimates your speed from your
+> device's bandwidth (NVIDIA / AMD / Apple) and flags this automatically.
 
 ### Start the server
 
@@ -123,31 +187,113 @@ The solver only needs **two** environment variables (both written by
 npm install playwright-captcha-kraken-js
 ```
 
-If you're cloning this repo, initialize the submodule that holds the
-detection/planner CLI:
+CaptchaKraken does **not** launch the browser for you — you **bring your own**
+browser and hand the solver a page. Install whichever automation framework you
+prefer alongside it. The solver itself ships **no browser dependency**.
 
-```bash
-git submodule update --init --recursive
-npm install        # builds the solver + a local CLI venv (postinstall)
-```
+| Framework | Install | Pass to `solve()` |
+|---|---|---|
+| [Playwright](https://www.npmjs.com/package/playwright) (vanilla) | `npm i playwright` | the `page` directly |
+| [Patchright](https://www.npmjs.com/package/patchright) (stealth Chromium) | `npm i patchright` | the `page` directly |
+| [camoufox-js](https://www.npmjs.com/package/camoufox-js) (Firefox stealth) | `npm i camoufox-js` | the `page` directly |
+| [Puppeteer](https://www.npmjs.com/package/puppeteer) | `npm i puppeteer` | `fromPuppeteer(page)` |
+
+The first three are Playwright-compatible (they return a standard Playwright
+`Page`), so you pass the page straight in. Puppeteer's API differs slightly, so
+wrap its page once with `fromPuppeteer()`. All four are tested end-to-end against
+the live reCAPTCHA demo.
+
+In every example the solver reads `VLLM_BASE_URL` + `CAPTCHA_KRAKEN_API_KEY` from
+the environment (run `install.sh`, then `source captchakraken.env`), defaults to
+the published grid LoRA, and `solve()` does detect → grid → click → verify.
+
+### Playwright (vanilla)
 
 ```typescript
-import { Camoufox } from '@jobharvest/camoufox-js';
+import { chromium } from 'playwright';
+import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
+
+const browser = await chromium.launch({ headless: false });
+const page = await (await browser.newContext()).newPage();
+await page.goto('https://www.google.com/recaptcha/api2/demo');
+
+const solver = new CaptchaKrakenSolver();
+await solver.solve(page);
+
+await browser.close();
+```
+
+### Patchright (stealth-patched Chromium)
+
+Drop-in for vanilla Playwright — same API, just a stealthier Chromium.
+
+```typescript
+import { chromium } from 'patchright';
+import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
+
+const browser = await chromium.launch({ headless: false });
+const page = await (await browser.newContext()).newPage();
+await page.goto('https://www.google.com/recaptcha/api2/demo');
+
+const solver = new CaptchaKrakenSolver();
+await solver.solve(page);
+
+await browser.close();
+```
+
+### camoufox-js (Firefox stealth)
+
+[`camoufox-js`](https://github.com/apify/camoufox-js) exposes a `Camoufox()`
+launcher that returns a standard Playwright Browser. (On first run it may prompt
+you to fetch its Firefox build: `npx camoufox-js fetch`.)
+
+```typescript
+import { Camoufox } from 'camoufox-js';
 import { CaptchaKrakenSolver } from 'playwright-captcha-kraken-js';
 
 const browser = await Camoufox({ headless: false });
 const page = await (await browser.newContext()).newPage();
 await page.goto('https://www.google.com/recaptcha/api2/demo');
 
-// Reads VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY from the environment.
 const solver = new CaptchaKrakenSolver();
-await solver.solve(page);   // detect → solve grid → click → verify
+await solver.solve(page);
 
 await browser.close();
 ```
 
-That's it — no model name to pass, no provider to choose. The solver defaults to
-the published grid LoRA and the endpoint from your env.
+### Puppeteer (via `fromPuppeteer`)
+
+Puppeteer isn't Playwright-API-compatible, so wrap its page with the bundled
+`fromPuppeteer()` adapter. Drive the **raw** Puppeteer page as usual (navigate,
+etc.); only the object you hand `solve()` needs wrapping.
+
+```typescript
+import puppeteer from 'puppeteer';
+import { CaptchaKrakenSolver, fromPuppeteer } from 'playwright-captcha-kraken-js';
+
+const browser = await puppeteer.launch({ headless: false });
+const page = await browser.newPage();
+await page.goto('https://www.google.com/recaptcha/api2/demo');
+
+const solver = new CaptchaKrakenSolver();
+await solver.solve(fromPuppeteer(page));
+
+await browser.close();
+```
+
+That's it — no model name to pass, no provider to choose, and **no browser locked
+in**. The solver defaults to the published grid LoRA and the endpoint from your
+env, and works with whatever browser you handed it.
+
+### Cloning this repo
+
+If you're cloning instead of installing from npm, initialize the submodule that
+holds the detection/planner CLI:
+
+```bash
+git submodule update --init --recursive
+npm install        # builds the solver + a local CLI venv (postinstall)
+```
 
 ### Rate limiting & IP reputation
 
@@ -197,6 +343,13 @@ browser ─▶ detect captcha ─▶ screenshot frame
   other types currently detected-and-skipped.
 - 🎯 **reCAPTCHA 4×4 robustness** — our weakest grid type end-to-end.
 - 📈 More **real labeled data** for under-represented prompts.
+
+> 📣 **Watch the repos to hear about these as they ship**, and ⭐ star if the
+> project is useful to you — it genuinely helps:
+> [**PlaywrightCaptchaKrakenJS**](https://github.com/JWriter20/PlaywrightCaptchaKrakenJS)
+> (the solver) and [**CaptchaKraken-cli**](https://github.com/JWriter20/CaptchaKraken-cli)
+> (detection + grid planner). Use GitHub's **Watch → All Activity** for release
+> notifications.
 
 ---
 

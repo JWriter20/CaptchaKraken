@@ -26,6 +26,11 @@ npm install        # builds the solver + a local CLI venv (postinstall)
 npm run build
 ```
 
+This package ships **no browser** — it types its public API against an
+implementation-neutral Playwright `Page`, and you bring your own
+Playwright-compatible launcher (vanilla `playwright`, `patchright`,
+`camoufox-js`, …). Install whichever one you want before driving a real solve.
+
 To run a solver against a model you'll need a vLLM server — see
 [`install.sh`](install.sh) and the README "Self-hosting" section.
 
@@ -50,6 +55,11 @@ python -m pytest tests/test_find_grid_corpus.py -s
 npx tsc --noEmit -p tsconfig.json
 ```
 
+This package has **no browser end-to-end tests of its own** — it never launches a
+browser. The live solve-and-record tests (`record_demos.spec.ts` et al.) live in
+the parent `CaptchaKrakenFinetune` repo, which owns a Playwright launcher and
+drives the built solver. Grid detection is exercised by the Python tests above.
+
 ## Pull requests
 
 - Branch off `main`, keep PRs focused, and describe what you changed and how you
@@ -57,8 +67,9 @@ npx tsc --noEmit -p tsconfig.json
 - If you touched grid detection, paste the `test_find_grid_corpus.py` per-type
   table before/after so reviewers can see the delta.
 - New end-to-end solving capability? Include a short clip or the
-  `record_demos_summary.json` numbers from a local run
-  (`npx playwright test tests/record_demos.spec.ts`).
+  `record_demos_summary.json` numbers from a local run of the demo recorder in
+  the parent `CaptchaKrakenFinetune` repo
+  (`npx playwright test tests/record_demos.spec.ts` there).
 
 ## What we'd love help with
 
