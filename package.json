@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "CAPTCHA_DEBUG=1 npx playwright test tests/solving.spec.ts --grep \"Recaptcha\"",
+    "test": "tsc --noEmit -p tsconfig.json",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup-python.js",
     "update-cli": "git -C CaptchaKraken-cli pull origin main"
@@ -29,15 +29,10 @@
   },
   "homepage": "https://github.com/JWriter20/PlaywrightCaptchaKrakenJS#readme",
   "devDependencies": {
-    "@playwright/test": "^1.57.0",
     "@types/node": "^24.10.2",
-    "dotenv": "^17.2.3",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@jobharvest/camoufox-js": "0.11.4",
-    "cursory-ts": "^1.0.0",
-    "patchright": "1.52.5",
-    "patchright-core": "1.51.2"
+    "cursory-ts": "^1.0.0"
   }
 }

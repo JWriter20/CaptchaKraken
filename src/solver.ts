@@ -1,4 +1,16 @@
-import { Page, ElementHandle, Frame } from 'patchright-core';
+// Playwright API types only — and our OWN structural copies, not a browser
+// package's. The solver never launches a browser; the caller hands us a `Page`
+// from whichever Playwright-compatible launcher they chose (vanilla `playwright`,
+// `patchright`, `camoufox-js`, …). Typing against any one of those would pull it
+// into consumers' trees and break across version skew, so instead we duck-type
+// the exact slice of the Playwright surface the solver uses. Every real
+// Playwright `Page`/`Frame`/`ElementHandle` structurally satisfies these. See
+// playwright-types.ts.
+import {
+  PlaywrightPage as Page,
+  PlaywrightElementHandle as ElementHandle,
+  PlaywrightFrame as Frame,
+} from './playwright-types';
 import { generate_trajectory, } from 'cursory-ts';
 import { exec, execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
@@ -87,7 +99,7 @@ export class CaptchaKrakenSolver {
   private cvWorkerPending: Map<number, { resolve: (v: any) => void; reject: (e: any) => void }> = new Map();
   private cvWorkerBuf: string = '';
 
-  constructor(config: CaptchaKrakenConfig) {
+  constructor(config: CaptchaKrakenConfig = {}) {
     this.config = config;
     this.lastMousePosition = config.startingMousePosition ?? { x: 100, y: 100 };
   }
@@ -262,6 +274,7 @@ export class CaptchaKrakenSolver {
     stage: SolveStepEvent['stage'],
     label: string,
     puzzleSource: SolveStepEvent['puzzleSource'],
+    frameRole: SolveStepEvent['frameRole'],
     attempt: number,
     meta?: Record<string, any>,
   ): Promise<void> {
@@ -284,6 +297,7 @@ export class CaptchaKrakenSolver {
         label,
         screenshotPath,
         puzzleSource,
+        frameRole,
         attempt,
         elapsedMs: this.solveStartMs ? Date.now() - this.solveStartMs : 0,
         meta,
@@ -303,6 +317,20 @@ export class CaptchaKrakenSolver {
       : src && src.includes('recaptcha/api2')
         ? 'recaptcha'
         : 'unknown';
+
+    // Distinguish the anchor "I'm not a robot" checkbox from the open image
+    // challenge so recorders can drop the (useless) pre-challenge checkbox
+    // screenshots and keep only the real puzzle. reCAPTCHA: anchor = api2/anchor,
+    // challenge = api2/bframe. hCaptcha: anchor = frame=checkbox, challenge =
+    // frame=challenge. (Note puzzleSource alone can't tell hCaptcha's checkbox
+    // from its challenge — both srcs contain hcaptcha.com.)
+    const frameRole: SolveStepEvent['frameRole'] =
+      !src ? 'unknown'
+        : src.includes('recaptcha/api2/bframe') || src.includes('frame=challenge')
+          ? 'challenge'
+          : src.includes('recaptcha/api2/anchor') || src.includes('frame=checkbox')
+            ? 'checkbox'
+            : 'unknown';
 
     // hCaptcha swaps the challenge images in asynchronously — the iframe is
     // "visible" the instant the frame opens, but the task tiles paint a beat
@@ -364,7 +392,7 @@ export class CaptchaKrakenSolver {
     // (the first time we reach a one-shot/checkbox screenshot); later loops are
     // covered by the post-action 'submit'/'round' steps.
     if (this.stepIndex === 0) {
-      await this.emitStep(captchaElement, 'initial', 'initial (pre-action)', puzzleSource, attempt,
+      await this.emitStep(captchaElement, 'initial', 'initial (pre-action)', puzzleSource, frameRole, attempt,
         establishedGridSize ? { gridSize: establishedGridSize } : undefined);
     }
 
@@ -412,17 +440,17 @@ export class CaptchaKrakenSolver {
             await this.executeClick(page, captchaElement, c, elementBox);
           }
           performedAction = true;
-          await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, attempt, { bboxes });
+          await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
         } else if (action.action === 'drag') {
           await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
-          await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, attempt, { action });
+          await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
         } else if (action.action === 'wait') {
           if ((action as any).duration_ms > 0) {
             console.log(`Waiting for ${(action as any).duration_ms}ms as requested by CLI`);
             await delay((action as any).duration_ms);
             performedAction = true;
-            await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, attempt, { action });
+            await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, frameRole, attempt, { action });
           }
         }
         if (frame) {
@@ -449,7 +477,7 @@ export class CaptchaKrakenSolver {
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
           : 'No active actions performed (empty or done). Checking for Verify/Next button...');
         await this.moveAndClick(page, verifyButton);
-        await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, attempt);
+        await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
       }
     } finally {
       // Cleanup
@@ -1425,7 +1453,7 @@ export class CaptchaKrakenSolver {
       this.saveImageForDebug(shotA);
       // Per-round boundary snapshot for onStep observers. Round 1's snapshot is
       // the baseline (pre-action) for the 3x3 dynamic path.
-      await this.emitStep(captchaElement, round === 1 ? 'initial' : 'round', `round-${round}:pre-solve`, 'recaptcha', attempt, { round });
+      await this.emitStep(captchaElement, round === 1 ? 'initial' : 'round', `round-${round}:pre-solve`, 'recaptcha', 'challenge', attempt, { round });
       // Log the grid state the model is about to see — diagnostic only, so we
       // skip the extra state query unless grid debugging is active (keeps it off
       // the critical path in normal runs).
@@ -1500,7 +1528,7 @@ export class CaptchaKrakenSolver {
         performedAction = true;
         console.log(`[recaptcha-grid] round ${round}: clicked ${bboxes.length} tile(s) -> cells ${JSON.stringify(clickedThisRound)}.`);
         this.gridDebug(`round-${round}:clicked`, { bboxes, clickedThisRound });
-        await this.emitStep(captchaElement, 'click', `round-${round}:clicked ${bboxes.length} tile(s)`, 'recaptcha', attempt, { round, clickedThisRound, bboxes });
+        await this.emitStep(captchaElement, 'click', `round-${round}:clicked ${bboxes.length} tile(s)`, 'recaptcha', 'challenge', attempt, { round, clickedThisRound, bboxes });
 
         // 5. The clicked tiles may go blank / fade out for a replacement
         //    (dynamic puzzle), or they may just stay checked (the puzzle is
@@ -1537,7 +1565,7 @@ export class CaptchaKrakenSolver {
         if (verifyButton) {
           console.log('[recaptcha-grid] clicking Verify to submit.');
           await this.moveAndClick(page, verifyButton);
-          await this.emitStep(captchaElement, 'submit', 'submitted (Verify)', 'recaptcha', attempt);
+          await this.emitStep(captchaElement, 'submit', 'submitted (Verify)', 'recaptcha', 'challenge', attempt);
         }
       }
     }

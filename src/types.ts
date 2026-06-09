@@ -28,6 +28,15 @@ export interface SolveStepEvent {
   screenshotPath: string | null;
   /** Detected puzzle vendor, if known. */
   puzzleSource?: 'hcaptcha' | 'recaptcha' | 'unknown';
+  /**
+   * Which captcha frame this screenshot is of:
+   *  - `checkbox`  : the anchor "I'm not a robot" widget (no puzzle yet)
+   *  - `challenge` : the open image/grid challenge frame (the real puzzle)
+   *  - `unknown`   : could not be determined from the frame src
+   * Recorders that only want the actual solve (not the pre-challenge checkbox
+   * clicks) filter to `challenge`.
+   */
+  frameRole?: 'checkbox' | 'challenge' | 'unknown';
   /** Outer solve-loop attempt this step belongs to. */
   attempt: number;
   /** ms since solve() started. */
