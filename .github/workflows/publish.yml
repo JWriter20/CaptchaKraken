@@ -10,7 +10,14 @@ name: Publish
 #                   when a PR from dev is merged into main (main is protected).
 #
 # Both paths first run the same hermetic checks as ci.yml, then publish only if
-# those pass. Requires repo secret NPM_TOKEN (an npm automation token).
+# those pass.
+#
+# Auth is npm TRUSTED PUBLISHING (OIDC) — no NPM_TOKEN secret. npm verifies this
+# workflow's signed GitHub OIDC identity and mints a short-lived token at publish
+# time, and stamps a provenance attestation. Requires (configured once, on
+# npmjs.com -> the package -> Settings -> Trusted Publisher):
+#   repository: JWriter20/CaptchaKrakenJS   workflow: publish.yml
+# Each publish job needs `id-token: write` and npm >= 11.5.1 (we upgrade in CI).
 on:
   push:
     branches: [main, dev]
@@ -35,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write          # to push the version-bump commit back to dev
+      id-token: write          # OIDC: trusted publishing to npm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +58,10 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: package-lock.json
+
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; node 20 ships an older npm.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install (no python setup)
         run: npm ci --ignore-scripts
@@ -95,10 +107,10 @@ jobs:
       - name: Set version in package.json
         run: npm version "${{ steps.ver.outputs.next }}" --no-git-tag-version --allow-same-version
 
+      # OIDC trusted publishing: no token; npm mints one from the id-token and
+      # attaches provenance.
       - name: Publish @beta
-        run: npm publish --tag beta --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --tag beta --access public --provenance
 
       # Persist the bumped version on dev so the next push computes from here
       # too. [skip ci] keeps this commit from retriggering CI/publish.
@@ -116,6 +128,8 @@ jobs:
     needs: verify
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write          # OIDC: trusted publishing to npm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -127,6 +141,10 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: package-lock.json
+
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; node 20 ships an older npm.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install (no python setup)
         run: npm ci --ignore-scripts
@@ -148,6 +166,4 @@ jobs:
             echo "captcha-kraken-js@$STABLE already published — skipping."
             exit 0
           fi
-          npm publish --tag latest --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish --tag latest --access public --provenance
