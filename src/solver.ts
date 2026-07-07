@@ -388,6 +388,23 @@ export class CaptchaKrakenSolver {
     // Save image to debug directory if debugging is enabled
     this.saveImageForDebug(screenshotPath);
 
+    // Animated ("video") challenges — e.g. hCaptcha "click the moving/rotating
+    // object" — can't be solved from a single frame. If the challenge is still
+    // changing across several frames (a real animation, not just a one-off
+    // load/fade), record a short video and hand THAT to the CLI instead of the
+    // static screenshot. Falls back to the screenshot if capture fails.
+    let inputPath = screenshotPath;
+    let videoPath: string | null = null;
+    if (await this.checkMovement(captchaElement, screenshotPath)) {
+      console.log('Movement detected in captcha; capturing video...');
+      try {
+        videoPath = await this.captureVideo(captchaElement);
+        inputPath = videoPath;
+      } catch (e) {
+        console.warn('Failed to capture video, falling back to static image:', e);
+      }
+    }
+
     // Baseline screenshot before any action is taken. Emitted once per solve
     // (the first time we reach a one-shot/checkbox screenshot); later loops are
     // covered by the post-action 'submit'/'round' steps.
@@ -400,8 +417,9 @@ export class CaptchaKrakenSolver {
     let allTokenUsage: TokenUsage[] = [];
 
     try {
-      // 2. Call CLI
-      const response = await this.getSolution(screenshotPath, puzzleSource, retryMode);
+      // 2. Call CLI (inputPath is the recorded video for animated challenges,
+      // otherwise the static screenshot)
+      const response = await this.getSolution(inputPath, puzzleSource, retryMode);
       const actions = response.actions;
       allTokenUsage = response.token_usage;
 
@@ -484,9 +502,82 @@ export class CaptchaKrakenSolver {
       if (fs.existsSync(screenshotPath)) {
         fs.unlinkSync(screenshotPath);
       }
+      if (videoPath && fs.existsSync(videoPath)) {
+        fs.unlinkSync(videoPath);
+      }
     }
 
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
+  }
+
+  /**
+   * Decide whether the challenge is animated. Grabs two more frames after the
+   * initial screenshot and requires consistent change across BOTH intervals, so
+   * a one-off load/fade isn't mistaken for a real animation. Best-effort: any
+   * error is treated as "static".
+   */
+  private async checkMovement(captchaElement: ElementHandle, firstScreenshotPath: string): Promise<boolean> {
+    const secondScreenshotPath = path.join(os.tmpdir(), `captcha_check_2_${Date.now()}.png`);
+    const thirdScreenshotPath = path.join(os.tmpdir(), `captcha_check_3_${Date.now()}.png`);
+
+    try {
+      await delay(600);
+      await captchaElement.screenshot({ path: secondScreenshotPath });
+      await delay(200);
+      await captchaElement.screenshot({ path: thirdScreenshotPath });
+
+      const move12 = await this.runMovementCheck(firstScreenshotPath, secondScreenshotPath);
+      const move23 = await this.runMovementCheck(secondScreenshotPath, thirdScreenshotPath);
+      return move12 && move23;
+    } catch (e) {
+      console.warn('Movement check failed, assuming static:', e);
+      return false;
+    } finally {
+      if (fs.existsSync(secondScreenshotPath)) fs.unlinkSync(secondScreenshotPath);
+      if (fs.existsSync(thirdScreenshotPath)) fs.unlinkSync(thirdScreenshotPath);
+    }
+  }
+
+  /** Frame-diff two screenshots via the CLI's `check-movement`. Returns false on
+   *  any CLI error (runCliTool yields {} → has_movement undefined). */
+  private async runMovementCheck(img1: string, img2: string, threshold: number = 0.005): Promise<boolean> {
+    const result = await this.runCliTool(['check-movement', img1, img2, String(threshold)]);
+    return !!result?.has_movement;
+  }
+
+  /**
+   * Record a short webm of an animated challenge. Grabs a burst of frames
+   * 100ms apart and encodes them with ffmpeg. Video (animated) challenges loop
+   * over a window longer than a few frames captures, so we record ~2x as many
+   * frames to catch the full loop.
+   */
+  private async captureVideo(captchaElement: ElementHandle): Promise<string> {
+    const framesDir = path.join(os.tmpdir(), `captcha_frames_${Date.now()}`);
+    fs.mkdirSync(framesDir, { recursive: true });
+
+    const videoPath = path.join(os.tmpdir(), `captcha_video_${Date.now()}.webm`);
+
+    try {
+      const numFrames = 8;
+      for (let i = 0; i < numFrames; i++) {
+        await captchaElement.screenshot({ path: path.join(framesDir, `frame_${i}.png`) });
+        if (i < numFrames - 1) await delay(100);
+      }
+
+      // ffmpeg → webm: -framerate 5, vp9 codec, CRF 35 (small files, -b:v 0
+      // required for CRF), downscale to <=400px wide for speed.
+      const command = `ffmpeg -y -framerate 5 -i "${path.join(framesDir, 'frame_%d.png')}" -c:v libvpx-vp9 -crf 35 -b:v 0 -vf "scale='min(400,iw)':-1" "${videoPath}"`;
+      await execAsync(command);
+
+      return videoPath;
+    } catch (e) {
+      console.error('ffmpeg failed:', e);
+      throw e;
+    } finally {
+      if (fs.existsSync(framesDir)) {
+        fs.rmSync(framesDir, { recursive: true, force: true });
+      }
+    }
   }
 
   private async getVerifyButton(frame: Frame): Promise<ElementHandle | null> {
