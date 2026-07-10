@@ -17,6 +17,7 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { createHash } from 'crypto';
 import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 
@@ -98,6 +99,11 @@ export class CaptchaKrakenSolver {
   private cvWorkerSeq: number = 0;
   private cvWorkerPending: Map<number, { resolve: (v: any) => void; reject: (e: any) => void }> = new Map();
   private cvWorkerBuf: string = '';
+  // Per-solve cache of model responses keyed by (screenshot content hash +
+  // puzzle source + retry mode). If the page hasn't changed since we last asked
+  // the model about it, re-querying is wasted work — reuse the prior answer.
+  // Cleared at the top of each solve. See getSolution().
+  private solutionCache: Map<string, CliResponse> = new Map();
 
   constructor(config: CaptchaKrakenConfig = {}) {
     this.config = config;
@@ -125,6 +131,7 @@ export class CaptchaKrakenSolver {
     this.imageCounter = 0;
     this.stepIndex = 0;
     this.solveStartMs = start;
+    this.solutionCache.clear();
 
     // Initialize session debug directory if debugging is enabled
     if (process.env.CAPTCHA_DEBUG === '1') {
@@ -220,8 +227,38 @@ export class CaptchaKrakenSolver {
       renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
 
-      // Let the page update (challenge frame open, images refresh, verification, etc.)
-      await delay(postSolveDelayMs + Math.random() * 300);
+      // After acting, poll for the vendor's SOLVED signal (anchor checkbox
+      // checked / response token) for a short window before falling back to the
+      // normal re-detect. hCaptcha keeps the challenge iframe visible for a
+      // couple seconds while it verifies the final answer; without this, the
+      // loop re-entered the pipeline on that closing frame and burned ~18s
+      // (waitForHcaptchaChallengeImages timing out on a prompt-less frame).
+      // This ONLY early-returns on a definitive solved signal — it never
+      // re-solves, so it can't loop. If not solved in the window, the original
+      // detectCaptcha path below handles a genuine next round exactly as before.
+      const settleMs = didInteract
+        ? (this.config.postSolveOutcomeTimeoutMs ?? 2500)
+        : postSolveDelayMs + Math.random() * 300;
+      if (didInteract) {
+        const deadline = Date.now() + settleMs;
+        let solved = false;
+        while (Date.now() < deadline) {
+          if (await this.isCaptchaSolved(page)) { solved = true; break; }
+          // A fresh next round has rendered → stop waiting, go solve it now
+          // (keeps multi-round solves fast instead of burning the full window).
+          if (await this.isChallengeFreshlyRendered(page)) break;
+          await delay(200);
+        }
+        if (solved) {
+          return {
+            isSolved: true,
+            finalMousePosition: this.lastMousePosition,
+            tokenUsage: aggregateTokenUsage(cumulativeTokenUsage),
+          };
+        }
+      } else {
+        await delay(settleMs);
+      }
 
       // Detect reCAPTCHA's under-selection error banner. If present, the
       // vendor rejected our last submission because the model missed at
@@ -400,8 +437,12 @@ export class CaptchaKrakenSolver {
     let allTokenUsage: TokenUsage[] = [];
 
     try {
-      // 2. Call CLI
-      const response = await this.getSolution(screenshotPath, puzzleSource, retryMode);
+      // 2. Call CLI — while the model generates (the main idle window), drift
+      //    the cursor over the challenge like a human weighing the options,
+      //    instead of freezing it in place.
+      const response = await this.withIdleWander(page, captchaElement, () =>
+        this.getSolution(screenshotPath, puzzleSource, retryMode),
+      );
       const actions = response.actions;
       allTokenUsage = response.token_usage;
 
@@ -605,6 +646,58 @@ export class CaptchaKrakenSolver {
       return false;
     }
   }
+
+  /**
+   * True the moment the vendor reports the whole captcha solved — the anchor
+   * checkbox flipped to checked, or the response token got populated. This is a
+   * definitive "done" signal that a lingering, animating-closed challenge frame
+   * is not: after the final submit, hCaptcha keeps the challenge iframe VISIBLE
+   * for a couple of seconds while it verifies, so treating that frame as a fresh
+   * puzzle (the old behavior) burned ~18s re-running the pipeline on it.
+   */
+  private async isCaptchaSolved(page: Page): Promise<boolean> {
+    try {
+      const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
+      if (hc && await hc.isVisible().catch(() => false)) {
+        if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
+        if (await this.isHcaptchaAnchorChecked(hc)) return true;
+      }
+      const rc = await page.$('iframe[src*="recaptcha/api2/anchor"]');
+      if (rc && await rc.isVisible().catch(() => false)) {
+        if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
+        if (await this.isRecaptchaAnchorChecked(rc)) return true;
+      }
+    } catch { /* fall through */ }
+    return false;
+  }
+
+  /**
+   * True when an image challenge is open AND has actually rendered its prompt —
+   * i.e. a fresh round we should solve, as opposed to a frame animating closed
+   * (whose prompt has already gone). Used to tell "next round" from "solved,
+   * closing" after a submit without waiting out a fixed timeout.
+   */
+  private async isChallengeFreshlyRendered(page: Page): Promise<boolean> {
+    try {
+      const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
+      if (hc && await hc.isVisible().catch(() => false)) {
+        const frame = await hc.contentFrame();
+        const prompt = frame && await frame.$('.prompt-text');
+        if (prompt && await prompt.isVisible().catch(() => false)) {
+          const text = (await prompt.textContent().catch(() => '')) ?? '';
+          if (text.trim().length > 0) return true;
+        }
+      }
+      const rc = await page.$('iframe[src*="recaptcha/api2/bframe"]');
+      if (rc && await rc.isVisible().catch(() => false)) {
+        const frame = await rc.contentFrame();
+        const instr = frame && await frame.$('.rc-imageselect-instructions, #rc-imageselect');
+        if (instr && await instr.isVisible().catch(() => false)) return true;
+      }
+    } catch { /* fall through */ }
+    return false;
+  }
+
 
   /**
    * Block until the hCaptcha challenge frame's task images have actually
@@ -1580,12 +1673,34 @@ export class CaptchaKrakenSolver {
     // environment; we also forward the key explicitly as a CLI arg below so it
     // works even when the subprocess doesn't inherit it.
     const {
-      // vLLM LoRA name. Defaults to the published grid adapter; override in
-      // code or via CAPTCHA_LORA_NAME (rarely needed — most users only set the
-      // endpoint URL and, for the hosted API, CAPTCHA_KRAKEN_API_KEY).
-      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha-grid',
+      // vLLM LoRA name. Defaults to the full-puzzle `captcha` adapter
+      // (JobHarvest/qwen3.5-9b-captcha-lora — solves grids AND click/drag/pixel
+      // puzzles). Override in code or via CAPTCHA_LORA_NAME (e.g. `captcha-grid`
+      // for the older grids-only adapter). Most users only set the endpoint URL
+      // and, for the hosted API, CAPTCHA_KRAKEN_API_KEY.
+      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
+
+    // Dedup: if we've already asked the model about a byte-identical screenshot
+    // under the same prompt (puzzle source + retry mode), the page hasn't
+    // changed and another vLLM call would be wasted work. Reuse the answer.
+    // The image bytes ARE the cache key — any real page change (tile refresh,
+    // new challenge, fade) alters pixels and misses the cache, so this never
+    // stales a genuinely-changed puzzle.
+    let cacheKey: string | null = null;
+    try {
+      const imgHash = createHash('sha1').update(fs.readFileSync(imagePath)).digest('hex');
+      cacheKey = `${imgHash}|${puzzleSource}|${retryMode ?? ''}`;
+      const cached = this.solutionCache.get(cacheKey);
+      if (cached) {
+        console.log('[dedup] identical screenshot already solved this session — skipping vLLM query.');
+        // Reuse the actions but drop the token usage (no new tokens were spent).
+        return { actions: cached.actions, token_usage: [] };
+      }
+    } catch {
+      cacheKey = null; // hashing failed — fall through to a normal query
+    }
 
     const { cliRoot, py } = this.resolveCli();
 
@@ -1655,7 +1770,11 @@ export class CaptchaKrakenSolver {
           }
         }
 
-        return { actions, token_usage: tokenUsage };
+        const response: CliResponse = { actions, token_usage: tokenUsage };
+        // Cache under the screenshot hash so a byte-identical re-query this
+        // session reuses this answer instead of hitting vLLM again.
+        if (cacheKey) this.solutionCache.set(cacheKey, response);
+        return response;
       } catch (parseError) {
         throw new Error(`Failed to parse CLI output: ${stdout}\nStderr: ${stderr}`);
       }
@@ -1676,6 +1795,50 @@ export class CaptchaKrakenSolver {
       if (error.stdout) console.log('CLI stdout on error:', error.stdout);
       if (error.stderr) console.error('CLI stderr on error:', error.stderr);
       throw new Error(`Failed to execute captcha solver CLI: ${error.message}`);
+    }
+  }
+
+  /**
+   * Run `fn` (typically the model query) while idly drifting the cursor over
+   * the captcha, so the mouse behaves like a human weighing the options instead
+   * of freezing during inference. Uses the same cursory-ts trajectories as real
+   * clicks; cancelled the instant `fn` resolves. Best-effort — any wander error
+   * is swallowed and never fails the solve. Disable via config.idleMouseWander.
+   */
+  private async withIdleWander<T>(
+    page: Page,
+    element: ElementHandle,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (this.config.idleMouseWander === false) return fn();
+    let box: { x: number; y: number; width: number; height: number } | null = null;
+    try { box = await element.boundingBox(); } catch { box = null; }
+    if (!box || box.width < 20 || box.height < 20) return fn();
+    const b = box;
+
+    let stop = false;
+    const pad = 0.18; // keep drift inside the tile area, off the extreme edges
+    const wander = (async () => {
+      // brief pause before the first drift — don't lurch the instant we ask
+      await delay(120 + Math.random() * 180);
+      while (!stop) {
+        const tx = b.x + b.width * (pad + Math.random() * (1 - 2 * pad));
+        const ty = b.y + b.height * (pad + Math.random() * (1 - 2 * pad));
+        try {
+          await this.performSmoothMove(page, tx, ty);
+        } catch {
+          break;
+        }
+        if (stop) break;
+        await delay(180 + Math.random() * 360); // human dwell between glances
+      }
+    })();
+
+    try {
+      return await fn();
+    } finally {
+      stop = true;
+      await wander.catch(() => {});
     }
   }
 
