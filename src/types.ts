@@ -179,6 +179,27 @@ export interface CaptchaKrakenConfig {
    * Default: true
    */
   recaptchaTileHoverEnabled?: boolean;
+
+  /**
+   * While the model is generating a solution (the main idle window), drift the
+   * cursor over the challenge area with human-like trajectories instead of
+   * leaving it frozen. Cancelled the instant the model responds. Set false to
+   * keep the cursor still during inference.
+   *
+   * Default: true
+   */
+  idleMouseWander?: boolean;
+
+  /**
+   * After an action, the max time (ms) to watch for the solve outcome — the
+   * vendor's solved signal (checkbox checked / response token) or a freshly
+   * rendered next round — before falling back to a full re-detect. Returning as
+   * soon as the solved signal appears avoids re-entering the solve pipeline on a
+   * challenge frame that is merely animating closed.
+   *
+   * Default: 4000
+   */
+  postSolveOutcomeTimeoutMs?: number;
 }
 
 export interface BoundingBox {
