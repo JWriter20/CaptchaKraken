@@ -1,6 +1,6 @@
 {
   "name": "captcha-kraken-js",
-  "version": "2.0.1-beta.1",
+  "version": "2.1.0",
   "description": "Browser-agnostic Playwright/Puppeteer wrapper which uses CaptchaKraken-cli to solve captchas.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
