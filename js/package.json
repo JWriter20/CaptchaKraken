@@ -1,0 +1,49 @@
+{
+  "name": "captcha-kraken-js",
+  "version": "2.0.1-beta.1",
+  "description": "Browser-agnostic Playwright/Puppeteer captcha solver. Detects the captcha, reads the grid with a fine-tuned Qwen3.5-9B vision model on vLLM, and clicks through to a token.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "python",
+    "scripts"
+  ],
+  "scripts": {
+    "prebuild": "node scripts/copy-python.mjs",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc --noEmit -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/setup-python.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JWriter20/CaptchaKraken.git",
+    "directory": "js"
+  },
+  "keywords": [
+    "captcha",
+    "recaptcha",
+    "hcaptcha",
+    "playwright",
+    "puppeteer",
+    "automation",
+    "vllm",
+    "qwen"
+  ],
+  "author": "Jake Writer",
+  "license": "GPL-3.0-or-later",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/JWriter20/CaptchaKraken/issues"
+  },
+  "homepage": "https://github.com/JWriter20/CaptchaKraken#readme",
+  "devDependencies": {
+    "@types/node": "^24.10.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "cursory-ts": "^1.0.0"
+  }
+}
