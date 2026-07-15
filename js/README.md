@@ -1,4 +1,4 @@
-# captcha-kraken-js
+# captchakraken
 
 The TypeScript browser driver for [CaptchaKraken](https://github.com/JWriter20/CaptchaKraken).
 Hand it a Playwright/Puppeteer `Page`; it finds the captcha, reads the grid with
@@ -11,7 +11,7 @@ verifies through to a token.
 ## Install
 
 ```bash
-npm install captcha-kraken-js
+npm install captchakraken
 ```
 
 The package bundles the Python engine (`captchakraken`) and, on `postinstall`,
@@ -27,7 +27,7 @@ Playwright-compatible launcher.
 
 ```typescript
 import { chromium } from 'playwright';            // or patchright / camoufox-js
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();

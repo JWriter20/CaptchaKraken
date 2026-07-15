@@ -13,7 +13,7 @@ total time / outcome:
 > The Python port is the engine (detection + planner). These demos validate the
 > engine + model + server on a real challenge frame. Full click-replay and
 > multi-round verification in a live page are what the TypeScript port
-> (`captcha-kraken-js`) does end-to-end.
+> (`captchakraken`) does end-to-end.
 
 ## Setup
 

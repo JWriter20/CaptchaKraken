@@ -9,7 +9,7 @@ token-generation speed, total time, and whether the engine produced a valid
 solution — plus a best-effort reason when it didn't.
 
 Note: full click-replay + multi-round verification in a live page is what the
-TypeScript port (`captcha-kraken-js`) does end-to-end. Here we validate the
+TypeScript port (`captchakraken`) does end-to-end. Here we validate the
 engine + model + server on a real challenge frame.
 """
 

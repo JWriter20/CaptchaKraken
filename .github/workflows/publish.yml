@@ -7,7 +7,7 @@ name: Publish
 #
 # Auth is TOKENLESS via OIDC trusted publishing on both registries — no secrets.
 # One-time config (after any repo rename, redo these):
-#   npm:  npmjs.com → captcha-kraken-js → Settings → Trusted Publisher →
+#   npm:  npmjs.com → captchakraken → Settings → Trusted Publisher →
 #         GitHub Actions: JWriter20/CaptchaKraken, workflow publish.yml
 #   PyPI: pypi.org → captchakraken → Publishing → add a GitHub trusted publisher:
 #         JWriter20/CaptchaKraken, workflow publish.yml
@@ -25,7 +25,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish-npm:
-    name: Publish npm (captcha-kraken-js)
+    name: Publish npm (captchakraken)
     needs: verify
     runs-on: ubuntu-latest
     permissions:
@@ -54,8 +54,8 @@ jobs:
       - name: Publish (idempotent)
         run: |
           VER=$(node -p "require('./package.json').version")
-          if npm view "captcha-kraken-js@$VER" version >/dev/null 2>&1; then
-            echo "captcha-kraken-js@$VER already published — skipping."
+          if npm view "captchakraken@$VER" version >/dev/null 2>&1; then
+            echo "captchakraken@$VER already published — skipping."
           else
             npm publish --access public --provenance
           fi

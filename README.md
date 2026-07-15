@@ -8,7 +8,7 @@ third-party solving service involved.
 > ⭐ **Enjoying CaptchaKraken? Star & watch the repo** for updates (smaller
 > models, the hosted cloud API, new puzzle types):
 > [**CaptchaKraken**](https://github.com/JWriter20/CaptchaKraken). One repo, two
-> published ports — the TypeScript browser driver (npm: `captcha-kraken-js`) and
+> published ports — the TypeScript browser driver (npm: `captchakraken`) and
 > the Python engine (PyPI: `captchakraken`). On GitHub: **Star** = ⭐ top-right,
 > **Watch** = 👁 *Watch → All Activity* for release notifications.
 
@@ -206,7 +206,7 @@ driver; the **Python** port (PyPI) is the engine + CLI (also usable standalone
 to solve a screenshot). Both talk to the same vLLM server and are model-agnostic.
 
 ```bash
-npm install captcha-kraken-js          # TypeScript browser driver
+npm install captchakraken          # TypeScript browser driver
 # or
 pip install captchakraken              # Python engine + `captchakraken` CLI
 ```
@@ -241,7 +241,7 @@ the unified captcha LoRA, and `solve()` does detect → grid → click → verif
 
 ```typescript
 import { chromium } from 'playwright';
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -259,7 +259,7 @@ Drop-in for vanilla Playwright — same API, just a stealthier Chromium.
 
 ```typescript
 import { chromium } from 'patchright';
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -279,7 +279,7 @@ you to fetch its Firefox build: `npx camoufox-js fetch`.)
 
 ```typescript
 import { Camoufox } from 'camoufox-js';
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await Camoufox({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -299,7 +299,7 @@ etc.); only the object you hand `solve()` needs wrapping.
 
 ```typescript
 import puppeteer from 'puppeteer';
-import { CaptchaKrakenSolver, fromPuppeteer } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver, fromPuppeteer } from 'captchakraken';
 
 const browser = await puppeteer.launch({ headless: false });
 const page = await browser.newPage();
@@ -389,7 +389,7 @@ on npm, the Python engine on PyPI.
 
 ```
 setup.sh          hardware-gated one-command setup (venv + vLLM + weights + env)
-js/               TypeScript browser driver  →  npm: captcha-kraken-js
+js/               TypeScript browser driver  →  npm: captchakraken
   src/            the solver; bundles the python engine at publish time
 python/           the captchakraken package  →  PyPI: captchakraken
   src/captchakraken/   find_grid (OpenCV) + vLLM planner + server manager + CLI
