@@ -11,7 +11,7 @@ on:
 
 jobs:
   python-grid-detection:
-    name: Grid detection (python)
+    name: Grid detection (Python)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -33,7 +33,7 @@ jobs:
         run: python -m pytest tests/test_grid_detection_ci.py -q
 
   js-build:
-    name: Solver build (typescript)
+    name: Solver build (TypeScript)
     runs-on: ubuntu-latest
     defaults:
       run:
