@@ -1,6 +1,6 @@
 /**
- * postinstall bootstrap: create a local venv under `CaptchaKraken-cli/.venv` and install
- * CaptchaKraken's python deps so `python -m src.cli` works out-of-the-box.
+ * postinstall bootstrap: create a local venv under `python/.venv` and install the
+ * bundled `captchakraken` package so `python -m captchakraken.cli` works out-of-the-box.
  *
  * Opt out:
  *   CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP=1
@@ -53,41 +53,35 @@ function main() {
   }
 
   const pkgRoot = path.resolve(__dirname, '..');
-  const cliRoot = path.join(pkgRoot, 'CaptchaKraken-cli');
+  const cliRoot = path.join(pkgRoot, 'python');
   const venvDir = path.join(cliRoot, '.venv');
 
-  if (!exists(cliRoot)) {
-    console.log(`[CaptchaKraken] No bundled CaptchaKraken-cli found at ${cliRoot}; skipping python setup.`);
+  if (!exists(path.join(cliRoot, 'pyproject.toml'))) {
+    console.log(`[CaptchaKraken] No bundled python engine found at ${cliRoot}; skipping python setup.`);
     return;
   }
 
-  const existing = venvPython(venvDir);
-  if (existing) {
-    console.log(`[CaptchaKraken] Found existing venv python at ${existing}; skipping venv creation.`);
-    return;
+  let py = venvPython(venvDir);
+  if (py) {
+    console.log(`[CaptchaKraken] Found existing venv python at ${py}; ensuring package is installed...`);
+  } else {
+    const sysPy = resolveSystemPython();
+    console.log(`[CaptchaKraken] Creating venv at ${venvDir} using ${sysPy}...`);
+    run(sysPy, ['-m', 'venv', venvDir], { cwd: cliRoot });
+    py = venvPython(venvDir);
+    if (!py) {
+      throw new Error('[CaptchaKraken] Failed to locate venv python after venv creation.');
+    }
+    console.log('[CaptchaKraken] Upgrading pip/setuptools/wheel...');
+    run(py, ['-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'], { cwd: cliRoot });
   }
 
-  const sysPy = resolveSystemPython();
-  console.log(`[CaptchaKraken] Creating venv at ${venvDir} using ${sysPy}...`);
-  run(sysPy, ['-m', 'venv', venvDir], { cwd: cliRoot });
-
-  const py = venvPython(venvDir);
-  if (!py) {
-    throw new Error('[CaptchaKraken] Failed to locate venv python after venv creation.');
-  }
-
-  console.log('[CaptchaKraken] Upgrading pip/setuptools/wheel...');
-  run(py, ['-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'], { cwd: cliRoot });
-
-  const reqFile = 'requirements.txt';
-  const reqPath = path.join(cliRoot, reqFile);
-
-  if (!exists(reqPath)) {
-    throw new Error(`[CaptchaKraken] Missing ${reqFile} at ${reqPath}.`);
-  }
-
-  console.log(`[CaptchaKraken] Installing python deps from ${reqFile}...`);
-  run(py, ['-m', 'pip', 'install', '-r', reqFile], { cwd: cliRoot });
+  // Install the `captchakraken` package with its CORE (lightweight) deps only:
+  // OpenCV grid detection + the HTTP planner that talks to a vLLM server. The
+  // heavy serving stack (vllm/torch, the `[serve]` extra) is NOT installed here
+  // — that's what setup.sh installs for people self-hosting the model.
+  console.log('[CaptchaKraken] Installing bundled python package (core deps)...');
+  run(py, ['-m', 'pip', 'install', '.'], { cwd: cliRoot });
 
   console.log('[CaptchaKraken] Python environment ready.');
 }

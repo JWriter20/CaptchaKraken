@@ -1,0 +1,213 @@
+"""
+Benchmark `find_grid` against the full CaptchaKrakenFinetune grid corpus.
+
+Reads the known reCAPTCHA and hCaptcha grid puzzles from
+`cleanSamples/test/raw/<grid_type>/`, runs `find_grid` over each, and reports a
+per-type detection rate plus a breakdown of wrong-dimension / undetected cases.
+
+This is a REPORT-ONLY benchmark: it always passes (so it never blocks CI on the
+heuristic detector's misses), but prints a detailed table so regressions in
+detection accuracy are visible in the test output. Use it as a measurement tool.
+
+Run:
+    pytest tests/test_find_grid_corpus.py -s          # see the report
+    FIND_GRID_SAMPLE=0 pytest tests/test_find_grid_corpus.py -s   # whole corpus
+    FIND_GRID_SAMPLE=30 pytest tests/test_find_grid_corpus.py -s  # 30 imgs/type
+
+Env knobs:
+    FIND_GRID_SAMPLE  Max images per puzzle type (default 60). 0 = no cap (all).
+    FIND_GRID_DATA    Override the cleanSamples/test/raw directory.
+"""
+
+import os
+import sys
+import glob
+
+import pytest
+
+# Add src to path (mirrors the other tests in this dir).
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from captchakraken.tool_calls.find_grid import find_grid  # noqa: E402
+
+# ── Dataset location ────────────────────────────────────────────────────────
+# The python port lives at .../CaptchaKraken/python, and (in the dev monorepo)
+# the dataset at .../CaptchaKrakenFinetune/cleanSamples/test/raw. Walk up 3 levels
+# to the finetune root: tests -> python -> CaptchaKraken -> CaptchaKrakenFinetune.
+# (Standalone clones won't have the corpus; the test skips.)
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_TESTS_DIR, "..", "..", ".."))
+_DEFAULT_DATA = os.path.join(_REPO_ROOT, "cleanSamples", "test", "raw")
+DATA_DIR = os.environ.get("FIND_GRID_DATA", _DEFAULT_DATA)
+
+# Expected dimensions per grid puzzle type, mirroring _GRID_DIMS_FROM_PT in
+# src/testing/grade.py. (rows, cols) -> expected number of find_grid boxes.
+# All three are uniform-gutter grids handled by the consistent-colour line tracer.
+# (The hCaptcha "card grid" widgets — grocery_list / drag_missing_slot — relied on
+# a separate template detector that has been removed; find_grid is now the line
+# tracer only, so those types are out of scope for this benchmark.)
+GRID_TYPES = {
+    "recaptcha_grid_3x3": (3, 3),
+    "recaptcha_grid_4x4": (4, 4),
+    "hcaptcha_grid_3x3_property": (3, 3),
+}
+
+
+def _sample_limit() -> int:
+    raw = os.environ.get("FIND_GRID_SAMPLE", "60")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 60
+
+
+def _images_for_type(grid_type: str) -> list:
+    """RAW PNGs under cleanSamples/test/raw/<grid_type>/ (recursive — the
+    hcaptcha_grid_3x3_property type nests reference_image/ + standard_text_prompt/).
+    Sorted for determinism, then capped by FIND_GRID_SAMPLE.
+
+    Excludes numbered_overlay/ images: those already have the grid lines + cell
+    numbers PAINTED ON (they are find_grid's OUTPUT, rendered for the model to
+    read). find_grid runs only on raw, un-annotated frames in production; feeding
+    it an overlay means detecting a grid in an image whose real gutters have been
+    drawn over, which it correctly rejects. Testing those would measure the wrong
+    input. (grade.py prefers overlays when handing images to the MODEL — a separate
+    concern from grid detection.)"""
+    type_dir = os.path.join(DATA_DIR, grid_type)
+    paths = sorted(glob.glob(os.path.join(type_dir, "**", "*.png"), recursive=True))
+    paths = [p for p in paths if "numbered_overlay" not in p.split(os.sep)]
+    limit = _sample_limit()
+    if limit:
+        paths = paths[:limit]
+    return paths
+
+
+def _build_corpus() -> dict:
+    return {gt: _images_for_type(gt) for gt in GRID_TYPES}
+
+
+def test_find_grid_corpus_report():
+    """Run find_grid over the grid corpus and print a per-type accuracy report."""
+    if not os.path.isdir(DATA_DIR):
+        pytest.skip(f"Grid dataset not found at {DATA_DIR}")
+
+    corpus = _build_corpus()
+    total_imgs = sum(len(v) for v in corpus.values())
+    if total_imgs == 0:
+        pytest.skip(f"No grid images found under {DATA_DIR}")
+
+    limit = _sample_limit()
+    print("\n")
+    print("=" * 72)
+    print("find_grid corpus benchmark")
+    print(f"  data dir: {DATA_DIR}")
+    print(f"  sample/type: {'ALL' if limit == 0 else limit}")
+    print("=" * 72)
+
+    grand = {"total": 0, "correct": 0, "wrong_dim": 0, "none": 0, "bad_shape": 0}
+
+    for grid_type, (rows, cols) in GRID_TYPES.items():
+        expected_n = rows * cols
+        images = corpus[grid_type]
+
+        stats = {"total": 0, "correct": 0, "wrong_dim": 0, "none": 0, "bad_shape": 0}
+        wrong_dim_samples = []
+
+        for path in images:
+            stats["total"] += 1
+            try:
+                boxes = find_grid(path)
+            except Exception as e:  # a detector crash counts as a miss, not a test failure
+                boxes = None
+                if len(wrong_dim_samples) < 5:
+                    wrong_dim_samples.append(f"{os.path.basename(path)} (ERROR: {e})")
+
+            if boxes is None:
+                stats["none"] += 1
+                continue
+
+            n = len(boxes)
+            if n != expected_n:
+                stats["wrong_dim"] += 1
+                if len(wrong_dim_samples) < 5:
+                    wrong_dim_samples.append(f"{os.path.basename(path)} -> {n} boxes")
+                continue
+
+            # Right count: sanity-check box shape/ordering so a "correct" count
+            # with garbage boxes doesn't silently pass.
+            if not _boxes_well_formed(boxes):
+                stats["bad_shape"] += 1
+                continue
+
+            stats["correct"] += 1
+
+        _print_type_report(grid_type, expected_n, stats, wrong_dim_samples)
+
+        for k in grand:
+            grand[k] += stats[k]
+
+    print("-" * 72)
+    _print_rate("OVERALL", grand)
+    print("=" * 72)
+
+    # Report-only: never fail. Surface a clear note if nothing detected at all,
+    # which usually means a path/data problem rather than detector accuracy.
+    assert grand["total"] > 0
+    if grand["correct"] == 0:
+        print(
+            "\nNOTE: find_grid detected ZERO correct grids across the sampled "
+            "corpus. This is more likely a data-path or environment issue than "
+            "a detector regression — verify FIND_GRID_DATA points at "
+            "cleanSamples/test/raw."
+        )
+
+
+def _boxes_well_formed(boxes) -> bool:
+    """Each box is (x1, y1, x2, y2) with x1<x2, y1<y2, non-negative; and cell
+    sizes are roughly uniform (within 25% of the mean) so we don't count a
+    degenerate detection as correct."""
+    widths, heights = [], []
+    for box in boxes:
+        if len(box) != 4:
+            return False
+        x1, y1, x2, y2 = box
+        if not (x1 < x2 and y1 < y2 and x1 >= 0 and y1 >= 0):
+            return False
+        widths.append(x2 - x1)
+        heights.append(y2 - y1)
+
+    aw = sum(widths) / len(widths)
+    ah = sum(heights) / len(heights)
+    if aw <= 0 or ah <= 0:
+        return False
+    for w, h in zip(widths, heights):
+        if not (0.75 * aw <= w <= 1.25 * aw):
+            return False
+        if not (0.75 * ah <= h <= 1.25 * ah):
+            return False
+    return True
+
+
+def _print_type_report(grid_type, expected_n, stats, wrong_dim_samples):
+    print(f"\n{grid_type}  (expect {expected_n} cells)")
+    _print_rate("  ", stats)
+    if wrong_dim_samples:
+        print("  e.g. mis-detections:")
+        for s in wrong_dim_samples:
+            print(f"     - {s}")
+
+
+def _print_rate(label, stats):
+    total = stats["total"] or 1
+    rate = 100.0 * stats["correct"] / total
+    print(
+        f"{label:<28} n={stats['total']:>4}  "
+        f"correct={stats['correct']:>4} ({rate:5.1f}%)  "
+        f"wrong_dim={stats['wrong_dim']:>3}  "
+        f"none={stats['none']:>4}  bad_shape={stats['bad_shape']:>3}"
+    )
+
+
+if __name__ == "__main__":
+    # Allow running directly: python tests/test_find_grid_corpus.py
+    test_find_grid_corpus_report()
