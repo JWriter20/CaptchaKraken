@@ -1,57 +1,40 @@
 name: Publish
 
-# Release automation for captcha-kraken-js.
+# On every push to main: run the CI gate, then publish BOTH ports at the version
+# in their own manifest — the TypeScript port to npm and the Python port to PyPI.
+# Each publish is idempotent (a version already on the registry is skipped, not
+# failed), so re-running a partially-failed release is safe.
 #
-#   push to dev  -> publish a prerelease under the `beta` dist-tag
-#                   (2.0.1-beta.0, 2.0.1-beta.1, ...). Installs as
-#                   `npm i captcha-kraken-js@beta`; `@latest` is untouched.
-#   push to main -> publish the stable version in package.json under `latest`.
-#                   This is the beta-graduates-to-real release; it only happens
-#                   when a PR from dev is merged into main (main is protected).
-#
-# Both paths first run the same hermetic checks as ci.yml, then publish only if
-# those pass.
-#
-# Auth is npm TRUSTED PUBLISHING (OIDC) — no NPM_TOKEN secret. npm verifies this
-# workflow's signed GitHub OIDC identity and mints a short-lived token at publish
-# time, and stamps a provenance attestation. Requires (configured once, on
-# npmjs.com -> the package -> Settings -> Trusted Publisher):
-#   repository: JWriter20/CaptchaKrakenJS   workflow: publish.yml
-# Each publish job needs `id-token: write` and npm >= 11.5.1 (we upgrade in CI).
+# Auth is TOKENLESS via OIDC trusted publishing on both registries — no secrets.
+# One-time config (after any repo rename, redo these):
+#   npm:  npmjs.com → captchakraken → Settings → Trusted Publisher →
+#         GitHub Actions: JWriter20/CaptchaKraken, workflow publish.yml
+#   PyPI: pypi.org → captchakraken → Publishing → add a GitHub trusted publisher:
+#         JWriter20/CaptchaKraken, workflow publish.yml
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
 
-# Never let two publish runs race on the same branch (the dev path commits a
-# version bump back).
 concurrency:
-  group: publish-${{ github.ref }}
+  group: publish
   cancel-in-progress: false
 
 jobs:
-  # --- Reuse the exact CI gate before any publish -------------------------
   verify:
-    name: Verify (build + grid tests)
+    name: Verify (CI gate)
     uses: ./.github/workflows/ci.yml
 
-  # --- dev: prerelease under the `beta` tag -------------------------------
-  publish-beta:
-    name: Publish beta (dev)
+  publish-npm:
+    name: Publish npm (captchakraken)
     needs: verify
-    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # to push the version-bump commit back to dev
-      id-token: write          # OIDC: trusted publishing to npm
+      id-token: write        # OIDC trusted publishing + provenance
+    defaults:
+      run:
+        working-directory: js
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          # Use a token that can push back to a (potentially protected) branch
-          # and not retrigger this workflow in a loop (see [skip ci] below).
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-
       - uses: actions/setup-node@v4
         with:
           # Trusted publishing (OIDC) needs npm >= 11.5.1. Node 24 bundles npm
@@ -61,109 +44,40 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install (no python setup)
+          cache-dependency-path: js/package-lock.json
+      - name: Install (skip python bootstrap)
         run: npm ci --ignore-scripts
         env:
           CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP: '1'
-
-      # Compute the next beta version. Two cases the counter must stay ahead of:
-      #   - the current `@beta` (keep the prerelease counter monotonic), and
-      #   - the current `@latest` stable (once x.y.z ships, betas must move to
-      #     the NEXT patch, else 2.0.1-beta.N would sort *below* released 2.0.1).
-      # We pick the larger target and roll forward until the version is unused.
-      - name: Compute next beta version
-        id: ver
+      - name: Build (bundles python engine + compiles TS)
+        run: npm run build
+      - name: Publish (idempotent)
         run: |
-          PKG_BASE=$(node -p "require('./package.json').version.split('-')[0]")
-          LATEST=$(npm view captcha-kraken-js@latest version 2>/dev/null || true)
-          BETA=$(npm view captcha-kraken-js@beta version 2>/dev/null || true)
-
-          # Candidate 1: bump the published beta's prerelease counter.
-          if [ -n "$BETA" ]; then
-            CAND_BETA=$(npx --yes semver "$BETA" -i prerelease --preid beta)
+          VER=$(node -p "require('./package.json').version")
+          if npm view "captchakraken@$VER" version >/dev/null 2>&1; then
+            echo "captchakraken@$VER already published — skipping."
           else
-            CAND_BETA="${PKG_BASE}-beta.0"
+            npm publish --access public --provenance
           fi
-          # Candidate 2: first beta of the patch after the latest stable.
-          if [ -n "$LATEST" ]; then
-            NEXT_PATCH=$(npx --yes semver "$LATEST" -i patch)
-            CAND_PATCH="${NEXT_PATCH}-beta.0"
-          else
-            CAND_PATCH="${PKG_BASE}-beta.0"
-          fi
-          # Take whichever is the higher semver (semver prints args sorted
-          # ascending, so the last line is the max).
-          NEXT=$(npx --yes semver "$CAND_BETA" "$CAND_PATCH" | tail -1)
 
-          # Guard: never collide with an already-published version.
-          while npm view "captcha-kraken-js@$NEXT" version >/dev/null 2>&1; do
-            NEXT=$(npx --yes semver "$NEXT" -i prerelease --preid beta)
-          done
-          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Next beta version: $NEXT"
-
-      - name: Set version in package.json
-        run: npm version "${{ steps.ver.outputs.next }}" --no-git-tag-version --allow-same-version
-
-      # OIDC trusted publishing: no token; npm mints one from the id-token and
-      # attaches provenance.
-      - name: Publish @beta
-        run: npm publish --tag beta --access public --provenance
-
-      # Persist the bumped version on dev so the next push computes from here
-      # too. [skip ci] keeps this commit from retriggering CI/publish.
-      - name: Commit version bump
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
-          git commit -m "chore(release): ${{ steps.ver.outputs.next }} [skip ci]" || exit 0
-          git push origin HEAD:dev
-
-  # --- main: stable release under `latest` --------------------------------
-  publish-latest:
-    name: Publish latest (main)
+  publish-pypi:
+    name: Publish PyPI (captchakraken)
     needs: verify
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      id-token: write          # OIDC: trusted publishing to npm
+      id-token: write        # OIDC trusted publishing to PyPI
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          submodules: recursive
-
-      - uses: actions/setup-node@v4
-        with:
-          # Trusted publishing (OIDC) needs npm >= 11.5.1. Node 24 bundles npm
-          # 11.16, so take it as-is: self-upgrading npm inside setup-node's
-          # toolcache leaves a half-updated tree where `publish --provenance`
-          # can't resolve sigstore.
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install (no python setup)
-        run: npm ci --ignore-scripts
-        env:
-          CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP: '1'
-
-      # Graduate the current line to a stable release: strip any `-beta.N`
-      # suffix that rode in from dev so `latest` is always a clean x.y.z.
-      # (package.json on dev carries the rolling beta version; main publishes
-      # the real thing.) Idempotent: if that stable version is already on npm
-      # (e.g. a main re-run), skip rather than fail.
-      - name: Publish @latest (idempotent)
+          python-version: '3.12'
+      - name: Build sdist + wheel
+        working-directory: python
         run: |
-          PKG_VER=$(node -p "require('./package.json').version")
-          STABLE=${PKG_VER%%-*}
-          echo "package.json=$PKG_VER -> publishing stable $STABLE under @latest"
-          npm version "$STABLE" --no-git-tag-version --allow-same-version
-          if npm view "captcha-kraken-js@$STABLE" version >/dev/null 2>&1; then
-            echo "captcha-kraken-js@$STABLE already published — skipping."
-            exit 0
-          fi
-          npm publish --tag latest --access public --provenance
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI (skips existing versions)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+          skip-existing: true

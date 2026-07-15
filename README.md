@@ -5,11 +5,11 @@ the captcha, reads the image grid with a fine-tuned **Qwen3.5-9B** vision model,
 and clicks through to a token. Everything runs on **your** hardware — no
 third-party solving service involved.
 
-> ⭐ **Enjoying CaptchaKraken? Star both repos** — and **watch** them for updates
-> (smaller models, the hosted cloud API, new puzzle types):
-> [CaptchaKrakenJS](https://github.com/JWriter20/CaptchaKrakenJS)
-> (this solver) · [CaptchaKraken-cli](https://github.com/JWriter20/CaptchaKraken-cli)
-> (the detection + grid-planner engine). On GitHub: **Star** = ⭐ top-right,
+> ⭐ **Enjoying CaptchaKraken? Star & watch the repo** for updates (smaller
+> models, the hosted cloud API, new puzzle types):
+> [**CaptchaKraken**](https://github.com/JWriter20/CaptchaKraken). One repo, two
+> published ports — the TypeScript browser driver (npm: `captchakraken`) and
+> the Python engine (PyPI: `captchakraken`). On GitHub: **Star** = ⭐ top-right,
 > **Watch** = 👁 *Watch → All Activity* for release notifications.
 
 > **⚠️ v2 is a breaking change.** It's a full rewrite. The old multi-provider
@@ -30,7 +30,9 @@ challenges. It detects the captcha, solves the grid, clicks, and verifies.
 | ✅ **reCAPTCHA 3×3** (dynamic) | Works end-to-end |
 | ✅ **reCAPTCHA 4×4** (one-shot) | Works end-to-end |
 | ✅ **hCaptcha 3×3 image grid** | Works end-to-end |
+| ✅ **hCaptcha click / drag puzzles** | Full-puzzle model → pixel click/drag actions |
 | ✅ Cloudflare Turnstile | Works via the checkbox flow |
+| ⛔ Video challenges | Skipped (detected upstream) |
 
 **How accurate is the model?** On our hand-labeled real captcha set, the model
 picks the exactly-correct tiles **94.7%** of the time for reCAPTCHA 3×3 (86.7%
@@ -72,11 +74,14 @@ https://github.com/user-attachments/assets/8c7416fb-065c-4a0b-8f1b-f2f24fa88852
 https://github.com/user-attachments/assets/f1b98e31-0162-4a3a-a188-bcf721475642
 <!-- END DEMOS -->
 
-### Not supported yet
+### Beyond grids
 
-hCaptcha also serves non-grid puzzles (drag, path, "choose the card", etc.).
-CaptchaKraken **detects and skips** these instead of guessing — they're on the
-[roadmap](#roadmap).
+Non-grid still-image puzzles — **click** ("click each …"), **drag**
+("drag the piece into place"), path/connect, "choose the card" — route to the
+full-puzzle model, which returns pixel-space click/drag actions the browser
+replays. Only true **video** challenges are skipped (detected upstream). If the
+model can't produce a usable action for a given frame, the solver fails fast
+rather than guessing.
 
 ---
 
@@ -88,7 +93,7 @@ CaptchaKraken **detects and skips** these instead of guessing — they're on the
 ### One-command install
 
 ```bash
-bash install.sh
+./setup.sh
 ```
 
 This checks your available memory, picks the right model size, downloads it plus
@@ -100,9 +105,9 @@ the grid model, and writes a `captchakraken.env` config file.
 | **11–22 GB** | `Qwen3.5-9B-AWQ-4bit` (4-bit) — lighter, slightly less accurate |
 | **< 11 GB** | Too small to run — the installer stops and explains your options |
 
-If your hardware is too small, you can still `bash install.sh --download-only`
+If your hardware is too small, you can still `./setup.sh --download-only`
 (e.g. to copy the model to a bigger server later), or watch the repo for smaller
-models and the cloud API. Force a size with `bash install.sh --quant fp8|awq`.
+models and the cloud API. Force a size with `./setup.sh --quant fp8|awq`.
 
 ### A note on speed
 
@@ -147,32 +152,45 @@ model — 4070 and below, older Apple **Max** chips (fine on the 4-bit model), A
 
 > ⏳ **Below ~30 tokens/sec, self-hosting feels sluggish.** If that's your card,
 > consider the upcoming **hosted cloud API** instead — it serves the 8-bit model
-> at **~100 tokens/sec** with no GPU to run. ⭐ [Star the repo](https://github.com/JWriter20/CaptchaKrakenJS)
-> to be notified when it launches. `install.sh` estimates your speed from your
+> at **~100 tokens/sec** with no GPU to run. ⭐ [Star the repo](https://github.com/JWriter20/CaptchaKraken)
+> to be notified when it launches. `setup.sh` estimates your speed from your
 > device's bandwidth (NVIDIA / AMD / Apple) and flags this automatically.
 
-### Start the server
+### Start the server (you usually don't have to)
 
-`install.sh` prints the exact `vllm serve …` command for your model. Keep the
-`--enable-tower-connector-lora` flag — without it the vision part of the model is
-dropped and accuracy falls apart.
+The server is **hands-off**: after `setup.sh`, it **auto-starts on your first
+solve** and stays up. You never run `vllm serve` yourself. To manage it
+explicitly:
 
 ```bash
 source captchakraken.env
-export VLLM_API_KEY="$CAPTCHA_KRAKEN_API_KEY"   # server bearer == solver key
-vllm serve "RedHatAI/Qwen3.5-9B-FP8-dynamic" \
+captchakraken server start     # background, waits until healthy
+captchakraken server status    # endpoint + which model is served
+captchakraken server stop
+```
+
+Under the hood that runs the equivalent of (assembled from your env, so it
+tracks whatever model you configured — keep `--enable-tower-connector-lora` or
+the vision half of the LoRA is dropped and accuracy collapses):
+
+```bash
+vllm serve "$CAPTCHA_BASE_MODEL" \
   --reasoning-parser qwen3 \
   --enable-lora --enable-tower-connector-lora \
   --max-lora-rank 64 --max-model-len 65536 \
   --gpu-memory-utilization 0.80 --trust-remote-code \
   --port 8000 \
-  --lora-modules captcha-grid=JobHarvest/qwen3.5-9b-grid-lora
+  --lora-modules "$CAPTCHA_LORA_NAME=$CAPTCHA_LORA_ADAPTER"
 ```
+
+Defaults: base `Qwen/Qwen3.5-9B` (or a quantized variant `setup.sh` picks for
+your VRAM) + the unified adapter `CaptchaKraken/CaptchaKraken_v1`, served
+as `captcha`.
 
 ### Configuration
 
 The solver only needs **two** environment variables (both written by
-`install.sh` into `captchakraken.env`):
+`setup.sh` into `captchakraken.env`):
 
 | Variable | Meaning |
 |---|---|
@@ -183,11 +201,23 @@ The solver only needs **two** environment variables (both written by
 
 ## Usage
 
+Two ports, pick your language. The **TypeScript** port (npm) is the browser
+driver; the **Python** port (PyPI) is the engine + CLI (also usable standalone
+to solve a screenshot). Both talk to the same vLLM server and are model-agnostic.
+
 ```bash
-npm install captcha-kraken-js
+npm install captchakraken          # TypeScript browser driver
+# or
+pip install captchakraken              # Python engine + `captchakraken` CLI
 ```
 
-CaptchaKraken does **not** launch the browser for you — you **bring your own**
+Python one-liner (solve a screenshot → JSON click plan):
+
+```bash
+captchakraken path/to/captcha.png      # local server auto-starts on first call
+```
+
+The TypeScript solver does **not** launch the browser for you — you **bring your own**
 browser and hand the solver a page. Install whichever automation framework you
 prefer alongside it. The solver itself ships **no browser dependency**.
 
@@ -204,14 +234,14 @@ wrap its page once with `fromPuppeteer()`. All four are tested end-to-end agains
 the live reCAPTCHA demo.
 
 In every example the solver reads `VLLM_BASE_URL` + `CAPTCHA_KRAKEN_API_KEY` from
-the environment (run `install.sh`, then `source captchakraken.env`), defaults to
-the published grid LoRA, and `solve()` does detect → grid → click → verify.
+the environment (run `setup.sh`, then `source captchakraken.env`), defaults to
+the unified captcha LoRA, and `solve()` does detect → grid → click → verify.
 
 ### Playwright (vanilla)
 
 ```typescript
 import { chromium } from 'playwright';
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -229,7 +259,7 @@ Drop-in for vanilla Playwright — same API, just a stealthier Chromium.
 
 ```typescript
 import { chromium } from 'patchright';
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await chromium.launch({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -249,7 +279,7 @@ you to fetch its Firefox build: `npx camoufox-js fetch`.)
 
 ```typescript
 import { Camoufox } from 'camoufox-js';
-import { CaptchaKrakenSolver } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver } from 'captchakraken';
 
 const browser = await Camoufox({ headless: false });
 const page = await (await browser.newContext()).newPage();
@@ -269,7 +299,7 @@ etc.); only the object you hand `solve()` needs wrapping.
 
 ```typescript
 import puppeteer from 'puppeteer';
-import { CaptchaKrakenSolver, fromPuppeteer } from 'captcha-kraken-js';
+import { CaptchaKrakenSolver, fromPuppeteer } from 'captchakraken';
 
 const browser = await puppeteer.launch({ headless: false });
 const page = await browser.newPage();
@@ -282,7 +312,7 @@ await browser.close();
 ```
 
 That's it — no model name to pass, no provider to choose, and **no browser locked
-in**. The solver defaults to the published grid LoRA and the endpoint from your
+in**. The solver defaults to the unified captcha LoRA and the endpoint from your
 env, and works with whatever browser you handed it.
 
 ### Cloning this repo
@@ -322,16 +352,17 @@ browser ─▶ detect captcha ─▶ screenshot frame
                     OpenCV find_grid (color-agnostic line tracer)
                                    │  tile boxes
                                    ▼
-                    Qwen3.5-9B grid LoRA on vLLM  ─▶  tile selection
+                    Qwen3.5-9B captcha LoRA on vLLM  ─▶  tile selection
                                    │
                     click plan ─▶ execute (human-like) ─▶ re-detect / verify
 ```
 
-- **`find_grid`** finds the grid lines with plain OpenCV — no model needed. It's
-  in the [`CaptchaKraken-cli`](CaptchaKraken-cli/) submodule.
+- **`find_grid`** finds the grid lines with plain OpenCV — no model needed. It
+  lives in the Python port ([`python/`](python/), the `captchakraken` package).
 - The **grid model** runs on your local vLLM server and says which tiles to click.
-- The **solver** (this repo) drives the browser: it clicks, waits for reCAPTCHA's
-  refreshing tiles, and keeps going until the captcha is solved.
+- The **browser driver** (the [`js/`](js/) TypeScript port) clicks, waits for
+  reCAPTCHA's refreshing tiles, and keeps going until the captcha is solved. It
+  shells out to the bundled Python engine for detection + planning.
 
 ---
 
@@ -344,24 +375,26 @@ browser ─▶ detect captcha ─▶ screenshot frame
 - 🎯 **reCAPTCHA 4×4 robustness** — our weakest grid type end-to-end.
 - 📈 More **real labeled data** for under-represented prompts.
 
-> 📣 **Watch the repos to hear about these as they ship**, and ⭐ star if the
+> 📣 **Watch the repo to hear about these as they ship**, and ⭐ star if the
 > project is useful to you — it genuinely helps:
-> [**CaptchaKrakenJS**](https://github.com/JWriter20/CaptchaKrakenJS)
-> (the solver) and [**CaptchaKraken-cli**](https://github.com/JWriter20/CaptchaKraken-cli)
-> (detection + grid planner). Use GitHub's **Watch → All Activity** for release
-> notifications.
+> [**CaptchaKraken**](https://github.com/JWriter20/CaptchaKraken). Use GitHub's
+> **Watch → All Activity** for release notifications.
 
 ---
 
 ## Repo layout
 
+One repo, two published ports (like a mono-repo): the TypeScript browser driver
+on npm, the Python engine on PyPI.
+
 ```
-install.sh                          hardware-gated one-command setup
-LICENSE                             source-available (see "License")
-CONTRIBUTING.md                     how to contribute + dev setup
-src/                                the browser solver (TypeScript)
-tests/record_demos.spec.ts          live-solve recorder (numbers + demos)
-CaptchaKraken-cli/                  find_grid + vLLM grid planner (Python submodule)
+setup.sh          hardware-gated one-command setup (venv + vLLM + weights + env)
+js/               TypeScript browser driver  →  npm: captchakraken
+  src/            the solver; bundles the python engine at publish time
+python/           the captchakraken package  →  PyPI: captchakraken
+  src/captchakraken/   find_grid (OpenCV) + vLLM planner + server manager + CLI
+  Dockerfile      build your own vLLM server image
+.github/workflows/  CI (both ports) + publish (npm + PyPI)
 ```
 
 ---
@@ -370,7 +403,7 @@ CaptchaKraken-cli/                  find_grid + vLLM grid planner (Python submod
 
 - The `apiProvider` / `model` / `apiKey` options for Gemini/OpenRouter/Ollama are
   **removed**. v2 talks only to a vLLM server.
-- Set **`VLLM_BASE_URL`** and **`CAPTCHA_KRAKEN_API_KEY`** (or run `install.sh`)
+- Set **`VLLM_BASE_URL`** and **`CAPTCHA_KRAKEN_API_KEY`** (or run `setup.sh`)
   instead of provider API keys.
 - `new CaptchaKrakenSolver()` now needs no model/provider — it defaults to the
   grid LoRA.

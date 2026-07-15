@@ -19,39 +19,47 @@ repository's [LICENSE](LICENSE) (the CaptchaKraken Source-Available License).
 
 ## Dev setup
 
+One repo, two ports: `js/` (TypeScript browser driver → npm) and `python/` (the
+`captchakraken` engine → PyPI).
+
 ```bash
-git clone --recursive git@github.com:JWriter20/CaptchaKrakenJS.git
-cd CaptchaKrakenJS
-npm install        # builds the solver + a local CLI venv (postinstall)
-npm run build
+git clone git@github.com:JWriter20/CaptchaKraken.git
+cd CaptchaKraken
+
+# TypeScript port
+cd js && npm install && npm run build && cd ..
+
+# Python port
+cd python && pip install -e ".[dev]" && cd ..
 ```
 
-This package ships **no browser** — it types its public API against an
+The `js` package ships **no browser** — it types its public API against an
 implementation-neutral Playwright `Page`, and you bring your own
 Playwright-compatible launcher (vanilla `playwright`, `patchright`,
 `camoufox-js`, …). Install whichever one you want before driving a real solve.
 
 To run a solver against a model you'll need a vLLM server — see
-[`install.sh`](install.sh) and the README "Self-hosting" section.
+[`setup.sh`](setup.sh) and the README "Self-hosting" section.
 
 ## Tests & CI
 
 CI runs a small, fast suite on every PR (no GPU, no network) — primarily the
-**grid-detection** checks (in the `CaptchaKraken-cli` submodule), which are the
-foundation of the whole solve, plus a TypeScript build of the solver. Run them
+**grid-detection** checks in the Python port (`python/`), which are the
+foundation of the whole solve, plus a TypeScript build of the driver. Run them
 locally before opening a PR:
 
 ```bash
 # Python: find_grid / grid-detection unit tests (fast, deterministic)
-cd CaptchaKraken-cli
-python -m pytest tests/test_grid_detection.py -q
+cd python
+python -m pytest tests/test_grid_detection_ci.py -q
 
 # Full corpus benchmark (report-only — prints per-type detection rates)
 python -m pytest tests/test_find_grid_corpus.py -s
 ```
 
 ```bash
-# TypeScript: type-check / build the solver
+# TypeScript: type-check / build the driver
+cd js
 npx tsc --noEmit -p tsconfig.json
 ```
 

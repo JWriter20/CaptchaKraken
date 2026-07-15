@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "captchakraken"
+version = "2.0.0"
+description = "Self-hosted captcha solver: OpenCV grid detection + a fine-tuned Qwen3.5-9B vision LoRA served on vLLM."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Jake Writer" }]
+keywords = ["captcha", "recaptcha", "hcaptcha", "vllm", "qwen", "computer-vision", "automation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core = the lightweight CLIENT: OpenCV grid detection + the HTTP planner that
+# talks to a vLLM server (local or remote). This is all you need to SOLVE
+# captchas against an existing endpoint. The heavy serving stack (vllm/torch)
+# is deliberately NOT here — see the `serve` extra.
+dependencies = [
+  "pydantic>=2.0.0",
+  "pillow>=10.0.0",
+  "numpy>=1.24.0",
+  "opencv-python-headless>=4.10.0",
+  "requests>=2.31.0",
+  "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+# Self-hosting: install this to RUN a local vLLM server (the setup script does
+# `pip install "captchakraken[serve]"`). Not needed to call a remote server.
+serve = [
+  "vllm>=0.6.3",
+  "torch>=2.0.0",
+  "transformers>=4.40.0",
+  "accelerate>=0.27.0",
+  "huggingface_hub>=0.23.0",
+]
+dev = [
+  "pytest>=7.0.0",
+  "mypy>=1.0.0",
+  "ruff>=0.1.0",
+]
+
+[project.scripts]
+captchakraken = "captchakraken.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/JWriter20/CaptchaKraken"
+Issues = "https://github.com/JWriter20/CaptchaKraken/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/captchakraken"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+ignore_missing_imports = true
+no_implicit_optional = false
+exclude = ["build/", "dist/"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

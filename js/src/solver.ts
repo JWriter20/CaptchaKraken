@@ -26,8 +26,12 @@ const execFileAsync = promisify(execFile);
 
 function getBundledCliRoot(): string {
   // When installed from npm, this file is in `<pkgRoot>/dist` (compiled) or `<pkgRoot>/src` (dev).
-  // The bundled python project sits at `<pkgRoot>/CaptchaKraken-cli`.
-  return path.resolve(__dirname, '..', 'CaptchaKraken-cli');
+  // Published packages bundle the python engine at `<pkgRoot>/python` (copied in
+  // by scripts/copy-python.mjs at build time). In the source monorepo it instead
+  // lives at the sibling `../python`, so fall back to that for local dev/tests.
+  const bundled = path.resolve(__dirname, '..', 'python');
+  if (fs.existsSync(bundled)) return bundled;
+  return path.resolve(__dirname, '..', '..', 'python');
 }
 
 function getVenvPython(cliRoot: string): string | null {
@@ -42,6 +46,18 @@ function getVenvPython(cliRoot: string): string | null {
     if (fs.existsSync(c)) return c;
   }
   return null;
+}
+
+// Env for spawning the python CLI. Prepend the bundled `python/src` to
+// PYTHONPATH so `python -m captchakraken.cli` imports even when the postinstall
+// `pip install` was skipped or failed (best-effort bootstrap).
+function cliEnv(cliRoot: string): NodeJS.ProcessEnv {
+  const srcDir = path.join(cliRoot, 'src');
+  const existing = process.env.PYTHONPATH;
+  return {
+    ...process.env,
+    PYTHONPATH: existing ? `${srcDir}${path.delimiter}${existing}` : srcDir,
+  };
 }
 
 // Simple Vector interface for internal use moved to types.ts
@@ -91,7 +107,7 @@ export class CaptchaKrakenSolver {
   // (independent of CAPTCHA_DEBUG) so we capture the hard-to-reproduce timing.
   private gridDebugDir: string | null = null;
   private gridDebugSeq: number = 0;
-  // Persistent CV worker (`python -m src.cli serve`) — one long-lived process
+  // Persistent CV worker (`python -m captchakraken.cli serve`) — one long-lived process
   // that answers find-grid / grid-cell-states polls over stdin/stdout, so the
   // hot poll loops pay one ~0.4s interpreter+cv2 import ONCE instead of per poll.
   private cvWorker: ChildProcessWithoutNullStreams | null = null;
@@ -969,7 +985,7 @@ export class CaptchaKrakenSolver {
     if (!fs.existsSync(cliRoot)) {
       throw new Error(
         `CaptchaKraken CLI folder not found at ${cliRoot}. ` +
-        `If you installed from npm, ensure the package ships 'CaptchaKraken-cli/'.`
+        `If you installed from npm, ensure the package ships 'python/'.`
       );
     }
     const py = getVenvPython(cliRoot) ?? pythonCommand;
@@ -989,9 +1005,9 @@ export class CaptchaKrakenSolver {
       // Use execFile (no shell) so args containing JSON / brackets / spaces —
       // e.g. the grid_boxes payload for grid-cell-states-fixed — are passed
       // literally without any shell quoting/globbing hazards.
-      const { stdout } = await execFileAsync(py, ['-m', 'src.cli', ...args], {
+      const { stdout } = await execFileAsync(py, ['-m', 'captchakraken.cli', ...args], {
         cwd: cliRoot,
-        env: process.env,
+        env: cliEnv(cliRoot),
         maxBuffer: 10 * 1024 * 1024,
       });
       return JSON.parse(stdout.trim());
@@ -1001,7 +1017,7 @@ export class CaptchaKrakenSolver {
   }
 
   /**
-   * Lazily start the persistent CV worker (`python -m src.cli serve`) and resolve
+   * Lazily start the persistent CV worker (`python -m captchakraken.cli serve`) and resolve
    * once it has imported cv2/numpy and emitted its `{"ready":true}` handshake.
    * Returns false if it can't be started (caller then falls back to one-shot
    * subprocesses). Idempotent: subsequent calls await the same readiness promise.
@@ -1011,7 +1027,7 @@ export class CaptchaKrakenSolver {
     this.cvWorkerReady = new Promise<boolean>((resolve) => {
       try {
         const { cliRoot, py } = this.resolveCli();
-        const proc = spawn(py, ['-m', 'src.cli', 'serve'], { cwd: cliRoot, env: process.env });
+        const proc = spawn(py, ['-m', 'captchakraken.cli', 'serve'], { cwd: cliRoot, env: cliEnv(cliRoot) });
         this.cvWorker = proc;
 
         let settled = false;
@@ -1707,7 +1723,7 @@ export class CaptchaKrakenSolver {
     const cmdParts = [
       py,
       '-m',
-      'src.cli',
+      'captchakraken.cli',
       `"${imagePath}"`,
       model,
       'captchaKrakenApi',
@@ -1730,7 +1746,7 @@ export class CaptchaKrakenSolver {
     try {
       const { stdout, stderr } = await execAsync(command, {
         cwd: cliRoot,
-        env: process.env,
+        env: cliEnv(cliRoot),
         maxBuffer: 10 * 1024 * 1024 // Increase buffer for large outputs if needed
       });
 
