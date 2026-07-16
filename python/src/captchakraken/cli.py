@@ -42,11 +42,18 @@ Modes:
         these — a local server auto-starts on the first solve (disable with
         CAPTCHA_KRAKEN_AUTOSTART=0). Point VLLM_BASE_URL at your own server to
         skip local management entirely.
+
+  captchakraken fetch [--weights-only|--engine-only] [--no-restart] [--dry-run]
+        Update in one step: pull the latest CaptchaKraken model from the HF org
+        (https://huggingface.co/CaptchaKraken) AND upgrade the vLLM serving
+        stack, then restart a running local server so it takes effect. Use this
+        to get new model revisions + engine fixes without re-running setup.sh.
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 from .solver import CaptchaSolver, UnsupportedCaptchaError
@@ -372,6 +379,7 @@ def _handle_serve() -> bool:
       find-grid               {image}                       -> grid_boxes | null
       grid-cell-states        {a, b}                        -> states | {grid: null}
       grid-cell-states-fixed  {a, b, grid_boxes}            -> states
+      check-movement          {a, b, threshold?}            -> {has_movement: bool}
 
     Unknown cmd / malformed line -> an {ok:false} response (the process keeps
     running). EOF on stdin ends the loop cleanly. All heavy detection delegates
@@ -396,6 +404,15 @@ def _handle_serve() -> bool:
             if not grid_boxes:
                 raise ValueError("empty grid_boxes")
             return _compute_grid_cell_states(req["a"], req["b"], grid_boxes)
+        if cmd == "check-movement":
+            # Freshness check for the JS solver: did the captcha frame change
+            # (tiles faded in / refreshed) between the screenshot we sent the
+            # model and now? Same primitive the one-shot `check-movement` uses.
+            from .image_processor import ImageProcessor
+
+            threshold = float(req.get("threshold", 0.005))
+            moved = ImageProcessor.detect_movement(req["a"], req["b"], threshold)
+            return {"has_movement": bool(moved)}
         raise ValueError(f"unknown cmd: {cmd!r}")
 
     # Signal readiness so the JS side knows imports are done before it polls.
@@ -560,8 +577,54 @@ def _handle_server_commands() -> bool:
     return True
 
 
+def _handle_fetch() -> bool:
+    """`captchakraken fetch` — pull the latest published weights from the HF org
+    and refresh the vLLM serving stack, restarting a running local server so the
+    update takes effect. See updater.fetch for the full behavior."""
+    if len(sys.argv) <= 1 or sys.argv[1] not in {"fetch", "update"}:
+        return False
+
+    flags = set(sys.argv[2:])
+    unknown = flags - {"--weights-only", "--engine-only", "--no-restart", "--dry-run"}
+    if unknown:
+        print(
+            json.dumps({"error": f"unknown fetch flag(s): {sorted(unknown)} "
+                                 "(use --weights-only|--engine-only|--no-restart|--dry-run)"}),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if "--weights-only" in flags and "--engine-only" in flags:
+        print(json.dumps({"error": "--weights-only and --engine-only are mutually exclusive"}),
+              file=sys.stderr)
+        sys.exit(2)
+
+    from . import updater
+
+    weights = "--engine-only" not in flags
+    engine = "--weights-only" not in flags
+    try:
+        result = updater.fetch(
+            weights=weights,
+            engine=engine,
+            restart="--no-restart" not in flags,
+            dry_run="--dry-run" in flags,
+        )
+        print(json.dumps(result))
+        return True
+    except subprocess.CalledProcessError as e:
+        print(json.dumps({"error": f"fetch step failed (exit {e.returncode}): "
+                                   f"{' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}"}),
+              file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     if _handle_server_commands():
+        return
+    if _handle_fetch():
         return
     if _handle_movement_commands():
         return

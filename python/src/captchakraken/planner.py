@@ -10,6 +10,7 @@ planner with detect/segment/drag-refine; that code is preserved on the
 import base64
 import json
 import os
+import re
 import sys
 from mimetypes import guess_type
 from typing import Any, Dict, List, Optional
@@ -198,8 +199,13 @@ class ActionPlanner:
         else:
             return None
 
+        # strict=False tolerates unescaped control chars INSIDE strings — the
+        # model routinely emits coordinates as pretty-printed strings with a
+        # literal newline, e.g. "click": ["277,\n  728", ...], which strict JSON
+        # rejects. Without this the whole response fails to parse and a solvable
+        # click puzzle is dropped as "unsupported".
         try:
-            return json.loads(text[start:end])
+            return json.loads(text[start:end], strict=False)
         except json.JSONDecodeError:
             # The model sometimes truncates (hit max_tokens) or over-nests its
             # pretty-printed JSON, leaving brackets unclosed. Repair by balancing
@@ -207,7 +213,7 @@ class ActionPlanner:
             repaired = ActionPlanner._balance_json(text[start:])
             if repaired is not None:
                 try:
-                    return json.loads(repaired)
+                    return json.loads(repaired, strict=False)
                 except json.JSONDecodeError:
                     return None
             return None
@@ -347,6 +353,44 @@ class ActionPlanner:
                     fx, fy = min(max(fx, 0.0), 1.0), min(max(fy, 0.0), 1.0)
             return (fx, fy)
 
+        def flat_numbers(v: Any) -> List[float]:
+            """Every number anywhere inside v, in order. Handles nested lists,
+            {x,y} dicts, bare numbers, and numeric strings like "277, 728" (the
+            model sometimes emits coordinates as strings, occasionally even split
+            across separate array elements)."""
+            nums: List[float] = []
+            if isinstance(v, bool):
+                return nums
+            if isinstance(v, (list, tuple)):
+                for e in v:
+                    nums.extend(flat_numbers(e))
+            elif isinstance(v, dict):
+                for k in ("x", "y", "X", "Y"):
+                    if k in v:
+                        nums.extend(flat_numbers(v[k]))
+            elif isinstance(v, (int, float)):
+                nums.append(float(v))
+            elif isinstance(v, str):
+                nums.extend(float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", v))
+            return nums
+
+        def coordish(v: Any) -> bool:
+            """True when v is a non-empty list of COORDINATES (numbers, [x,y]
+            pairs, {x,y} dicts, or numeric strings) — not text labels like
+            "dog". Used to decide whether a "click"/"coordinates" array carries
+            points we should salvage."""
+            if not isinstance(v, (list, tuple)) or not v:
+                return False
+            for e in v:
+                if isinstance(e, bool):
+                    return False
+                if isinstance(e, (int, float, list, tuple, dict)):
+                    continue
+                if isinstance(e, str) and re.search(r"\d", e):
+                    continue
+                return False
+            return True
+
         out: List[Dict[str, Any]] = []
         if not isinstance(data, dict):
             return out
@@ -392,6 +436,26 @@ class ActionPlanner:
                     return [{"kind": "drag", "src": src, "dst": dst}]
         if points is None:
             points = data.get("points")
+        # Salvage: some responses carry the click coordinates under "click" (or
+        # "coordinates") instead of "points", as [x,y] pairs, {x,y} dicts, or
+        # "x, y" strings (sometimes split across elements), with no "points" key
+        # at all. Pull every number out of a coordinate-like value and pair them
+        # into points so a well-intentioned answer isn't dropped as "unsupported".
+        # Skipped when the value is text labels ("dog", "duck") rather than coords.
+        if not (isinstance(points, list) and points):
+            for container in (action if isinstance(action, dict) else None, data):
+                if not isinstance(container, dict):
+                    continue
+                cand = container.get("click")
+                if cand is None:
+                    cand = container.get("coordinates")
+                if coordish(cand):
+                    nums = flat_numbers(cand)
+                    if len(nums) >= 2:
+                        points = [
+                            [nums[i], nums[i + 1]] for i in range(0, len(nums) - 1, 2)
+                        ]
+                        break
         if isinstance(points, list) and points:
             pts = []
             for p in points:

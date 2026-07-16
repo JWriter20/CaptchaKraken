@@ -7,7 +7,8 @@
   "files": [
     "dist",
     "python",
-    "scripts"
+    "scripts",
+    "LICENSE"
   ],
   "scripts": {
     "prebuild": "node scripts/copy-python.mjs",
@@ -33,7 +34,7 @@
     "qwen"
   ],
   "author": "Jake Writer",
-  "license": "GPL-3.0-or-later",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/JWriter20/CaptchaKraken/issues"

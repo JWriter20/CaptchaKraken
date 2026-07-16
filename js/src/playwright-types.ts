@@ -43,7 +43,7 @@ export interface ViewportSize {
  */
 export interface PlaywrightElementHandle {
   /** Screenshot just this element to a PNG file (the only option the solver passes). */
-  screenshot(options?: { path?: string }): Promise<Buffer>;
+  screenshot(options?: { path?: string; timeout?: number; animations?: 'disabled' | 'allow' }): Promise<Buffer>;
   /** The content document of an `<iframe>` element handle, or null if not a frame. */
   contentFrame(): Promise<PlaywrightFrame | null>;
   /** Element box in page CSS pixels, or null if not rendered. */
