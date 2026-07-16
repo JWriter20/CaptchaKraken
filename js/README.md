@@ -51,4 +51,6 @@ Puppeteer users wrap the page once with `fromPuppeteer(page)`.
 
 ## License
 
-GPL-3.0-or-later.
+**CaptchaKraken Source-Available License v1.0** — see [LICENSE](./LICENSE).
+Build *with* it (scrapers, stealth browsers, QA tooling); you may **not sell the
+solve itself** or ship a thin wrapper (browser extension, hosted solving API).

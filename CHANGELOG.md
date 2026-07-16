@@ -3,6 +3,38 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [2.2.0] — 2026-07-15
+
+### Added
+- **Freshness guard — never act on a stale frame.** reCAPTCHA/hCaptcha fade
+  fresh tiles in over ~1s; if the frame changed *while the model was
+  generating*, its answer described an "undeveloped" frame whose tiles no longer
+  lined up. The solver now re-screenshots after every model query and diffs it
+  against the frame it sent (`check-movement`); on a change it discards the stale
+  answer and re-solves on the developed frame. Covers both the one-shot path and
+  the reCAPTCHA 3×3 dynamic driver. Tunable via `staleFrameReSolveEnabled` /
+  `staleFrameDiffThreshold` / `maxStaleFrameReSolves`; `check-movement` was added
+  to the persistent CV worker so the check runs on the warm process.
+- **Unified `captchakraken fetch` updater.** One command pulls the latest model
+  from the HuggingFace org (https://huggingface.co/CaptchaKraken) *and* upgrades
+  the vLLM serving stack, then restarts a running local server. Flags:
+  `--weights-only`, `--engine-only`, `--no-restart`, `--dry-run`. Shell
+  equivalent: `./setup.sh --update`.
+- **Documentation hub.** Most of the README moved into a browsable
+  [`docs/`](docs/README.md) tree (self-hosting, usage, how-it-works, performance,
+  roadmap, licensing); the README is now a slim overview + quickstart.
+
+### Fixed
+- **License metadata corrected.** Both ports previously declared `GPL-3.0`, which
+  contradicted (and would have *overridden* with a permissive license) the
+  source-available `LICENSE` that prohibits selling the solve. The npm and PyPI
+  packages now declare the CaptchaKraken Source-Available License and ship the
+  `LICENSE` file.
+
+### CI
+- The Python job is now a **no-regression gate**: grid detection + the freshness
+  check + the fetch command, run on every PR (still hermetic — no GPU/network).
+
 ## [2.0.0] — 2026-06-07
 
 ### ⚠️ Breaking
