@@ -46,21 +46,21 @@ PIXEL_ACTION_PROMPT = (
     "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
     "Look at the puzzle and decide what action solves it. All coordinates you return must be on a "
     "normalized 0–1000 image scale (top-left = (0, 0), bottom-right = (1000, 1000)).\n\n"
+    "Name WHAT each object is with a short 1–2 word label, then give its position. "
     "Choose ONE response:\n\n"
     "FOR CLICK PUZZLES:\n"
-    "  Identify every position you need to click and emit them as a list of points:\n"
-    "  → \"action\": { \"action\": \"click\", \"points\": [[x1, y1], [x2, y2], ...] }\n\n"
+    "  Label each thing you click and give its point — subjects[i] names points[i]:\n"
+    "  → \"action\": \"click\", \"subjects\": [\"<label>\", ...], "
+    "\"points\": [[x1, y1], [x2, y2], ...]\n\n"
     "FOR DRAG PUZZLES:\n"
-    "  Drag ONE item at a time. The source position is the centroid of the piece you are picking up; "
-    "the destination position is where it should end up. If multiple drags are needed, drag the topmost "
-    "item first.\n"
-    "  → \"output\": [{ \"Action\": \"simulate_drag\", "
-    "\"SourceDescription\": \"...\", \"SourcePosition\": { \"x\": 1-1000, \"y\": 1-1000 }, "
-    "\"DestinationDescription\": \"...\", \"EstimatedPosition\": { \"x\": 1-1000, \"y\": 1-1000 } }]\n\n"
+    "  Drag ONE item at a time. Label the source (the piece you pick up) and the destination "
+    "(where it belongs), each with a short 1–2 word label, and give both points:\n"
+    "  → \"action\": \"drag\", \"drags\": [{ \"source\": \"<label>\", \"from\": [x, y], "
+    "\"destination\": \"<label>\", \"to\": [x, y] }, ...]\n\n"
     "Respond ONLY with JSON:\n"
     "{\n"
-    "  \"action\": { ... }\n"
-    "  // OR \"output\": [ ... ]\n"
+    "  \"action\": \"click\", \"subjects\": [ ... ], \"points\": [ ... ]\n"
+    "  // OR \"action\": \"drag\", \"drags\": [ ... ]\n"
     "}"
 )
 
@@ -394,6 +394,31 @@ class ActionPlanner:
         out: List[Dict[str, Any]] = []
         if not isinstance(data, dict):
             return out
+
+        # ---- drag (CANONICAL — the schema PIXEL_ACTION_PROMPT asks for and the
+        #      LoRA is trained on, see instructions.py::ACTION_INSTRUCTION):
+        #      {"action":"drag","drags":[{"source","from":[x,y],"destination","to":[x,y]}]}
+        # Note "action" here is the STRING "drag", not a dict, so the click path
+        # below never sees it. The legacy/simulate_drag branches that follow stay
+        # as fallbacks for older adapters.
+        content_drags = data.get("drags")
+        if content_drags is None and isinstance(data.get("action"), dict):
+            content_drags = data["action"].get("drags")
+        if isinstance(content_drags, dict):
+            content_drags = [content_drags]
+        if isinstance(content_drags, list) and content_drags:
+            for d in content_drags:
+                if not isinstance(d, dict):
+                    continue
+                snums = flat_numbers(d.get("from"))
+                dnums = flat_numbers(d.get("to"))
+                if len(snums) >= 2 and len(dnums) >= 2:
+                    src = norm_xy(snums[0], snums[1])
+                    dst = norm_xy(dnums[0], dnums[1])
+                    if src and dst:
+                        out.append({"kind": "drag", "src": src, "dst": dst})
+            if out:
+                return out
 
         # ---- drag: {"output": [ {simulate_drag ...}, ... ]} ----
         drags = data.get("output")
