@@ -200,6 +200,128 @@ export interface CaptchaKrakenConfig {
    * Default: 4000
    */
   postSolveOutcomeTimeoutMs?: number;
+
+  /**
+   * Guard against the captcha frame changing WHILE the model is generating.
+   * reCAPTCHA/hCaptcha fade fresh tiles in over ~1s; if new imagery paints
+   * between the screenshot we send the model and the moment its answer returns,
+   * that answer describes a stale ("undeveloped") frame and its tile picks /
+   * bboxes no longer line up with what's on screen. When enabled, the solver
+   * re-screenshots the frame after inference, and if it changed it discards the
+   * stale answer and re-solves on the fresh frame (see maxStaleFrameReSolves).
+   *
+   * Default: true
+   */
+  staleFrameReSolveEnabled?: boolean;
+
+  /**
+   * Fraction of pixels (0–1) that must differ between the frame sent to the
+   * model and a screenshot taken right after inference for the frame to count
+   * as "changed during inference" (a tile faded in / refreshed). Below this,
+   * the frame is treated as unchanged and the answer is used as-is. Reuses the
+   * same frame-diff primitive as the reCAPTCHA settle detector.
+   *
+   * Default: 0.02
+   */
+  staleFrameDiffThreshold?: number;
+
+  /**
+   * Max number of times to re-screenshot + re-solve when the frame keeps
+   * changing during inference, before giving up and acting on the latest answer
+   * (better to act than to spin). Set 0 to detect-and-log without re-solving.
+   *
+   * Default: 2
+   */
+  maxStaleFrameReSolves?: number;
+
+  // ── Settle monitor (challenge-state gating) ───────────────────────────────
+  // The solver tracks the challenge's lifecycle state and refuses to send a
+  // mid-transition / still-loading frame to the model. These tune the pixel
+  // "has it settled yet?" monitor that gates that decision (it reuses the same
+  // check-movement frame-diff as the stale-frame guard).
+
+  /**
+   * Fraction of pixels (0–1) that must differ between two consecutive challenge
+   * frames for it to still count as "moving" (loading/animating) rather than
+   * settled.
+   *
+   * Default: 0.01
+   */
+  settleDiffThreshold?: number;
+
+  /** Poll interval (ms) for the settle monitor. Default: 220 */
+  settlePollMs?: number;
+
+  /**
+   * Consecutive still frame-pairs required before the challenge is declared
+   * settled and safe to screenshot for the model.
+   *
+   * Default: 2
+   */
+  settleFrames?: number;
+
+  /** Overall timeout (ms) for the settle monitor before it gives up. Default: 9000 */
+  settleTimeoutMs?: number;
+
+  /**
+   * If the challenge keeps changing continuously for at least this long without
+   * ever settling, it's treated as an **animated / video** challenge (surfaced
+   * distinctly, not as "unsupported"). Static grids settle in ~1–2s; a video
+   * never does.
+   *
+   * Default: 4500
+   */
+  animatedChallengeAfterMs?: number;
+
+  /**
+   * After clicking Submit/Verify, the solver EXPECTS the frame to change (advance
+   * to the next round, or close because it was accepted). This is how long (ms)
+   * to wait for that transition to begin before re-evaluating — so the shift
+   * itself is never screenshotted and mis-read as a fresh (blank) puzzle.
+   *
+   * Default: 4000
+   */
+  postSubmitChangeTimeoutMs?: number;
+
+  /**
+   * Per-call timeout (ms) for element screenshots of the challenge iframe.
+   * Playwright's default is 30000, which means a stale/transitioning handle
+   * (e.g. hCaptcha swapped in the next round while we held the old iframe)
+   * hangs the whole solve for 30s before failing. Bounding it lets a stale
+   * handle fail fast so the solve loop can re-detect the fresh challenge.
+   *
+   * Default: 8000
+   */
+  elementScreenshotTimeoutMs?: number;
+
+  /**
+   * After a submit, hCaptcha may replace the challenge iframe for the next
+   * round, detaching the handle we just detected ("element is not visible").
+   * This is a transition, not a dead puzzle: how many times to back off,
+   * re-detect the fresh challenge, and retry before giving up.
+   *
+   * Default: 3
+   */
+  maxStaleElementRetries?: number;
+
+  /**
+   * Backoff (ms) before re-detecting after a stale-element screenshot failure,
+   * giving the round transition time to finish.
+   *
+   * Default: 900
+   */
+  staleElementBackoffMs?: number;
+
+  /**
+   * When the model reports "unsupported" *after we've already interacted* (i.e.
+   * mid multi-round), it's almost always a not-yet-settled next round rather
+   * than a genuinely unsupported puzzle. This is how many times to wait for the
+   * challenge to settle and re-solve before giving up. (A single retry loses a
+   * race when the next round loads slowly.)
+   *
+   * Default: 3
+   */
+  maxUnsupportedReSolves?: number;
 }
 
 export interface BoundingBox {

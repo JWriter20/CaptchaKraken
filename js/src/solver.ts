@@ -93,6 +93,27 @@ interface GridCellStates {
 const log = (message: string, ...args: any[]) => console.log(`[Solver] ${message}`, ...args);
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * Lifecycle state of the challenge the solver is driving. Tracked so behaviours
+ * can be gated on it — in particular so we never feed a mid-transition or
+ * still-loading frame to the model, and so a frame that never settles is
+ * classified as an animated/video challenge rather than an unsupported one.
+ *
+ *   Detecting → Loading → Ready → Solving → Acting → Submitting → Transitioning
+ *   → (Loading → …) | Solved,   with Animated as a terminal "it's a video" exit.
+ */
+enum CaptchaState {
+  Detecting = 'detecting',
+  Loading = 'loading',
+  Ready = 'ready',
+  Solving = 'solving',
+  Acting = 'acting',
+  Submitting = 'submitting',
+  Transitioning = 'transitioning',
+  Solved = 'solved',
+  Animated = 'animated',
+}
+
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
   private lastMousePosition: Vector; // Start at safe position
@@ -120,6 +141,15 @@ export class CaptchaKrakenSolver {
   // the model about it, re-querying is wasted work — reuse the prior answer.
   // Cleared at the top of each solve. See getSolution().
   private solutionCache: Map<string, CliResponse> = new Map();
+  // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
+  // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
+  private state: CaptchaState = CaptchaState.Detecting;
+  // Content hash of the challenge frame at the moment we last clicked Submit.
+  // On the next attempt we wait for the frame to CHANGE from this (the expected
+  // post-submit transition) before treating it as a fresh puzzle — so the shift
+  // itself is never screenshotted and mis-read as a blank/unsupported frame.
+  // Cleared once consumed. See solveSingle().
+  private lastSubmitFrameHash: string | null = null;
 
   constructor(config: CaptchaKrakenConfig = {}) {
     this.config = config;
@@ -148,6 +178,8 @@ export class CaptchaKrakenSolver {
     this.stepIndex = 0;
     this.solveStartMs = start;
     this.solutionCache.clear();
+    this.lastSubmitFrameHash = null;
+    this.setState(CaptchaState.Detecting);
 
     // Initialize session debug directory if debugging is enabled
     if (process.env.CAPTCHA_DEBUG === '1') {
@@ -169,6 +201,21 @@ export class CaptchaKrakenSolver {
     // burning loops on a stuck model only delays the inevitable fail.
     let pendingRetryMode: string | null = null;
     let alreadyRetriedRecaptchaError = false;
+    // A blank/transitioning frame that slips past the settle gate can make the
+    // model return "unsupported". If we've already interacted (so we're mid
+    // multi-round, not on a genuinely unsupported first frame), actively wait
+    // for the challenge to settle and retry — up to this budget — before
+    // declaring the whole puzzle unsupported. One retry isn't enough when the
+    // next round loads slowly (that's why some solves failed round 2 and others
+    // didn't — it was a race).
+    let unsupportedRetries = 0;
+    const maxUnsupportedRetries = this.config.maxUnsupportedReSolves ?? 3;
+    // A stale/detached challenge handle: after a submit, hCaptcha swaps the
+    // challenge iframe for the next round while we still hold the old handle, so
+    // a screenshot on it hangs then fails "not visible". Not a real failure —
+    // re-detect the fresh challenge and retry, up to this budget.
+    let staleElementRetries = 0;
+    const maxStaleElementRetries = this.config.maxStaleElementRetries ?? 3;
     // Track whether we've interacted with the captcha at least once. Before any
     // interaction, a null detectCaptcha() means "not rendered yet", not "solved".
     let hasInteracted = false;
@@ -228,14 +275,67 @@ export class CaptchaKrakenSolver {
           page, captchaElement, attempt, retryModeThisLoop,
         ));
       } catch (e: any) {
-        // Stage 2: the widget rendered and we screenshotted it, but the CLI
-        // says the puzzle TYPE is unsupported (e.g. hCaptcha click/drag). This
-        // is a definitive verdict on a rendered frame — fail fast, don't retry.
+        // The settle monitor decided the challenge never stops moving → it's an
+        // animated / video challenge, which we can't solve. Distinct from
+        // "unsupported" (a static puzzle of the wrong type).
+        if (e?.animated) {
+          this.setState(CaptchaState.Animated);
+          throw new Error(
+            'Animated/video challenge detected — the puzzle never settles, so it '
+            + 'is almost certainly a video challenge (unsupported).'
+          );
+        }
+        // Stage 2: we screenshotted a settled frame and the CLI says the puzzle
+        // TYPE is unsupported (e.g. hCaptcha click/drag). Normally a definitive
+        // verdict — fail fast. BUT if we've already interacted, a transient
+        // blank/transition frame can still produce this; re-settle + retry once
+        // before giving up (fixes the "solves round 1, dies on round 2" case).
         if (e?.unsupported) {
+          if (hasInteracted && unsupportedRetries < maxUnsupportedRetries) {
+            unsupportedRetries++;
+            // Almost certainly a not-yet-settled next round. Actively wait for
+            // it to settle before retrying; if it never settles it's a video.
+            const el = await this.detectCaptcha(page);
+            if (el) {
+              const s = await this.waitForElementSettled(el);
+              if (s === 'animated') {
+                this.setState(CaptchaState.Animated);
+                throw new Error(
+                  'Animated/video challenge detected — the puzzle never settles '
+                  + '(likely a video challenge).'
+                );
+              }
+            }
+            console.log(
+              `"unsupported" mid-solve (not-yet-settled next round); settled and `
+              + `retrying (${unsupportedRetries}/${maxUnsupportedRetries}).`,
+            );
+            continue;
+          }
           throw new Error(
             'Cannot solve this kind of captcha — the rendered puzzle is not a '
             + 'supported grid or checkbox (likely an hCaptcha click/drag puzzle).'
           );
+        }
+        // Stale/detached challenge handle: hCaptcha swapped in the next round
+        // while we held the old iframe, so a screenshot on it fails "not
+        // visible" / "Timeout" / "not attached". This is a transition, not a
+        // dead puzzle — back off, then let the loop re-detect the fresh
+        // challenge. (Only after we've interacted; a first-frame failure is a
+        // genuine problem worth surfacing.)
+        const emsg = String((e && (e as any).message) || e);
+        if (
+          hasInteracted
+          && staleElementRetries < maxStaleElementRetries
+          && /Timeout .*exceeded|not visible|not attached|detached|Target closed/i.test(emsg)
+        ) {
+          staleElementRetries++;
+          console.log(
+            `stale challenge handle after submit ("${emsg.split('\n')[0]}"); `
+            + `re-detecting next round (${staleElementRetries}/${maxStaleElementRetries}).`,
+          );
+          await delay(this.config.staleElementBackoffMs ?? 900);
+          continue;
         }
         throw e;
       }
@@ -339,7 +439,11 @@ export class CaptchaKrakenSolver {
       `step_${this.stepIndex}_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
     );
     try {
-      await captchaElement.screenshot({ path: screenshotPath });
+      await captchaElement.screenshot({
+        path: screenshotPath,
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      });
     } catch {
       screenshotPath = null;
     }
@@ -387,11 +491,32 @@ export class CaptchaKrakenSolver {
 
     // hCaptcha swaps the challenge images in asynchronously — the iframe is
     // "visible" the instant the frame opens, but the task tiles paint a beat
-    // later. Screenshotting that gap captures a blank/partial grid, which the
-    // CLI then classifies as an unsupported puzzle and fails fast. Block until
-    // the tiles have actually loaded before grabbing the frame.
+    // later, and on multi-round puzzles it REUSES the same iframe: after a
+    // submit it briefly shows the previous round, then a loading spinner, then
+    // the next round. Screenshotting any of those transitional frames feeds the
+    // model a blank/stale grid it correctly reports as "unsupported" — which
+    // used to abort the whole solve on round 2. Gate on the challenge state:
+    //   1. If we just submitted, wait for the frame to actually CHANGE (the
+    //      transition starting) so we're past the previous round.
+    //   2. Wait for the tiles to paint (DOM) AND for the pixels to stop moving
+    //      (settle monitor). If it never settles, it's an animated/video puzzle.
     if (puzzleSource === 'hcaptcha' && src && src.includes('frame=challenge')) {
+      if (this.lastSubmitFrameHash) {
+        this.setState(CaptchaState.Transitioning);
+        await this.waitForChangeSince(captchaElement, this.lastSubmitFrameHash);
+        this.lastSubmitFrameHash = null;
+      }
+      this.setState(CaptchaState.Loading);
       await this.waitForHcaptchaChallengeImages(captchaElement);
+      const settle = await this.waitForElementSettled(captchaElement);
+      if (settle === 'animated') {
+        const e: any = new Error(
+          'ANIMATED_CHALLENGE: the challenge never settles (likely a video/animated puzzle).',
+        );
+        e.animated = true;
+        throw e;
+      }
+      this.setState(CaptchaState.Ready);
     }
 
     // Only the image-challenge frame (bframe) holds a grid. The anchor checkbox
@@ -436,7 +561,11 @@ export class CaptchaKrakenSolver {
 
     // 1. Take Screenshot
     const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-    await captchaElement.screenshot({ path: screenshotPath });
+    await captchaElement.screenshot({
+      path: screenshotPath,
+      timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+      animations: 'disabled',
+    });
 
     // Save image to debug directory if debugging is enabled
     this.saveImageForDebug(screenshotPath);
@@ -455,9 +584,13 @@ export class CaptchaKrakenSolver {
     try {
       // 2. Call CLI — while the model generates (the main idle window), drift
       //    the cursor over the challenge like a human weighing the options,
-      //    instead of freezing it in place.
-      const response = await this.withIdleWander(page, captchaElement, () =>
-        this.getSolution(screenshotPath, puzzleSource, retryMode),
+      //    instead of freezing it in place. Wrapped in the freshness guard: if
+      //    the frame changes mid-inference (a tile fades in), the answer is for
+      //    a stale frame, so we re-screenshot and re-solve on the developed one.
+      const response = await this.solveFrameFreshnessGuarded(
+        captchaElement, screenshotPath,
+        (imagePath) => this.withIdleWander(page, captchaElement, () =>
+          this.getSolution(imagePath, puzzleSource, retryMode)),
       );
       const actions = response.actions;
       allTokenUsage = response.token_usage;
@@ -535,6 +668,11 @@ export class CaptchaKrakenSolver {
           : 'No active actions performed (empty or done). Checking for Verify/Next button...');
         await this.moveAndClick(page, verifyButton);
         await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
+        // Snapshot the frame at submit time so the NEXT attempt waits for the
+        // real transition (next round loading / frame closing) before treating
+        // whatever is on screen as a fresh puzzle. See the hCaptcha gate above.
+        this.setState(CaptchaState.Submitting);
+        this.lastSubmitFrameHash = await this.elementFrameHash(captchaElement);
       }
     } finally {
       // Cleanup
@@ -1578,9 +1716,16 @@ export class CaptchaKrakenSolver {
 
       let action: CaptchaAction | null = null;
       try {
-        // 2. Solve. The CLI returns a single action for grid puzzles.
-        const response = await this.getSolution(shotA, 'recaptcha', pendingRetry);
+        // 2. Solve. The CLI returns a single action for grid puzzles. Guarded
+        //    against a mid-inference tile fade: if the grid changes while the
+        //    model generates, re-screenshot and re-solve on the developed frame
+        //    (the dynamic 3x3 puzzle is the case this matters most for).
+        const retryForThisRound = pendingRetry;
         pendingRetry = null; // only the first round carries the inbound retry hint
+        const response = await this.solveFrameFreshnessGuarded(
+          captchaElement, shotA,
+          (imagePath) => this.getSolution(imagePath, 'recaptcha', retryForThisRound),
+        );
         this.archiveLatestDebugRun(attempt, response.actions);
         allTokenUsage.push(...response.token_usage);
         const actionList = Array.isArray(response.actions) ? response.actions : [response.actions];
@@ -1812,6 +1957,223 @@ export class CaptchaKrakenSolver {
       if (error.stderr) console.error('CLI stderr on error:', error.stderr);
       throw new Error(`Failed to execute captcha solver CLI: ${error.message}`);
     }
+  }
+
+  /**
+   * Query the model for `initialShot`, then guard against the captcha frame
+   * having changed DURING inference. reCAPTCHA/hCaptcha fade fresh tiles in over
+   * ~1s; if new imagery painted while the model was generating, its answer
+   * targets a stale ("undeveloped") frame and its tile picks / bboxes no longer
+   * line up with what's on screen. After the model returns we re-screenshot the
+   * element and diff it against the frame we sent (reusing the `check-movement`
+   * primitive); if it moved beyond the threshold we discard the answer and
+   * re-solve on the fresh frame, up to `maxStaleFrameReSolves` times, then act on
+   * the latest answer rather than spin.
+   *
+   * `runQuery` performs the actual model call for a given screenshot path (the
+   * caller wraps it in idle-wander where appropriate); it is re-invoked with the
+   * fresh path on each re-solve. Token usage from every query — including
+   * discarded ones — is accumulated, since those tokens were really spent. The
+   * caller owns `initialShot`; every fresh frame captured here is created and
+   * cleaned up here. Best-effort: a screenshot/diff failure falls through to the
+   * answer already in hand.
+   */
+  private async solveFrameFreshnessGuarded(
+    captchaElement: ElementHandle,
+    initialShot: string,
+    runQuery: (imagePath: string) => Promise<CliResponse>,
+  ): Promise<CliResponse> {
+    const enabled = this.config.staleFrameReSolveEnabled !== false;
+    const threshold = this.config.staleFrameDiffThreshold ?? 0.02;
+    const maxReSolves = this.config.maxStaleFrameReSolves ?? 2;
+
+    const ownedFrames: string[] = []; // fresh frames WE captured (never initialShot)
+    const mergedUsage: TokenUsage[] = [];
+    try {
+      let currentPath = initialShot;
+      let response = await runQuery(currentPath);
+      mergedUsage.push(...response.token_usage);
+      if (!enabled) return response;
+
+      for (let i = 0; i < maxReSolves; i++) {
+        if (!(await this.captchaFrameChangedSince(captchaElement, currentPath, threshold))) {
+          break; // frame held still through inference — the answer is valid.
+        }
+        const fresh = path.join(
+          os.tmpdir(),
+          `freshsolve_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
+        );
+        try {
+          await captchaElement.screenshot({ path: fresh });
+        } catch {
+          break; // can't grab a fresh frame — act on the answer we have.
+        }
+        ownedFrames.push(fresh);
+        this.saveImageForDebug(fresh);
+        console.log(
+          `[freshness] captcha frame changed during inference `
+          + `(re-solve ${i + 1}/${maxReSolves}); the prior answer was for a stale `
+          + `frame — re-querying on the developed one.`,
+        );
+        this.gridDebug('freshness:stale-frame', { reSolve: i + 1, threshold });
+        currentPath = fresh;
+        response = await runQuery(currentPath);
+        mergedUsage.push(...response.token_usage);
+      }
+      return { actions: response.actions, token_usage: mergedUsage };
+    } finally {
+      for (const f of ownedFrames) {
+        if (fs.existsSync(f)) {
+          try { fs.unlinkSync(f); } catch { /* best-effort cleanup */ }
+        }
+      }
+    }
+  }
+
+  /**
+   * Screenshot the captcha element to a throwaway temp frame and diff it against
+   * `priorPath` (the frame we sent the model). Returns true when the frame
+   * changed beyond `threshold` — i.e. tiles faded in / refreshed since. Reuses
+   * the persistent CV worker's `check-movement` (falling back to a one-shot
+   * subprocess), the same frame-diff the settle detectors use. Cleans up its own
+   * temp frame. Best-effort: any screenshot/diff failure returns false so the
+   * caller acts on the answer it already has rather than spinning.
+   */
+  private async captchaFrameChangedSince(
+    captchaElement: ElementHandle,
+    priorPath: string,
+    threshold: number,
+  ): Promise<boolean> {
+    const probe = path.join(
+      os.tmpdir(),
+      `freshcheck_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
+    );
+    try {
+      await captchaElement.screenshot({ path: probe, timeout: 2500, animations: 'disabled' });
+      const res = await this.runCvTool(
+        'check-movement',
+        { a: priorPath, b: probe, threshold },
+        ['check-movement', priorPath, probe, String(threshold)],
+      );
+      return !!(res && res.has_movement);
+    } catch {
+      return false;
+    } finally {
+      if (fs.existsSync(probe)) {
+        try { fs.unlinkSync(probe); } catch { /* best-effort cleanup */ }
+      }
+    }
+  }
+
+  /** Record a challenge-state transition. No-op for behaviour; logs the change
+   *  (via gridDebug, so only when CAPTCHA_DEBUG=1) for offline diagnosis. */
+  private setState(next: CaptchaState, note?: string): void {
+    if (this.state === next) return;
+    this.gridDebug('state', { from: this.state, to: next, ...(note ? { note } : {}) });
+    this.state = next;
+  }
+
+  /**
+   * Screenshot the challenge element to a throwaway file and return its sha1
+   * content hash (or null on failure). Used to tell whether the frame has
+   * changed (e.g. the post-submit transition to the next round). Cleans up.
+   */
+  private async elementFrameHash(el: ElementHandle): Promise<string | null> {
+    const f = path.join(os.tmpdir(), `fh_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    try {
+      await el.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+      return createHash('sha1').update(fs.readFileSync(f)).digest('hex');
+    } catch {
+      return null;
+    } finally {
+      if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
+    }
+  }
+
+  /**
+   * Monitor the challenge element until its pixels stop changing (settled), or
+   * until it's clear it never will (animated / video). Polls screenshots and
+   * diffs consecutive frames with `check-movement` (the persistent CV worker).
+   * Returns:
+   *   'settled'  — `settleFrames` consecutive frame-pairs showed no movement;
+   *                safe to screenshot for the model.
+   *   'animated' — it kept moving right up to `animatedChallengeAfterMs` without
+   *                ever settling → very likely a video/animated puzzle.
+   *   'timeout'  — neither happened within `settleTimeoutMs` (proceed best-effort).
+   *
+   * Note this is a *pixel* settle; the caller pairs it with the DOM-level
+   * `waitForHcaptchaChallengeImages` so a static loading frame (spinner on grey,
+   * below the pixel threshold) isn't mistaken for painted tiles. Cleans up.
+   */
+  private async waitForElementSettled(
+    el: ElementHandle,
+    opts?: { pollMs?: number; settleFrames?: number; maxMs?: number; animatedAfterMs?: number; threshold?: number },
+  ): Promise<'settled' | 'animated' | 'timeout'> {
+    const pollMs = opts?.pollMs ?? this.config.settlePollMs ?? 220;
+    const settleFrames = opts?.settleFrames ?? this.config.settleFrames ?? 2;
+    const maxMs = opts?.maxMs ?? this.config.settleTimeoutMs ?? 9000;
+    const animatedAfterMs = opts?.animatedAfterMs ?? this.config.animatedChallengeAfterMs ?? 4500;
+    const threshold = opts?.threshold ?? this.config.settleDiffThreshold ?? 0.01;
+    const start = Date.now();
+    let prev: string | null = null;
+    let stillStreak = 0;
+    const frames: string[] = [];
+    const tmp = () => path.join(os.tmpdir(), `settle_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    try {
+      while (Date.now() - start < maxMs) {
+        const f = tmp();
+        // Short timeout + disabled animations: a closing/animating challenge
+        // element otherwise makes Playwright's default 30s stability wait hang
+        // per screenshot (that's what made a multi-round solve take ~115s). Fail
+        // fast and skip the frame instead.
+        try { await el.screenshot({ path: f, timeout: 2500, animations: 'disabled' }); }
+        catch { await delay(pollMs); continue; }
+        frames.push(f);
+        if (prev) {
+          const res = await this.runCvTool(
+            'check-movement', { a: prev, b: f, threshold }, ['check-movement', prev, f, String(threshold)],
+          );
+          const moved = !!(res && res.has_movement);
+          stillStreak = moved ? 0 : stillStreak + 1;
+          const stale = frames.shift();
+          if (stale && fs.existsSync(stale)) { try { fs.unlinkSync(stale); } catch { /* best-effort */ } }
+          if (stillStreak >= settleFrames) return 'settled';
+          // Still moving this late in → it's not just loading; call it animated.
+          if (moved && (Date.now() - start) >= animatedAfterMs) return 'animated';
+        }
+        prev = frames[frames.length - 1];
+        await delay(pollMs);
+      }
+      return 'timeout';
+    } finally {
+      for (const f of frames) {
+        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
+      }
+    }
+  }
+
+  /**
+   * After a submit we EXPECT the challenge frame to change (advance to the next
+   * round, or close because it was accepted). Poll until the element's content
+   * hash differs from `sinceHash` — the transition beginning — so we never
+   * screenshot/solve the pre-transition frame again. Returns true once it
+   * changed, false if it never changed within `postSubmitChangeTimeoutMs` (e.g.
+   * it was already the final state). Best-effort.
+   */
+  private async waitForChangeSince(
+    el: ElementHandle,
+    sinceHash: string,
+    opts?: { pollMs?: number; maxMs?: number },
+  ): Promise<boolean> {
+    const pollMs = opts?.pollMs ?? this.config.settlePollMs ?? 220;
+    const maxMs = opts?.maxMs ?? this.config.postSubmitChangeTimeoutMs ?? 4000;
+    const start = Date.now();
+    while (Date.now() - start < maxMs) {
+      const h = await this.elementFrameHash(el);
+      if (h && h !== sinceHash) return true;
+      await delay(pollMs);
+    }
+    return false;
   }
 
   /**

@@ -80,8 +80,22 @@ function main() {
   // OpenCV grid detection + the HTTP planner that talks to a vLLM server. The
   // heavy serving stack (vllm/torch, the `[serve]` extra) is NOT installed here
   // — that's what setup.sh installs for people self-hosting the model.
-  console.log('[CaptchaKraken] Installing bundled python package (core deps)...');
-  run(py, ['-m', 'pip', 'install', '.'], { cwd: cliRoot });
+  //
+  // Prefer the PUBLISHED package from PyPI, pinned to THIS npm package's version
+  // so the JS driver and the Python engine stay in lockstep. Only fall back to
+  // the bundled source tree when PyPI can't satisfy that pin — offline installs,
+  // or a dev/CI/from-git build whose version isn't on PyPI yet.
+  const pkgVersion = require(path.join(pkgRoot, 'package.json')).version;
+  try {
+    console.log(`[CaptchaKraken] Installing captchakraken==${pkgVersion} from PyPI...`);
+    run(py, ['-m', 'pip', 'install', `captchakraken==${pkgVersion}`]);
+  } catch (err) {
+    console.warn(
+      `[CaptchaKraken] PyPI install failed (${err && err.message ? err.message : err}); ` +
+      'falling back to the bundled source tree.',
+    );
+    run(py, ['-m', 'pip', 'install', '.'], { cwd: cliRoot });
+  }
 
   console.log('[CaptchaKraken] Python environment ready.');
 }
