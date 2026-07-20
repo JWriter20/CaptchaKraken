@@ -410,6 +410,54 @@ class ActionPlanner:
             if out:
                 return out
 
+        # ---- drag: {"action": {"simulate_drag": [{source_position,
+        #                                           destination_position}]}} ----
+        # The full-puzzle LoRA actually emits drags in this snake_case shape
+        # (not the prompt's {"output":[{"Action":"simulate_drag",...}]}), and
+        # packs each coordinate as {"x": [x, y]} — flat_numbers() pulls the pair
+        # out of that. Without this branch a correctly-solved drag (e.g. hCaptcha
+        # "drag ONE character to the matching character") is dropped as
+        # "unsupported".
+        sd = data.get("simulate_drag")
+        if sd is None and isinstance(action := data.get("action"), dict):
+            sd = action.get("simulate_drag")
+        # The model emits simulate_drag as EITHER a list of drags OR a single
+        # drag object; normalize the single-object form to a one-element list so
+        # both parse (the object form was silently dropped as "unsupported").
+        if isinstance(sd, dict):
+            sd = [sd]
+        if isinstance(sd, list) and sd:
+            def _drag_coords(obj: Any, *roles: str) -> List[float]:
+                # Pull the source/destination coordinate pair regardless of key
+                # casing or separators — the LoRA freely varies between
+                # source_position / sourcePosition / SourcePosition and
+                # destination_position / destinationPosition / EstimatedPosition.
+                # The coord value may be {"x": [x, y]}, [x, y], {x, y}, or a
+                # string; flat_numbers() handles all of those.
+                if not isinstance(obj, dict):
+                    return []
+                for k, v in obj.items():
+                    kn = str(k).lower().replace("_", "").replace("-", "")
+                    if "pos" not in kn:
+                        continue
+                    if any(r in kn for r in roles):
+                        nums = flat_numbers(v)
+                        if len(nums) >= 2:
+                            return nums
+                return []
+            for d in sd:
+                if not isinstance(d, dict):
+                    continue
+                snums = _drag_coords(d, "source", "src")
+                dnums = _drag_coords(d, "destination", "dest", "estimated", "target")
+                if len(snums) >= 2 and len(dnums) >= 2:
+                    src = norm_xy(snums[0], snums[1])
+                    dst = norm_xy(dnums[0], dnums[1])
+                    if src and dst:
+                        out.append({"kind": "drag", "src": src, "dst": dst})
+            if out:
+                return out
+
         # ---- click: {"action": {"action":"click","points":[...]}} ----
         action = data.get("action")
         # The model sometimes over-wraps: {"action": {"action": {"action":

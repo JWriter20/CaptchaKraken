@@ -284,6 +284,35 @@ export interface CaptchaKrakenConfig {
   postSubmitChangeTimeoutMs?: number;
 
   /**
+   * Per-call timeout (ms) for element screenshots of the challenge iframe.
+   * Playwright's default is 30000, which means a stale/transitioning handle
+   * (e.g. hCaptcha swapped in the next round while we held the old iframe)
+   * hangs the whole solve for 30s before failing. Bounding it lets a stale
+   * handle fail fast so the solve loop can re-detect the fresh challenge.
+   *
+   * Default: 8000
+   */
+  elementScreenshotTimeoutMs?: number;
+
+  /**
+   * After a submit, hCaptcha may replace the challenge iframe for the next
+   * round, detaching the handle we just detected ("element is not visible").
+   * This is a transition, not a dead puzzle: how many times to back off,
+   * re-detect the fresh challenge, and retry before giving up.
+   *
+   * Default: 3
+   */
+  maxStaleElementRetries?: number;
+
+  /**
+   * Backoff (ms) before re-detecting after a stale-element screenshot failure,
+   * giving the round transition time to finish.
+   *
+   * Default: 900
+   */
+  staleElementBackoffMs?: number;
+
+  /**
    * When the model reports "unsupported" *after we've already interacted* (i.e.
    * mid multi-round), it's almost always a not-yet-settled next round rather
    * than a genuinely unsupported puzzle. This is how many times to wait for the
