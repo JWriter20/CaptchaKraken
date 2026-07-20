@@ -210,6 +210,12 @@ export class CaptchaKrakenSolver {
     // didn't — it was a race).
     let unsupportedRetries = 0;
     const maxUnsupportedRetries = this.config.maxUnsupportedReSolves ?? 3;
+    // A stale/detached challenge handle: after a submit, hCaptcha swaps the
+    // challenge iframe for the next round while we still hold the old handle, so
+    // a screenshot on it hangs then fails "not visible". Not a real failure —
+    // re-detect the fresh challenge and retry, up to this budget.
+    let staleElementRetries = 0;
+    const maxStaleElementRetries = this.config.maxStaleElementRetries ?? 3;
     // Track whether we've interacted with the captcha at least once. Before any
     // interaction, a null detectCaptcha() means "not rendered yet", not "solved".
     let hasInteracted = false;
@@ -310,6 +316,26 @@ export class CaptchaKrakenSolver {
             'Cannot solve this kind of captcha — the rendered puzzle is not a '
             + 'supported grid or checkbox (likely an hCaptcha click/drag puzzle).'
           );
+        }
+        // Stale/detached challenge handle: hCaptcha swapped in the next round
+        // while we held the old iframe, so a screenshot on it fails "not
+        // visible" / "Timeout" / "not attached". This is a transition, not a
+        // dead puzzle — back off, then let the loop re-detect the fresh
+        // challenge. (Only after we've interacted; a first-frame failure is a
+        // genuine problem worth surfacing.)
+        const emsg = String((e && (e as any).message) || e);
+        if (
+          hasInteracted
+          && staleElementRetries < maxStaleElementRetries
+          && /Timeout .*exceeded|not visible|not attached|detached|Target closed/i.test(emsg)
+        ) {
+          staleElementRetries++;
+          console.log(
+            `stale challenge handle after submit ("${emsg.split('\n')[0]}"); `
+            + `re-detecting next round (${staleElementRetries}/${maxStaleElementRetries}).`,
+          );
+          await delay(this.config.staleElementBackoffMs ?? 900);
+          continue;
         }
         throw e;
       }
@@ -413,7 +439,11 @@ export class CaptchaKrakenSolver {
       `step_${this.stepIndex}_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
     );
     try {
-      await captchaElement.screenshot({ path: screenshotPath });
+      await captchaElement.screenshot({
+        path: screenshotPath,
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      });
     } catch {
       screenshotPath = null;
     }
@@ -531,7 +561,11 @@ export class CaptchaKrakenSolver {
 
     // 1. Take Screenshot
     const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-    await captchaElement.screenshot({ path: screenshotPath });
+    await captchaElement.screenshot({
+      path: screenshotPath,
+      timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+      animations: 'disabled',
+    });
 
     // Save image to debug directory if debugging is enabled
     this.saveImageForDebug(screenshotPath);
