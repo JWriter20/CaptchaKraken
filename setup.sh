@@ -18,6 +18,7 @@
 #   ./setup.sh --start          # ...and start the server now
 #   ./setup.sh --quant fp8|awq|bf16
 #   ./setup.sh --download-only  # just fetch weights (skip the hardware gate)
+#   ./setup.sh --update         # pull latest weights + upgrade vLLM (already set up)
 #   ./setup.sh --yes            # non-interactive (accept the recommended path)
 #
 # After setup, everything is hands-off:
@@ -43,16 +44,17 @@ FP8_MIN=22   # GB — comfortable FP8 serve (weights + KV + bf16 ViT + LoRA)
 AWQ_MIN=11   # GB — comfortable AWQ serve
 HARD_FLOOR=$AWQ_MIN
 
-QUANT=""; DOWNLOAD_ONLY=0; ASSUME_YES=0; START_SERVER=0
+QUANT=""; DOWNLOAD_ONLY=0; ASSUME_YES=0; START_SERVER=0; UPDATE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --quant) QUANT="${2:-}"; shift 2 ;;
     --quant=*) QUANT="${1#*=}"; shift ;;
     --download-only) DOWNLOAD_ONLY=1; shift ;;
+    --update) UPDATE=1; shift ;;
     --start) START_SERVER=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -108,9 +110,19 @@ ensure_venv() {
 }
 
 install_serve_stack() {
-  info "Installing captchakraken[serve] (pulls vLLM + serving stack)…"
-  "$PY" -m pip install "$PY_DIR[serve]"
-  ok "Serving stack installed (vLLM + CLI in $VENV_DIR)."
+  # Prefer the PUBLISHED package from PyPI (pinned to this checkout's version so
+  # the engine matches the repo), falling back to the local source tree only if
+  # PyPI can't satisfy it — offline, or a dev build not yet released.
+  local ver
+  ver="$(grep -m1 '^version' "$PY_DIR/pyproject.toml" | sed 's/.*"\(.*\)".*/\1/')"
+  info "Installing captchakraken[serve]==${ver} from PyPI (pulls vLLM + serving stack)…"
+  if "$PY" -m pip install "captchakraken[serve]==${ver}"; then
+    ok "Serving stack installed from PyPI (vLLM + CLI in $VENV_DIR)."
+  else
+    warn "PyPI install failed; falling back to the local source tree."
+    "$PY" -m pip install "$PY_DIR[serve]"
+    ok "Serving stack installed from source (vLLM + CLI in $VENV_DIR)."
+  fi
 }
 
 install_weights_only_deps() {
@@ -153,6 +165,22 @@ EOF
 
 # ── Main ────────────────────────────────────────────────────────────────────
 echo "$(c '1;35' '╔══ CaptchaKraken setup ══╗')"
+
+# --update: an already-set-up box just wants the latest weights + engine. Skip
+# the whole hardware-gate/install/env-write flow and hand off to the unified
+# fetch command (pulls latest LoRA+base from HF, upgrades vLLM, restarts server).
+if [[ "$UPDATE" == "1" ]]; then
+  if [[ ! -x "$VENV_DIR/bin/captchakraken" ]]; then
+    err "No venv found at $VENV_DIR — run ./setup.sh first, then ./setup.sh --update."
+    exit 1
+  fi
+  info "Updating: pulling latest weights from HuggingFace + upgrading vLLM…"
+  [[ -f "$HERE/captchakraken.env" ]] && { set -a; source "$HERE/captchakraken.env"; set +a; }
+  "$VENV_DIR/bin/captchakraken" fetch
+  ok "Update complete."
+  exit 0
+fi
+
 detect_hardware
 info "Detected: ${DETECT_KIND}, ~${DETECT_MEM_GB} GB memory."
 

@@ -8,13 +8,17 @@ version = "2.2.0"
 description = "Self-hosted captcha solver: OpenCV grid detection + a fine-tuned Qwen3.5-9B vision LoRA served on vLLM."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "GPL-3.0-or-later" }
+# Source-available, NOT GPL. The CaptchaKraken Source-Available License permits
+# commercial use as an internal component but prohibits selling the solve itself
+# or thin-wrapper resale — see LICENSE. (GPL-3.0 would wrongly permit reselling.)
+license = { file = "LICENSE" }
 authors = [{ name = "Jake Writer" }]
 keywords = ["captcha", "recaptcha", "hcaptcha", "vllm", "qwen", "computer-vision", "automation"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: OS Independent",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "License :: Other/Proprietary License",
 ]
 
 # Core = the lightweight CLIENT: OpenCV grid detection + the HTTP planner that
