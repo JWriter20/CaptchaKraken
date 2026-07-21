@@ -23,6 +23,38 @@ from .timing import timed
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
+# Header the fleet's haproxy front (on the reverse-proxy EC2) routes on. When a
+# caller sets CAPTCHA_REQUEST_PRIORITY to a positive int, every request carries
+# `X-JH-Priority: <n>`; haproxy sends anything above its threshold (5) straight
+# to the backup GPUs so it never competes with production traffic on the main
+# 5090. The tier-2 CI gate sets this — its traffic is throwaway and must stay
+# off the primary.
+#
+# Deliberately a HEADER, not vLLM's request-body `priority` field: that field is
+# lower-is-higher and already means captcha=0 / apply=100 / label=200 on the
+# priority-scheduled primary, so a value like 10 would MISORDER there (it would
+# outrank apply/label). Routing is a fleet concern, kept out of the model's
+# scheduler.
+_PRIORITY_HEADER = "X-JH-Priority"
+_PRIORITY_ENV = "CAPTCHA_REQUEST_PRIORITY"
+
+
+def routing_headers(env=None) -> Dict[str, str]:
+    """Fleet-routing headers derived from the environment (empty by default).
+
+    Split out and env-injectable so it can be unit-tested without a live server.
+    A missing or non-integer CAPTCHA_REQUEST_PRIORITY yields no header at all —
+    an unset/garbage value must never silently tag traffic for the backups.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get(_PRIORITY_ENV) or "").strip()
+    if not raw:
+        return {}
+    try:
+        return {_PRIORITY_HEADER: str(int(raw))}
+    except ValueError:
+        return {}
+
 
 # Matches the training-distribution grid prompts in
 # cleanSamples/test/test_solutions.json -> grade.synthesize_instruction.
@@ -129,6 +161,10 @@ class ActionPlanner:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            # Fleet routing: absent unless CAPTCHA_REQUEST_PRIORITY is set (see
+            # routing_headers). Low-priority batch traffic is steered to the
+            # backup GPUs by the haproxy front on this header.
+            **routing_headers(),
         }
 
         # Hands-off server: before the very first request, make sure something
@@ -290,12 +326,31 @@ class ActionPlanner:
                   "including any matches you may have overlooked."
             )
         raw = self._chat_with_image(prompt, image_path, max_tokens=128)
-        data = self._parse_json(raw)
+        out = self._normalize_grid(self._parse_json(raw), total)
+        self._log(f"grid selection -> {out}")
+        return out
 
+    @staticmethod
+    def _normalize_grid(data: Any, total: int) -> List[int]:
+        """Map the model's grid JSON to a list of 1-indexed cell numbers.
+
+        Accepts the trained shape (a bare JSON array) plus the wrapped forms the
+        model drifts into: {"target_ids": [...]} and {"action": {"target_ids":
+        [...]}}. Out-of-range and non-numeric entries are dropped rather than
+        raising — a single junk element must not cost the whole selection.
+
+        Split out of get_grid_selection so the parse is testable without a
+        model, mirroring _normalize_pixel.
+        """
         if isinstance(data, list):
             ids = data
         elif isinstance(data, dict):
-            ids = data.get("target_ids") or data.get("action", {}).get("target_ids") or []
+            # `action` is a dict on the grid path but a bare string ("drag") on
+            # the pixel path — guard so a mis-routed response returns [] rather
+            # than raising AttributeError.
+            nested = data.get("action")
+            nested_ids = nested.get("target_ids") if isinstance(nested, dict) else None
+            ids = data.get("target_ids") or nested_ids or []
         else:
             ids = []
 
@@ -303,11 +358,10 @@ class ActionPlanner:
         for v in ids:
             try:
                 iv = int(v)
-                if 1 <= iv <= total:
-                    out.append(iv)
             except (TypeError, ValueError):
                 continue
-        self._log(f"grid selection -> {out}")
+            if 1 <= iv <= total:
+                out.append(iv)
         return out
 
     def get_pixel_actions(self, image_path: str) -> List[Dict[str, Any]]:
