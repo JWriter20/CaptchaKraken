@@ -42,3 +42,6 @@ run_full_record.out
 run_full_record.sh
 *_video_attempt_*.png
 captcha_videos/
+# Personal VSCode workspace files (machine-specific; belong at a project
+# root, not in the tree). One strayed into python/tests/.
+*.code-workspace
