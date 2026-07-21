@@ -32,14 +32,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e . 'pytest>=7.0.0'
       - name: Hermetic no-regression suite
-        # The pre-deploy guard: grid detection (foundation of every solve), the
-        # stale-frame freshness check, and the unified fetch command.
-        run: |
-          python -m pytest -q \
-            tests/test_grid_detection_ci.py \
-            tests/test_freshness_check.py \
-            tests/test_fetch_command.py \
-            tests/test_pixel_parser.py
+        # The whole suite, not a hand-picked list. The previous four-file
+        # allowlist silently skipped test_solver.py, test_selected_fields.py,
+        # test_checkbox_captcha.py, test_move_indicator.py and
+        # test_object_detection.py — tests that existed, passed locally, and
+        # gated nothing. If a test is too slow or non-hermetic for CI, mark it
+        # (`@pytest.mark.skipif`) so the skip is visible in the run output
+        # rather than invisible in this file.
+        run: python -m pytest -q
 
   js-build:
     name: Solver build (TypeScript)
