@@ -11,6 +11,7 @@ likely to get wrong.
 from __future__ import annotations
 
 import struct
+import time
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -482,3 +483,33 @@ class TestAlreadySolved:
         solver.has_interactive_widget_in_dom = lambda _page: True  # type: ignore[method-assign]
         with pytest.raises(NoCaptchaFoundError):
             solver.solve(FakePage())
+
+
+class TestDeadline:
+    def test_a_slow_single_attempt_cannot_overrun_the_budget(self):
+        # The budget must be a real budget. Checking it only at the top of each
+        # attempt means one slow attempt overruns it without bound — a camoufox
+        # session ran past ten minutes against a nominal 120s timeout because
+        # nothing looked at the clock again until the attempt returned.
+        solver = _solver(overall_solve_timeout_ms=50)
+
+        def slow_single(_page, _el, _retry):
+            time.sleep(0.2)  # already past the 50ms budget
+            solver._check_deadline("test")
+            return True, []
+
+        solver.detect_captcha = lambda _page: FakeElement(src="recaptcha/api2/bframe")  # type: ignore[method-assign]
+        solver._solve_single = slow_single  # type: ignore[method-assign]
+        solver.is_captcha_solved = lambda _page: False  # type: ignore[method-assign]
+        with pytest.raises(CaptchaSolveError, match="exceeded overall_solve_timeout_ms"):
+            solver.solve(FakePage())
+
+    def test_the_deadline_is_cleared_between_solves(self):
+        # A deadline left set from a previous solve would make the next one fail
+        # instantly.
+        solver = _solver(overall_solve_timeout_ms=50)
+        solver.detect_captcha = lambda _page: None  # type: ignore[method-assign]
+        solver.is_captcha_solved = lambda _page: True  # type: ignore[method-assign]
+        solver.solve(FakePage())
+        assert solver._deadline_ms is None
+        solver._check_deadline("outside a solve")  # must not raise
