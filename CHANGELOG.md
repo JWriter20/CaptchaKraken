@@ -52,6 +52,24 @@ semantic versioning; v2 is a major, **breaking** release.
 - `__version__` in the Python package said `2.0.0` through the entire 2.2.x
   line. It now tracks the real version.
 
+Three more, all found by running the new driver against live reCAPTCHA rather
+than against fixtures — none of them were visible in the hermetic tests:
+
+- **An already-passed captcha raised instead of returning.** If the vendor had
+  already cleared the widget, nothing was detectable to solve and we had not
+  interacted, so the render-wait branch ran out and raised
+  `NoCaptchaFoundError`. That is the *common* case behind a good stealth
+  browser — camoufox frequently clears reCAPTCHA on the checkbox alone — so the
+  best possible outcome was being reported as an error the caller had to catch.
+- **`scroll_into_view_if_needed()` inherited Playwright's 30 s default** and runs
+  once per action plus once per submit. On a challenge iframe that is
+  mid-animation it waits for stability and burns the full 30 s each time, which
+  turned a ~5 s solve loop into minutes. Now bounded to 2 s; the element has
+  just been screenshotted, so there is nothing to lose.
+- **Progress output was invisible when piped.** Python block-buffers stdout when
+  it is not a TTY, so every line of a minutes-long solve appeared at once on
+  exit — a working run looked exactly like a hung one in a log file or CI.
+
 ## [2.2.1] — 2026-07-24
 
 Point release. No API breaks; every change below is either a fix for a puzzle
