@@ -8,6 +8,14 @@ from PIL import Image
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
+# DEAD SINCE THE MONOREPO RESTRUCTURE (529f144). `attention` was a v1-architecture
+# module; v1 is preserved on the `v1-old-architecture` branch and this module does
+# not exist here, so this file has been uncollectable — it did not fail CI only
+# because CI ran a four-file allowlist. Skipping visibly instead of silently
+# ignoring it. Either port these to the v2 planner or delete the file; a test that
+# can never run is not coverage.
+pytest.importorskip("attention", reason="v1-only module; see comment above")
+
 from attention import AttentionExtractor
 
 # Paths

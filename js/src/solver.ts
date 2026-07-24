@@ -17,7 +17,7 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 
@@ -50,13 +50,16 @@ function getVenvPython(cliRoot: string): string | null {
 
 // Env for spawning the python CLI. Prepend the bundled `python/src` to
 // PYTHONPATH so `python -m captchakraken.cli` imports even when the postinstall
-// `pip install` was skipped or failed (best-effort bootstrap).
-function cliEnv(cliRoot: string): NodeJS.ProcessEnv {
+// `pip install` was skipped or failed (best-effort bootstrap). `extra` carries
+// per-invocation values (currently the solve session id) and is applied last so
+// it wins over the inherited environment.
+function cliEnv(cliRoot: string, extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const srcDir = path.join(cliRoot, 'src');
   const existing = process.env.PYTHONPATH;
   return {
     ...process.env,
     PYTHONPATH: existing ? `${srcDir}${path.delimiter}${existing}` : srcDir,
+    ...extra,
   };
 }
 
@@ -150,6 +153,12 @@ export class CaptchaKrakenSolver {
   // itself is never screenshotted and mis-read as a blank/unsupported frame.
   // Cleared once consumed. See solveSingle().
   private lastSubmitFrameHash: string | null = null;
+  // Groups every inference round of ONE captcha into a single attempt for the
+  // hosted API. A dynamic reCAPTCHA 3x3 re-solves after each click round, so one
+  // solve() can fire up to `recaptchaMaxDynamicRounds` model calls; sharing a
+  // session id lets the gateway bill them as one capped attempt rather than N
+  // independent ones. Null outside a solve; ignored entirely when self-hosting.
+  private solveSessionId: string | null = null;
 
   constructor(config: CaptchaKrakenConfig = {}) {
     this.config = config;
@@ -157,6 +166,7 @@ export class CaptchaKrakenSolver {
   }
 
   async solve(page: Page): Promise<SolveResult | void> {
+    this.solveSessionId = randomUUID();
     try {
       return await this.solveImpl(page);
     } finally {
@@ -164,6 +174,9 @@ export class CaptchaKrakenSolver {
       // failure, or timeout) so we never leak a python process between solves.
       this.teardownCvWorker();
       this.cvWorkerReady = null;
+      // Clear last: a stale id leaking into the NEXT solve would merge two
+      // separate captchas into one billable attempt.
+      this.solveSessionId = null;
     }
   }
 
@@ -1891,7 +1904,10 @@ export class CaptchaKrakenSolver {
     try {
       const { stdout, stderr } = await execAsync(command, {
         cwd: cliRoot,
-        env: cliEnv(cliRoot),
+        // Only this call reaches the model, so it's the only one that needs the
+        // session id — the other cliEnv() call sites run pure-OpenCV subcommands
+        // that never touch the inference endpoint.
+        env: cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
         maxBuffer: 10 * 1024 * 1024 // Increase buffer for large outputs if needed
       });
 

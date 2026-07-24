@@ -29,8 +29,9 @@ import requests
 
 from . import config
 
-# One shared state dir for the pidfile, lockfile, and server log.
-STATE_DIR = Path(os.getenv("CAPTCHA_KRAKEN_STATE_DIR", str(Path.home() / ".captchakraken")))
+# One shared state dir for the pidfile, lockfile, server log, and the hosted-API
+# credentials file. Defined in `config` so the path has a single definition.
+STATE_DIR = config.state_dir()
 LOCK_FILE = STATE_DIR / "vllm.lock"
 PID_FILE = STATE_DIR / "vllm.pid"
 LOG_FILE = STATE_DIR / "vllm.log"

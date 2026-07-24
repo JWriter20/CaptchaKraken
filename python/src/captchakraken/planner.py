@@ -23,6 +23,78 @@ from .timing import timed
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
+# Header the fleet's haproxy front (on the reverse-proxy EC2) routes on. When a
+# caller sets CAPTCHA_REQUEST_PRIORITY to a positive int, every request carries
+# `X-JH-Priority: <n>`; haproxy sends anything above its threshold (5) straight
+# to the backup GPUs so it never competes with production traffic on the main
+# 5090. The tier-2 CI gate sets this — its traffic is throwaway and must stay
+# off the primary.
+#
+# Deliberately a HEADER, not vLLM's request-body `priority` field: that field is
+# lower-is-higher and already means captcha=0 / apply=100 / label=200 on the
+# priority-scheduled primary, so a value like 10 would MISORDER there (it would
+# outrank apply/label). Routing is a fleet concern, kept out of the model's
+# scheduler.
+_PRIORITY_HEADER = "X-JH-Priority"
+_PRIORITY_ENV = "CAPTCHA_REQUEST_PRIORITY"
+
+# Hosted-API metadata. Both are OPTIONAL and absent unless deliberately set, so
+# self-hosted users never send them and are unaffected.
+#
+# X-CK-Client  — which integration issued this solve (e.g. "camoufox/0.4.11").
+#   camoufox sets CAPTCHA_KRAKEN_CLIENT in the env it spawns the solver with, so
+#   the gateway can account camoufox-attributed usage separately. Attribution
+#   ONLY: it is caller-supplied and therefore never priced on (the gateway
+#   derives billable puzzle class from the request body instead).
+# X-CK-Session — groups the 1..N inference rounds of ONE captcha into a single
+#   billable attempt. The JS driver mints a UUID per solve() and reuses it for
+#   every CLI invocation in that solve, which is what lets the gateway cap an
+#   attempt's billable rounds instead of charging per round without limit.
+_CLIENT_HEADER = "X-CK-Client"
+_CLIENT_ENV = "CAPTCHA_KRAKEN_CLIENT"
+_SESSION_HEADER = "X-CK-Session"
+_SESSION_ENV = "CAPTCHA_KRAKEN_SESSION"
+
+# These values reach the wire verbatim from the environment, so they are
+# sanitized rather than trusted: a CR/LF would otherwise splice arbitrary
+# headers into the upstream request.
+_HEADER_VALUE_MAX = 128
+
+
+def _clean_header_value(raw: str) -> str:
+    """Printable-ASCII, length-capped header value ("" when nothing survives)."""
+    return "".join(c for c in raw.strip() if 0x20 <= ord(c) < 0x7F)[:_HEADER_VALUE_MAX]
+
+
+def routing_headers(env=None) -> Dict[str, str]:
+    """Fleet-routing + hosted-API headers derived from the environment.
+
+    Empty by default. Split out and env-injectable so it can be unit-tested
+    without a live server. A missing or non-integer CAPTCHA_REQUEST_PRIORITY
+    yields no header at all — an unset/garbage value must never silently tag
+    traffic for the backups.
+
+    Each header is derived independently: a malformed priority must not suppress
+    the attribution headers, or one typo would silently make a camoufox solve
+    look like direct traffic and understate the partner's revenue share.
+    """
+    env = os.environ if env is None else env
+    headers: Dict[str, str] = {}
+
+    raw = (env.get(_PRIORITY_ENV) or "").strip()
+    if raw:
+        try:
+            headers[_PRIORITY_HEADER] = str(int(raw))
+        except ValueError:
+            pass
+
+    for header, var in ((_CLIENT_HEADER, _CLIENT_ENV), (_SESSION_HEADER, _SESSION_ENV)):
+        value = _clean_header_value(env.get(var) or "")
+        if value:
+            headers[header] = value
+
+    return headers
+
 
 # Matches the training-distribution grid prompts in
 # cleanSamples/test/test_solutions.json -> grade.synthesize_instruction.
@@ -46,21 +118,21 @@ PIXEL_ACTION_PROMPT = (
     "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
     "Look at the puzzle and decide what action solves it. All coordinates you return must be on a "
     "normalized 0–1000 image scale (top-left = (0, 0), bottom-right = (1000, 1000)).\n\n"
+    "Name WHAT each object is with a short 1–2 word label, then give its position. "
     "Choose ONE response:\n\n"
     "FOR CLICK PUZZLES:\n"
-    "  Identify every position you need to click and emit them as a list of points:\n"
-    "  → \"action\": { \"action\": \"click\", \"points\": [[x1, y1], [x2, y2], ...] }\n\n"
+    "  Label each thing you click and give its point — subjects[i] names points[i]:\n"
+    "  → \"action\": \"click\", \"subjects\": [\"<label>\", ...], "
+    "\"points\": [[x1, y1], [x2, y2], ...]\n\n"
     "FOR DRAG PUZZLES:\n"
-    "  Drag ONE item at a time. The source position is the centroid of the piece you are picking up; "
-    "the destination position is where it should end up. If multiple drags are needed, drag the topmost "
-    "item first.\n"
-    "  → \"output\": [{ \"Action\": \"simulate_drag\", "
-    "\"SourceDescription\": \"...\", \"SourcePosition\": { \"x\": 1-1000, \"y\": 1-1000 }, "
-    "\"DestinationDescription\": \"...\", \"EstimatedPosition\": { \"x\": 1-1000, \"y\": 1-1000 } }]\n\n"
+    "  Drag ONE item at a time. Label the source (the piece you pick up) and the destination "
+    "(where it belongs), each with a short 1–2 word label, and give both points:\n"
+    "  → \"action\": \"drag\", \"drags\": [{ \"source\": \"<label>\", \"from\": [x, y], "
+    "\"destination\": \"<label>\", \"to\": [x, y] }, ...]\n\n"
     "Respond ONLY with JSON:\n"
     "{\n"
-    "  \"action\": { ... }\n"
-    "  // OR \"output\": [ ... ]\n"
+    "  \"action\": \"click\", \"subjects\": [ ... ], \"points\": [ ... ]\n"
+    "  // OR \"action\": \"drag\", \"drags\": [ ... ]\n"
     "}"
 )
 
@@ -129,6 +201,10 @@ class ActionPlanner:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            # Fleet routing: absent unless CAPTCHA_REQUEST_PRIORITY is set (see
+            # routing_headers). Low-priority batch traffic is steered to the
+            # backup GPUs by the haproxy front on this header.
+            **routing_headers(),
         }
 
         # Hands-off server: before the very first request, make sure something
@@ -290,12 +366,31 @@ class ActionPlanner:
                   "including any matches you may have overlooked."
             )
         raw = self._chat_with_image(prompt, image_path, max_tokens=128)
-        data = self._parse_json(raw)
+        out = self._normalize_grid(self._parse_json(raw), total)
+        self._log(f"grid selection -> {out}")
+        return out
 
+    @staticmethod
+    def _normalize_grid(data: Any, total: int) -> List[int]:
+        """Map the model's grid JSON to a list of 1-indexed cell numbers.
+
+        Accepts the trained shape (a bare JSON array) plus the wrapped forms the
+        model drifts into: {"target_ids": [...]} and {"action": {"target_ids":
+        [...]}}. Out-of-range and non-numeric entries are dropped rather than
+        raising — a single junk element must not cost the whole selection.
+
+        Split out of get_grid_selection so the parse is testable without a
+        model, mirroring _normalize_pixel.
+        """
         if isinstance(data, list):
             ids = data
         elif isinstance(data, dict):
-            ids = data.get("target_ids") or data.get("action", {}).get("target_ids") or []
+            # `action` is a dict on the grid path but a bare string ("drag") on
+            # the pixel path — guard so a mis-routed response returns [] rather
+            # than raising AttributeError.
+            nested = data.get("action")
+            nested_ids = nested.get("target_ids") if isinstance(nested, dict) else None
+            ids = data.get("target_ids") or nested_ids or []
         else:
             ids = []
 
@@ -303,11 +398,10 @@ class ActionPlanner:
         for v in ids:
             try:
                 iv = int(v)
-                if 1 <= iv <= total:
-                    out.append(iv)
             except (TypeError, ValueError):
                 continue
-        self._log(f"grid selection -> {out}")
+            if 1 <= iv <= total:
+                out.append(iv)
         return out
 
     def get_pixel_actions(self, image_path: str) -> List[Dict[str, Any]]:
@@ -394,6 +488,31 @@ class ActionPlanner:
         out: List[Dict[str, Any]] = []
         if not isinstance(data, dict):
             return out
+
+        # ---- drag (CANONICAL — the schema PIXEL_ACTION_PROMPT asks for and the
+        #      LoRA is trained on, see instructions.py::ACTION_INSTRUCTION):
+        #      {"action":"drag","drags":[{"source","from":[x,y],"destination","to":[x,y]}]}
+        # Note "action" here is the STRING "drag", not a dict, so the click path
+        # below never sees it. The legacy/simulate_drag branches that follow stay
+        # as fallbacks for older adapters.
+        content_drags = data.get("drags")
+        if content_drags is None and isinstance(data.get("action"), dict):
+            content_drags = data["action"].get("drags")
+        if isinstance(content_drags, dict):
+            content_drags = [content_drags]
+        if isinstance(content_drags, list) and content_drags:
+            for d in content_drags:
+                if not isinstance(d, dict):
+                    continue
+                snums = flat_numbers(d.get("from"))
+                dnums = flat_numbers(d.get("to"))
+                if len(snums) >= 2 and len(dnums) >= 2:
+                    src = norm_xy(snums[0], snums[1])
+                    dst = norm_xy(dnums[0], dnums[1])
+                    if src and dst:
+                        out.append({"kind": "drag", "src": src, "dst": dst})
+            if out:
+                return out
 
         # ---- drag: {"output": [ {simulate_drag ...}, ... ]} ----
         drags = data.get("output")
