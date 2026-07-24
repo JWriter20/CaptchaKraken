@@ -60,12 +60,18 @@ _SESSION_ENV = "CAPTCHA_KRAKEN_SESSION"
 
 
 def _log(message: str) -> None:
-    print(f"[captchakraken] {message}")
+    # flush=True is load-bearing, not tidiness. A solve is a minutes-long
+    # sequence of slow steps, and Python block-buffers stdout whenever it is not
+    # a TTY — so piped or redirected (CI logs, `> run.log`, a supervisor) the
+    # progress lines all appear at once when the process exits. A run that is
+    # working then looks indistinguishable from one that is hung, which is
+    # exactly the wrong signal from the one output people watch.
+    print(f"[captchakraken] {message}", flush=True)
 
 
 def _debug(message: str) -> None:
     if DEBUG:
-        print(f"[captchakraken:debug] {message}")
+        print(f"[captchakraken:debug] {message}", flush=True)
 
 
 def _delay(ms: float) -> None:
