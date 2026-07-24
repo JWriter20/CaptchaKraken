@@ -686,6 +686,7 @@ class PageSolver:
         frames: List[str] = []
         try:
             while (time.monotonic() * 1000.0) - start < cfg.settle_timeout_ms:
+                self._check_deadline("waiting for the challenge to settle")
                 path = _tmp_png("settle")
                 try:
                     self._screenshot(element, path)
@@ -767,6 +768,7 @@ class PageSolver:
         frames: List[str] = []
         try:
             while (time.monotonic() * 1000.0) - start < cfg.grid_load_timeout_ms:
+                self._check_deadline("waiting for grid cells to load")
                 path = _tmp_png("gridpoll")
                 try:
                     self._screenshot(element, path)
@@ -947,6 +949,7 @@ class PageSolver:
             frames.append(first)
 
             while (time.monotonic() * 1000.0) - start < cfg.recaptcha_fade_onset_grace_ms:
+                self._check_deadline("watching for the tile refresh")
                 iteration_start = time.monotonic() * 1000.0
                 if priority:
                     try:
@@ -993,6 +996,7 @@ class PageSolver:
         hover_index = 0
         try:
             while (time.monotonic() * 1000.0) - start < cfg.recaptcha_dynamic_fade_wait_ms:
+                self._check_deadline("waiting for a tile to reload")
                 iteration_start = time.monotonic() * 1000.0
                 if cfg.recaptcha_tile_hover_enabled:
                     try:
