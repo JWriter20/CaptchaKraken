@@ -38,7 +38,6 @@ driven from one.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import random
 import re
@@ -210,6 +209,31 @@ class PageSolver:
         self._solver = solver or CaptchaSolver(**solver_kwargs)
         self._last_mouse: Tuple[float, float] = (0.0, 0.0)
         self._last_submit_frame_hash: Optional[str] = None
+        # Absolute deadline for the current solve, in the same clock as
+        # time.monotonic() * 1000. None outside a solve.
+        self._deadline_ms: Optional[float] = None
+
+    def _check_deadline(self, where: str) -> None:
+        """
+        Enforce `overall_solve_timeout_ms` from INSIDE the long-running loops.
+
+        The TypeScript driver checks its budget only at the top of each attempt,
+        which means the budget is not really a budget: one slow attempt overruns
+        it without bound, because nothing looks at the clock again until the
+        attempt returns. Observed in practice — a camoufox session ran past ten
+        minutes against a nominal 120 s timeout, and the check at the top of the
+        loop never got a turn to fire.
+
+        Called at the points that can legitimately spin for a long time: each
+        action executed, and each round of the dynamic grid driver.
+        """
+        if self._deadline_ms is None:
+            return
+        if time.monotonic() * 1000.0 > self._deadline_ms:
+            raise CaptchaSolveError(
+                f"captcha solve exceeded overall_solve_timeout_ms "
+                f"({self.config.overall_solve_timeout_ms}ms) during {where}"
+            )
 
     # ------------------------------------------------------------------
     # Shared-half bridges. Each of these is the in-process equivalent of one
@@ -1038,6 +1062,9 @@ class PageSolver:
         pending_retry = retry_mode
 
         for round_index in range(1, cfg.recaptcha_max_dynamic_rounds + 1):
+            # Each round can legitimately spend ~10s waiting on fades, so eight
+            # of them plus the model calls can outlast the whole solve budget.
+            self._check_deadline(f"recaptcha grid round {round_index}")
             self._wait_for_grid_cells_loaded(element)
             shot = _tmp_png("recap")
             action: Optional[Dict[str, Any]] = None
@@ -1193,6 +1220,7 @@ class PageSolver:
             verify_button = None
 
             for raw_action in actions:
+                self._check_deadline("action execution")
                 action = _as_dict(raw_action)
                 kind = action.get("action")
                 if kind == "click":
@@ -1256,10 +1284,10 @@ class PageSolver:
         `UnsupportedChallengeError`, `AnimatedChallengeError`, or
         `CaptchaSolveError` on the failure modes named in each type.
         """
-        cfg = self.config
         start = time.monotonic() * 1000.0
         cumulative_usage: List[Dict[str, Any]] = []
         self._last_submit_frame_hash = None
+        self._deadline_ms = start + self.config.overall_solve_timeout_ms
 
         # Mint one session id for the WHOLE solve, exactly as the TS driver does
         # per `solve()`. The planner turns it into `X-CK-Session`, which is what
@@ -1276,6 +1304,7 @@ class PageSolver:
         try:
             return self._solve_impl(page, start, cumulative_usage)
         finally:
+            self._deadline_ms = None
             if previous_session is None:
                 os.environ.pop(_SESSION_ENV, None)
             else:

@@ -66,6 +66,14 @@ than against fixtures — none of them were visible in the hermetic tests:
   mid-animation it waits for stability and burns the full 30 s each time, which
   turned a ~5 s solve loop into minutes. Now bounded to 2 s; the element has
   just been screenshotted, so there is nothing to lose.
+- **`overall_solve_timeout_ms` was not actually a budget.** It was checked only
+  at the top of each attempt, so a single slow attempt overran it without bound
+  — nothing looked at the clock again until that attempt returned. A camoufox
+  session was observed running past ten minutes against a nominal 120 s timeout.
+  The deadline is now enforced inside the long-running loops (each action
+  executed, each round of the dynamic grid driver), so the configured budget is
+  the real ceiling. *The TypeScript driver has the same structural gap and has
+  not been changed here.*
 - **Progress output was invisible when piped.** Python block-buffers stdout when
   it is not a TTY, so every line of a minutes-long solve appeared at once on
   exit — a working run looked exactly like a hung one in a log file or CI.
