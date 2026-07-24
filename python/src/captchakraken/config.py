@@ -51,8 +51,60 @@ def base_url() -> str:
     return os.getenv("VLLM_BASE_URL", f"http://localhost:{port()}/v1")
 
 
+def state_dir() -> Path:
+    """Shared state dir for the pidfile, lockfile, server log, and credentials."""
+    return Path(os.getenv("CAPTCHA_KRAKEN_STATE_DIR", str(Path.home() / ".captchakraken")))
+
+
+def credentials_path() -> Path:
+    return state_dir() / "credentials"
+
+
+def _key_from_credentials_file() -> str:
+    """Key written by the MCP server's signup flow (or a future `login` command).
+
+    Hosted-API onboarding writes the key to a 0600 file rather than returning it
+    through the agent transcript, so it never lands in an LLM context window.
+    Reading it here is what lets a solve authenticate with NO env vars set.
+
+    Deliberately tolerant of a bare token, an env-file line, or surrounding
+    quotes: the file is written by a *separate* tool, and a format mismatch here
+    would surface as a baffling 401 rather than an obvious parse error.
+    Returns "" whenever the file is missing, unreadable, or has no usable line.
+    """
+    try:
+        text = credentials_path().read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            name, _, value = line.partition("=")
+            # An env-file with unrelated keys must not yield a bogus token.
+            if name.strip() not in {"CAPTCHA_KRAKEN_API_KEY", "VLLM_API_KEY"}:
+                continue
+            line = value.strip()
+        return line.strip("'\"")
+
+    return ""
+
+
 def api_key() -> str:
-    return os.getenv("CAPTCHA_KRAKEN_API_KEY") or os.getenv("VLLM_API_KEY") or "EMPTY"
+    """Bearer token, in precedence order.
+
+    Env first so an explicit override always wins, then the credentials file so
+    the MCP/hosted path needs no env plumbing at all, then "EMPTY" (which leaves
+    a self-hosted local vLLM open, as before).
+    """
+    return (
+        os.getenv("CAPTCHA_KRAKEN_API_KEY")
+        or os.getenv("VLLM_API_KEY")
+        or _key_from_credentials_file()
+        or "EMPTY"
+    )
 
 
 # ── Model identity (all overridable — the CLI itself is model-agnostic) ──────
