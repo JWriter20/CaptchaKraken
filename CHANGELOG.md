@@ -3,6 +3,55 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [2.3.0] — 2026-07-24
+
+### Added
+- **A Python page driver — you can now solve captchas from Python end to end.**
+  Until now the Python port was image-in / actions-out: you handed it a PNG and
+  got back click/drag actions, and something else had to own the browser.
+  Everything that actually drives a page lived only in the TypeScript driver, so
+  Python callers could not use the solver against a live site at all.
+
+  ```python
+  from playwright.sync_api import sync_playwright
+  from captchakraken import PageSolver
+
+  result = PageSolver().solve(page)   # detects, solves, clicks, submits
+  ```
+
+  `captchakraken.page_solver` mirrors `js/src/solver.ts`: the same detection
+  order, the same freshness guard, the same multi-round driver for reCAPTCHA's
+  dynamic 3×3, the same under-selection retry, and the same submit policy.
+  Verified against live reCAPTCHA — on a real dynamic 3×3 it drives the rounds
+  and submits on `done`, exactly as the TypeScript driver does.
+
+  **The split is identical on both sides**: vision, CV and prompting stay in
+  Python (`solver.py`, `planner.py`, `tool_calls/`); the driver only finds the
+  challenge and clicks. The TypeScript driver reaches the Python half by
+  spawning the CLI; this one calls the same functions in-process — no
+  subprocess, no CV worker to leak. That is the *only* intended difference, so
+  the two cannot drift on anything that decides accuracy.
+
+  Imports no browser package: pass any Playwright-compatible page (`playwright`,
+  `patchright`, camoufox) and it duck-types the slice it needs.
+
+  **Synchronous only.** An async mirror is not yet written — a sync Playwright
+  handle cannot be driven from inside an event loop, so `AsyncCamoufox` and
+  `async_playwright` users are not covered by this release.
+- **`camoufox` integration.** `pip install "camoufox[captcha]"` then
+  `from camoufox.captcha import solve_captcha`. Requests are tagged
+  `camoufox/<version>` for attribution.
+- **Human mouse trajectories in Python** (`captchakraken.trajectory`). Same
+  `(points, cumulative_timings)` contract as the TypeScript driver's cursory-ts
+  call, so pacing is driver-independent: Fitts's-law duration, Bezier arc,
+  ease-in-out velocity, speed-scaled jitter, and overshoot-and-correct on longer
+  moves. An independent implementation, not a port — cursory-ts selects from a
+  bundled corpus of recorded human traces, which is that package's own asset.
+
+### Fixed
+- `__version__` in the Python package said `2.0.0` through the entire 2.2.x
+  line. It now tracks the real version.
+
 ## [2.2.1] — 2026-07-24
 
 Point release. No API breaks; every change below is either a fix for a puzzle

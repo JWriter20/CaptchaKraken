@@ -40,14 +40,26 @@ from .overlay import add_overlays_to_image
 try:  # pragma: no cover - exercised only when the serving stack is installed
     from .planner import ActionPlanner
     from .solver import CaptchaSolver, solve_captcha
+
+    # The page driver sits behind the same guard: it imports `solver`, so it has
+    # the same dependency floor. It needs NO browser package of its own — the
+    # caller supplies the Playwright-compatible page (see page_solver's module
+    # docstring on why we duck-type rather than import one).
+    from .page_solver import PageSolver, SolveResult, solve_captcha_on_page
 except ModuleNotFoundError:
     ActionPlanner = None  # type: ignore[assignment,misc]
     CaptchaSolver = None  # type: ignore[assignment,misc]
     solve_captcha = None  # type: ignore[assignment]
+    PageSolver = None  # type: ignore[assignment,misc]
+    SolveResult = None  # type: ignore[assignment,misc]
+    solve_captcha_on_page = None  # type: ignore[assignment]
 
 __all__ = [
     "CaptchaSolver",
     "solve_captcha",
+    "PageSolver",
+    "SolveResult",
+    "solve_captcha_on_page",
     "ActionPlanner",
     "ImageProcessor",
     "CaptchaAction",
@@ -58,4 +70,4 @@ __all__ = [
     "add_overlays_to_image",
 ]
 
-__version__ = "2.0.0"
+__version__ = "2.3.0"

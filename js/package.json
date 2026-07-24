@@ -1,6 +1,6 @@
 {
   "name": "captchakraken",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Browser-agnostic Playwright/Puppeteer captcha solver. Detects the captcha, reads the grid with a fine-tuned Qwen3.5-9B vision model on vLLM, and clicks through to a token.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
