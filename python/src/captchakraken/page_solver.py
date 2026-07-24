@@ -212,6 +212,8 @@ class PageSolver:
         # Absolute deadline for the current solve, in the same clock as
         # time.monotonic() * 1000. None outside a solve.
         self._deadline_ms: Optional[float] = None
+        # Window size for clamping, resolved once per solve. See _viewport.
+        self._viewport_cache: Optional[Dict[str, float]] = None
 
     def _check_deadline(self, where: str) -> None:
         """
@@ -304,6 +306,48 @@ class PageSolver:
     # Mouse
     # ------------------------------------------------------------------
 
+    def _viewport(self, page: Any) -> Optional[Dict[str, float]]:
+        """
+        The window we must keep the cursor inside, cached per solve.
+
+        MUST NOT be skipped and MUST NOT be guessed, because a mouse move to a
+        coordinate outside the window WEDGES camoufox. Its juggler humanises
+        each move into a trajectory, guards the intermediate points against the
+        bounds, and then dispatches the requested destination unguarded
+        ("Always finish exactly on the requested destination"). An out-of-window
+        destination fires as an exit event instead of eMouseMove, so no
+        hit-renderer ack comes back; dispatch is serialised on a process-global
+        activation chain, so that one missing ack hangs every later input event
+        forever. Symptom: `page.mouse.move()` never returns, 0% CPU, solve
+        appears dead. Same failure family as camoufox #225.
+
+        `page.viewport_size` is None under camoufox (it uses the real window
+        rather than a spoofed viewport), which is why this falls back to asking
+        the page itself instead of assuming a size.
+        """
+        if self._viewport_cache is not None:
+            return self._viewport_cache
+        try:
+            vp = page.viewport_size
+            if callable(vp):  # some adapters expose it as a method
+                vp = vp()
+            if vp and vp.get("width") and vp.get("height"):
+                self._viewport_cache = {"width": float(vp["width"]), "height": float(vp["height"])}
+                return self._viewport_cache
+        except Exception:
+            pass
+        try:
+            inner = page.evaluate("() => ({width: window.innerWidth, height: window.innerHeight})")
+            if inner and inner.get("width") and inner.get("height"):
+                self._viewport_cache = {
+                    "width": float(inner["width"]),
+                    "height": float(inner["height"]),
+                }
+                return self._viewport_cache
+        except Exception:
+            pass
+        return None
+
     def _trace_path(self, page: Any, points: Sequence[Tuple[float, float]], timings: Sequence[float]) -> None:
         # Clamp ONLY when the viewport is actually known.
         #
@@ -321,15 +365,7 @@ class PageSolver:
         # trajectory between two on-screen elements, so they are already in
         # range. When we do clamp, we inset by a pixel so a legitimately
         # off-screen point lands just inside the edge instead of exactly on it.
-        viewport: Optional[Dict[str, float]] = None
-        try:
-            vp = page.viewport_size
-            if callable(vp):  # some adapters expose it as a method
-                vp = vp()
-            if vp and vp.get("width") and vp.get("height"):
-                viewport = vp
-        except Exception:
-            pass
+        viewport = self._viewport(page)
 
         start = time.monotonic() * 1000.0
         for i, (x, y) in enumerate(points):
@@ -1311,6 +1347,7 @@ class PageSolver:
         cumulative_usage: List[Dict[str, Any]] = []
         self._last_submit_frame_hash = None
         self._deadline_ms = start + self.config.overall_solve_timeout_ms
+        self._viewport_cache = None
 
         # Mint one session id for the WHOLE solve, exactly as the TS driver does
         # per `solve()`. The planner turns it into `X-CK-Session`, which is what

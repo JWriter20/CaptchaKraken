@@ -74,6 +74,19 @@ than against fixtures — none of them were visible in the hermetic tests:
   executed, each round of the dynamic grid driver), so the configured budget is
   the real ceiling. *The TypeScript driver has the same structural gap and has
   not been changed here.*
+- **Mouse moves could wedge camoufox permanently.** camoufox humanises every
+  `mousemove` into its own trajectory, guards the intermediate points against
+  the window bounds, and then dispatches the requested destination *unguarded*
+  ("always finish exactly on the requested destination"). A destination outside
+  the window fires as an exit event rather than `eMouseMove`, so no
+  hit-renderer ack returns; dispatch is serialised on a process-global
+  activation chain, so that one missing ack hangs **every later input event
+  forever**. The symptom is `page.mouse.move()` never returning — 0% CPU, no
+  in-flight work, a solve that looks dead. Same failure family as camoufox #225.
+  The driver now resolves the real window (`viewport_size`, falling back to
+  asking the page for `innerWidth/innerHeight`, since camoufox reports
+  `viewport_size = None`) and clamps a pixel inside it. With this, three
+  consecutive live reCAPTCHA solves through camoufox returned real tokens.
 - **Progress output was invisible when piped.** Python block-buffers stdout when
   it is not a TTY, so every line of a minutes-long solve appeared at once on
   exit — a working run looked exactly like a hung one in a log file or CI.
