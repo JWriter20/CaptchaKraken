@@ -3,6 +3,59 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [2.2.1] — 2026-07-24
+
+Point release. No API breaks; every change below is either a fix for a puzzle
+class that silently failed, or an opt-in header/credential path that is absent
+unless you deliberately set it.
+
+### Fixed
+- **Drag puzzles failed as "unsupported" against the current adapter.** The
+  LoRA was retrained on the content schema (`action: drag`, `drags[]`,
+  lowercase) while `planner.py` still asked for the legacy output/PascalCase
+  schema. The model answered in a hybrid, the parser dropped it, and every drag
+  puzzle failed — with no test going red. The inference prompt is now synced to
+  the trained schema, and the parser accepts every `simulate_drag` shape the
+  model emits rather than one canonical form.
+- **30-second stale-element hangs in the JS driver.** A handle captured before
+  the frame re-rendered was awaited until the Playwright timeout; the solver now
+  detects the detach and re-acquires instead of blocking the whole solve.
+
+### Added
+- **Pinned serving manifest** (`pinned_model.json`): the base model, the LoRA
+  adapter and revision, and the SHA-256 of each serving prompt, asserted in CI
+  (`tests/test_pinned_model.py`). Editing a serving prompt now fails CI until
+  someone consciously re-pins, which forces the question "does the pinned
+  adapter still expect this prompt?" — the check that would have caught the drag
+  regression above on the day it landed.
+- **Credentials file.** When neither `CAPTCHA_KRAKEN_API_KEY` nor `VLLM_API_KEY`
+  is set in the environment, the key is read from
+  `~/.captchakraken/credentials` (override the directory with
+  `CAPTCHA_KRAKEN_STATE_DIR`). Env always wins, so nothing that works today
+  changes; this only removes the need to keep a bearer token in your shell
+  profile.
+- **Hosted-API attribution headers**, both optional and absent unless set, so
+  self-hosted users are unaffected:
+  - `X-CK-Client` (from `CAPTCHA_KRAKEN_CLIENT`) — which integration issued the
+    solve, e.g. `camoufox/0.4.11`. Attribution only: it is caller-supplied and
+    is never priced on.
+  - `X-CK-Session` (from `CAPTCHA_KRAKEN_SESSION`) — groups the 1..N inference
+    rounds of one captcha into a single billable attempt. The JS driver mints a
+    UUID per `solve()` and reuses it across every CLI invocation in that solve.
+  Both values are sanitized before they reach the wire — a CR/LF in the
+  environment would otherwise splice arbitrary headers into the request.
+- **Fleet-routing priority header.** Setting `CAPTCHA_REQUEST_PRIORITY` to a
+  positive int sends `X-JH-Priority: <n>`, which a fleet front-end can route on
+  to keep throwaway traffic (e.g. a CI gate) off the production GPU.
+  Deliberately a header, not vLLM's request-body `priority` field, which is
+  lower-is-higher and would misorder against the server's own scheduling
+  classes.
+
+### CI
+- The hermetic suite now runs in full on every PR; the dead v1-only tests are
+  skipped **visibly** rather than silently collected. New coverage: solver
+  contract, grid parse, routing headers, credentials file, pinned manifest.
+
 ## [2.2.0] — 2026-07-15
 
 ### Added
