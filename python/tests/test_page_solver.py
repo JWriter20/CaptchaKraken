@@ -513,3 +513,33 @@ class TestDeadline:
         solver.solve(FakePage())
         assert solver._deadline_ms is None
         solver._check_deadline("outside a solve")  # must not raise
+
+
+class TestTracePathClamping:
+    def _points(self, page, pts):
+        solver = _solver()
+        solver._trace_path(page, pts, [0.0] * len(pts))
+        return page.mouse.moves
+
+    def test_no_clamping_when_the_viewport_is_unknown(self):
+        # camoufox reports viewport_size None. Clamping to a GUESSED viewport
+        # puts coordinates exactly on an edge that isn't the real one, and an
+        # exact-edge coordinate deadlocks camoufox's humanised-mouse patch
+        # (upstream #225) — mouse.move never returns and the solve hangs at 0%
+        # CPU. Points already come from a trajectory between on-screen elements.
+        page = FakePage()
+        page.viewport_size = None
+        assert self._points(page, [(5000.0, 4000.0)]) == [(5000.0, 4000.0)]
+
+    def test_clamping_insets_off_the_exact_edge(self):
+        # When we DO know the viewport, an out-of-range point lands just inside
+        # the boundary rather than exactly on it.
+        page = FakePage()
+        page.viewport_size = {"width": 800, "height": 600}
+        moves = self._points(page, [(-50.0, -50.0), (5000.0, 5000.0)])
+        assert moves == [(1.0, 1.0), (799.0, 599.0)]
+
+    def test_in_range_points_are_untouched(self):
+        page = FakePage()
+        page.viewport_size = {"width": 800, "height": 600}
+        assert self._points(page, [(400.0, 300.0)]) == [(400.0, 300.0)]

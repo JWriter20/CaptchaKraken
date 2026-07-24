@@ -305,12 +305,28 @@ class PageSolver:
     # ------------------------------------------------------------------
 
     def _trace_path(self, page: Any, points: Sequence[Tuple[float, float]], timings: Sequence[float]) -> None:
-        viewport = {"width": 1920, "height": 1080}
+        # Clamp ONLY when the viewport is actually known.
+        #
+        # camoufox reports `viewport_size is None` (it uses the real window
+        # rather than a spoofed viewport). The obvious fallback — assume
+        # 1920x1080 — is actively harmful: it clamps coordinates to the edge of
+        # a viewport that is not the real one, and a coordinate sitting EXACTLY
+        # on the boundary is the input that deadlocks camoufox's humanised-mouse
+        # juggler patch (upstream #225, "humanize edge deadlock"). The symptom is
+        # a `page.mouse.move()` that never returns: the process sits at 0% CPU
+        # with no in-flight work and the solve appears hung, which is precisely
+        # what this driver did against camoufox until this was found.
+        #
+        # A guessed clamp buys nothing anyway — the points come from a
+        # trajectory between two on-screen elements, so they are already in
+        # range. When we do clamp, we inset by a pixel so a legitimately
+        # off-screen point lands just inside the edge instead of exactly on it.
+        viewport: Optional[Dict[str, float]] = None
         try:
             vp = page.viewport_size
             if callable(vp):  # some adapters expose it as a method
                 vp = vp()
-            if vp:
+            if vp and vp.get("width") and vp.get("height"):
                 viewport = vp
         except Exception:
             pass
@@ -318,8 +334,11 @@ class PageSolver:
         start = time.monotonic() * 1000.0
         for i, (x, y) in enumerate(points):
             try:
-                cx = max(0.0, min(float(x), float(viewport["width"])))
-                cy = max(0.0, min(float(y), float(viewport["height"])))
+                if viewport is None:
+                    cx, cy = float(x), float(y)
+                else:
+                    cx = max(1.0, min(float(x), float(viewport["width"]) - 1.0))
+                    cy = max(1.0, min(float(y), float(viewport["height"]) - 1.0))
                 page.mouse.move(cx, cy)
                 self._last_mouse = (cx, cy)
                 if i < len(timings):
