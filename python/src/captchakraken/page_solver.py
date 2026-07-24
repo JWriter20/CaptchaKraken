@@ -314,8 +314,22 @@ class PageSolver:
         self._trace_path(page, points, timings)
 
     def _move_to_element(self, page: Any, element: Any, padding_percentage: float = 25.0) -> None:
+        # BOUNDED. Playwright's default timeout is 30s, and this is called once
+        # per action plus once per submit — on a challenge iframe that is
+        # mid-animation, scrolling "waits for stability" and burns the full 30s
+        # every time, which turned a ~5s solve loop into minutes during live
+        # testing. The element is already on screen in every real case here (we
+        # just screenshotted it), so a short bound loses nothing: on timeout we
+        # move to wherever it currently is.
         try:
-            element.scroll_into_view_if_needed()
+            element.scroll_into_view_if_needed(timeout=2_000)
+        except TypeError:
+            # An adapter whose signature takes no timeout (e.g. the Puppeteer
+            # bridge). Fall back rather than fail the solve.
+            try:
+                element.scroll_into_view_if_needed()
+            except Exception:
+                pass
         except Exception:
             pass
         box = element.bounding_box()
@@ -1297,6 +1311,16 @@ class PageSolver:
                 # v3 page or give up on a slow-rendering widget.
                 if has_interacted:
                     _log("no supported captcha remains after interaction; considering solved.")
+                    return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
+                # Already satisfied before we touched anything — the widget is
+                # present but the vendor has passed it (anchor checked / token
+                # populated). Common with a good stealth browser: camoufox often
+                # clears reCAPTCHA on the checkbox alone, with no challenge ever
+                # shown. Without this, the render-wait branch below sits for
+                # ~6s and then raises "no interactive captcha widget", turning
+                # the BEST outcome into an exception the caller has to catch.
+                if self.is_captcha_solved(page):
+                    _log("captcha already satisfied; nothing to solve.")
                     return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
                 if self.has_interactive_widget_in_dom(page) and render_waits < max_render_waits:
                     render_waits += 1

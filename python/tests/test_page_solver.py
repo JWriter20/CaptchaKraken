@@ -459,3 +459,26 @@ class TestTrajectory:
         _, short = generate_trajectory((0, 0), (40, 0))
         _, long = generate_trajectory((0, 0), (1200, 0))
         assert long[-1] > short[-1]
+
+
+class TestAlreadySolved:
+    def test_an_already_satisfied_captcha_returns_solved_not_an_error(self):
+        # The best outcome must not be an exception. A good stealth browser
+        # often clears reCAPTCHA on the checkbox alone, so the widget is in the
+        # DOM, nothing is detectable to solve, and we have not interacted —
+        # previously the render-wait branch then raised NoCaptchaFoundError.
+        solver = _solver()
+        solver.detect_captcha = lambda _page: None  # type: ignore[method-assign]
+        solver.is_captcha_solved = lambda _page: True  # type: ignore[method-assign]
+        solver.has_interactive_widget_in_dom = lambda _page: True  # type: ignore[method-assign]
+        assert solver.solve(FakePage()).is_solved is True
+
+    def test_an_unrendered_widget_still_waits_then_fails(self):
+        # The other side of the same branch must keep working: present but not
+        # solved and not rendered -> wait, then fail rather than hang.
+        solver = _solver()
+        solver.detect_captcha = lambda _page: None  # type: ignore[method-assign]
+        solver.is_captcha_solved = lambda _page: False  # type: ignore[method-assign]
+        solver.has_interactive_widget_in_dom = lambda _page: True  # type: ignore[method-assign]
+        with pytest.raises(NoCaptchaFoundError):
+            solver.solve(FakePage())
