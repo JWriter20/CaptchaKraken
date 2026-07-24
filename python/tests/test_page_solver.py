@@ -125,6 +125,13 @@ class FakePage:
     def eval_on_selector(self, *_: Any, **__: Any) -> str:
         return ""
 
+    # camoufox reports viewport_size None and the driver then asks the page.
+    # Default: report nothing, so tests exercise the "unknown viewport" branch.
+    inner_size: Optional[Dict[str, float]] = None
+
+    def evaluate(self, *_: Any, **__: Any) -> Optional[Dict[str, float]]:
+        return self.inner_size
+
 
 def _write_png(path: str, width: int, height: int) -> None:
     """A byte-valid PNG header — enough for _read_png_dimensions and file I/O."""
@@ -147,6 +154,8 @@ def _solver(**overrides: Any) -> PageSolver:
     solver._solver = None
     solver._last_mouse = (0.0, 0.0)
     solver._last_submit_frame_hash = None
+    solver._deadline_ms = None
+    solver._viewport_cache = None
     return solver
 
 
@@ -521,7 +530,16 @@ class TestTracePathClamping:
         solver._trace_path(page, pts, [0.0] * len(pts))
         return page.mouse.moves
 
-    def test_no_clamping_when_the_viewport_is_unknown(self):
+    def test_falls_back_to_the_page_when_viewport_size_is_none(self):
+        # camoufox reports viewport_size None. We must NOT give up and skip
+        # clamping — an out-of-window destination wedges its juggler (mouse.move
+        # never returns). Ask the page for the real window instead.
+        page = FakePage()
+        page.viewport_size = None
+        page.inner_size = {"width": 800.0, "height": 600.0}
+        assert self._points(page, [(5000.0, 4000.0)]) == [(799.0, 599.0)]
+
+    def test_no_clamping_when_the_viewport_is_genuinely_unknowable(self):
         # camoufox reports viewport_size None. Clamping to a GUESSED viewport
         # puts coordinates exactly on an edge that isn't the real one, and an
         # exact-edge coordinate deadlocks camoufox's humanised-mouse patch
