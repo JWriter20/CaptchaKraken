@@ -38,22 +38,62 @@ DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 _PRIORITY_HEADER = "X-JH-Priority"
 _PRIORITY_ENV = "CAPTCHA_REQUEST_PRIORITY"
 
+# Hosted-API metadata. Both are OPTIONAL and absent unless deliberately set, so
+# self-hosted users never send them and are unaffected.
+#
+# X-CK-Client  — which integration issued this solve (e.g. "camoufox/0.4.11").
+#   camoufox sets CAPTCHA_KRAKEN_CLIENT in the env it spawns the solver with, so
+#   the gateway can account camoufox-attributed usage separately. Attribution
+#   ONLY: it is caller-supplied and therefore never priced on (the gateway
+#   derives billable puzzle class from the request body instead).
+# X-CK-Session — groups the 1..N inference rounds of ONE captcha into a single
+#   billable attempt. The JS driver mints a UUID per solve() and reuses it for
+#   every CLI invocation in that solve, which is what lets the gateway cap an
+#   attempt's billable rounds instead of charging per round without limit.
+_CLIENT_HEADER = "X-CK-Client"
+_CLIENT_ENV = "CAPTCHA_KRAKEN_CLIENT"
+_SESSION_HEADER = "X-CK-Session"
+_SESSION_ENV = "CAPTCHA_KRAKEN_SESSION"
+
+# These values reach the wire verbatim from the environment, so they are
+# sanitized rather than trusted: a CR/LF would otherwise splice arbitrary
+# headers into the upstream request.
+_HEADER_VALUE_MAX = 128
+
+
+def _clean_header_value(raw: str) -> str:
+    """Printable-ASCII, length-capped header value ("" when nothing survives)."""
+    return "".join(c for c in raw.strip() if 0x20 <= ord(c) < 0x7F)[:_HEADER_VALUE_MAX]
+
 
 def routing_headers(env=None) -> Dict[str, str]:
-    """Fleet-routing headers derived from the environment (empty by default).
+    """Fleet-routing + hosted-API headers derived from the environment.
 
-    Split out and env-injectable so it can be unit-tested without a live server.
-    A missing or non-integer CAPTCHA_REQUEST_PRIORITY yields no header at all —
-    an unset/garbage value must never silently tag traffic for the backups.
+    Empty by default. Split out and env-injectable so it can be unit-tested
+    without a live server. A missing or non-integer CAPTCHA_REQUEST_PRIORITY
+    yields no header at all — an unset/garbage value must never silently tag
+    traffic for the backups.
+
+    Each header is derived independently: a malformed priority must not suppress
+    the attribution headers, or one typo would silently make a camoufox solve
+    look like direct traffic and understate the partner's revenue share.
     """
     env = os.environ if env is None else env
+    headers: Dict[str, str] = {}
+
     raw = (env.get(_PRIORITY_ENV) or "").strip()
-    if not raw:
-        return {}
-    try:
-        return {_PRIORITY_HEADER: str(int(raw))}
-    except ValueError:
-        return {}
+    if raw:
+        try:
+            headers[_PRIORITY_HEADER] = str(int(raw))
+        except ValueError:
+            pass
+
+    for header, var in ((_CLIENT_HEADER, _CLIENT_ENV), (_SESSION_HEADER, _SESSION_ENV)):
+        value = _clean_header_value(env.get(var) or "")
+        if value:
+            headers[header] = value
+
+    return headers
 
 
 # Matches the training-distribution grid prompts in
