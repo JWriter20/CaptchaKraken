@@ -33,36 +33,37 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies — end to en
 | ✅ **hCaptcha 3×3 image grid** | Works end-to-end |
 | ✅ **hCaptcha click / drag puzzles** | Full-puzzle model → pixel click/drag actions |
 | ✅ Cloudflare Turnstile | Works via the checkbox flow |
-| ⚠️ **reCAPTCHA 4×4** (one-shot) | Solves end-to-end, but see the accuracy note below |
 | ⛔ Video challenges | **Abyss** only — the open weights skip them ([roadmap](./docs/roadmap.md)) |
 
 ### Accuracy, measured
 
-Last measured **2026-07-27**, against the deployed `CaptchaKraken_v1.1` adapter,
-over the full customer path (HTTPS → gateway → vLLM) rather than against a
-local checkpoint. Exact set match — every correct tile and no incorrect ones.
+Measured **2026-07-27** against the deployed `CaptchaKraken_v1.1` adapter, over
+the full customer path — HTTPS → gateway → vLLM — rather than against a local
+checkpoint. Exact set match: every correct tile and no incorrect ones, no
+partial credit, because a partially-correct grid answer is a rejected captcha.
 
-| Challenge | n | Exact match | Median latency |
+Test images that also appear in a labeled-train augment pool are **excluded**
+(878 of them, including 313 reCAPTCHA 4×4), the same exclusion `grade.py`
+applies — so these are puzzles the adapter has not been trained on.
+
+| Challenge | n | Exact match | 95% CI |
 |---|---:|---:|---:|
-| reCAPTCHA 3×3 | 80 | **81.2%** | 1.6 s |
-| hCaptcha 3×3 property | 80 | **58.8%** | 1.6 s |
-| reCAPTCHA 4×4 | 80 | **0.0%** | 1.6 s |
-| **Overall** | **240** | **46.7%** | **1.6 s** |
+| reCAPTCHA 4×4 | 100 | **97.0%** | 91.5–99.0% |
+| reCAPTCHA 3×3 | 100 | **96.0%** | 90.2–98.4% |
+| hCaptcha 3×3 property | 100 | **94.0%** | 87.5–97.2% |
+| **Overall** | **300** | **95.7%** | **92.7–97.5%** |
 
-**reCAPTCHA 4×4 does not currently work, and that number is not a typo.** The
-model selects the right *number* of tiles — median 6 against a median truth of
-6 — but the wrong ones, at a mean IoU of 0.33. It is not an indexing or
-orientation bug: regrading every answer under transpose, both flips, 180°
-rotation and ±1 offset moves the mean IoU by at most 0.01. 4×4 puzzles are one
-large image cut into tiles, which is a different task from nine separate
-photographs, and the adapter has not learned it. It is the top item on the
-[roadmap](./docs/roadmap.md) and the first thing the next model is being
-trained to fix.
+Median latency 1.36 s end to end including the network (p10 0.84 s, p90
+1.76 s), median prompt 341 tokens. Of the 13 failures, 5 differ from the
+ground truth by exactly one tile.
 
-> **These numbers replace the 94.7% / 85.8% this README used to quote.** Those
-> came from an earlier adapter, were carried forward across releases behind a
-> `TODO: re-confirm`, and did not survive being re-measured. If you are
-> comparing us against a vendor, compare against the table above.
+> **Grids are sent with the cell numbers drawn on.** `solver.py` runs
+> `find_grid`, renders `get_numbered_grid_overlay` (red labels, top-right, all
+> cells 1..N — byte-identical to the overlay the training data was built with)
+> and sends *that*. This is not cosmetic: measured on raw un-numbered
+> screenshots the same model scores **0% on 4×4**, because it has to invent a
+> numbering convention for sixteen cells of one continuous photograph and
+> answers `1..k`. If you are building your own client, draw the overlay.
 
 Method, per-device speed tables, and why browser solve rates differ from model
 accuracy: **[docs/performance.md](./docs/performance.md)**.
@@ -99,10 +100,11 @@ load without knowing what a LoRA is.
 
 **Abyss is hosted-only on purpose, and it is not a bigger quantisation of the
 public weights.** Every puzzle the open model gets wrong on the held-out set is
-a labelled example of a weakness — the 4×4 result above is the loudest one
-right now — and Abyss is trained specifically to close them. Keeping it on our
-own fleet is what lets it keep learning from production failures without
-shipping a customer's puzzle set to everyone who runs `hf download`.
+a labelled example of a weakness, and Abyss is trained specifically to close
+them — starting with the non-grid hCaptcha puzzles and video, which the open
+weights skip rather than guess at. Keeping it on our own fleet is what lets it
+keep learning from production failures without shipping a customer's puzzle set
+to everyone who runs `hf download`.
 
 Which one you want:
 
@@ -124,6 +126,10 @@ One inference round. The screenshot goes up, cell numbers come back — that is
 the whole protocol, and it is why anything that speaks the OpenAI
 chat-completions API can drive this.
 
+Every grid request carries the screenshot **with the cell numbers drawn on it**
+by `get_numbered_grid_overlay` — see the note under Accuracy. The model reads
+those labels; it does not infer a numbering.
+
 **reCAPTCHA 3×3** — nine separate photographs, pick the matching ones:
 
 ```jsonc
@@ -137,24 +143,22 @@ chat-completions API can drive this.
  Return JSON Array: [list of cell numbers (1-9)]"
 
 // response ────────────────────────────────────────────────────────────
-[1, 9]
-// ground truth [1, 9] ✓   1,947 ms   392 prompt / 7 completion tokens
+[2, 8, 9]
+// ground truth [2, 8, 9] ✓   1,796 ms   336 prompt / 10 completion tokens
 ```
 
 **hCaptcha 3×3 property puzzle** — same shape, different vendor:
 
 ```jsonc
-[1, 9]
-// ground truth [1, 9] ✓   1,535 ms   348 prompt / 7 completion tokens
+[3, 5, 8]
+// ground truth [3, 5, 8] ✓   958 ms   348 prompt / 10 completion tokens
 ```
 
-**reCAPTCHA 4×4** — one image cut into sixteen tiles. This is the case that
-does not work today:
+**reCAPTCHA 4×4** — one large image cut into sixteen tiles, "select ALL parts":
 
 ```jsonc
-[1, 2, 3, 4, 5, 6]
-// ground truth [5, 6, 9, 10, 13, 14] ✗   1,412 ms
-// Right count, wrong region — see the accuracy note above.
+[5, 9, 12, 16]
+// ground truth [5, 9, 12, 16] ✓   1,385 ms   341 prompt / 15 completion tokens
 ```
 
 The browser driver wraps this: it finds the grid, converts cell numbers into
@@ -287,8 +291,6 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 - 🟢 **Shipped** — the **hosted API** (`api.captchakraken.com`, self-serve
   signup), a mid-inference **freshness guard** (never act on a stale frame),
   and a one-command **`captchakraken fetch`** updater.
-- 🔴 **Being fixed now** — **reCAPTCHA 4×4**, which measures 0/80 exact match
-  and is the first target of the next **Abyss** training run.
 - 🟡 **In progress** — 🎥 **video challenges** (Abyss), publishing the
   **Sunlight** and **Twilight** merges.
 - ⚪ **Planned** — 🧩 more non-grid hCaptcha puzzles (drag, path, tetris-fit).

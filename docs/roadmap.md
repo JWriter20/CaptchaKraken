@@ -12,12 +12,12 @@ Where CaptchaKraken is headed. Legend: 🟢 shipped · 🟡 in progress · ⚪ p
 | ☁️ **Hosted cloud API** | 🟢 shipped | `api.captchakraken.com`. Self-serve signup with GitHub, free credits on the account, metered per inference round. Runs **Abyss**. |
 | 🧩 **hCaptcha click / drag puzzles** | 🟢 shipped | Full-puzzle model → pixel-space click/drag actions. |
 
-## 🔴 Broken, being fixed
+## 🏷️ Known data issues
 
 | Item | Status | Notes |
 |---|---|---|
-| 🎯 **reCAPTCHA 4×4** | 🔴 **0/80 exact match** | Measured 2026-07-27. The model picks the right *number* of tiles and the wrong ones (mean IoU 0.33), and it is not an indexing bug — see [Performance](./performance.md#recaptcha-4×4-is-broken-and-here-is-the-evidence). A 4×4 is one image cut into tiles, which is a segmentation task, not a "pick the matching photos" task. **First target of the next Abyss run.** |
-| 🏷️ **4×4 eval labels** | 🔴 known bad | All 288 real 4×4 records in `test_solutions.json` carry a 3×3 instruction. `grade.py` works around it via `canonical_instruction()`; the file itself still needs fixing. |
+| **4×4 eval labels** | 🔴 known bad | All 288 real 4×4 records in `test_solutions.json` carry a 3×3 instruction, and their `rows`/`cols` disagree with `puzzle_type`. `grade.py` works around it via `canonical_instruction()`; the file itself still needs fixing. |
+| **Train/infer prompt parity** | 🟡 in progress | `canonical_instruction()` and the shipped `SELECT_GRID_PROMPT` differ for reCAPTCHA 3×3 (the already-cleared-tiles paragraph). Measured p = 0.55 on a static corpus, but it is the live-dynamic case the paragraph exists for. |
 
 ## 🟡 In progress
 

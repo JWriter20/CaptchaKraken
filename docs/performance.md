@@ -13,50 +13,76 @@ Exact set match: every correct tile selected and no incorrect ones. Partial
 credit is not given, because a partially-correct grid answer is a rejected
 captcha.
 
-| Challenge | n | Exact match | Median latency |
+Test images that also appear in a labeled-train augment pool are **excluded** —
+878 of them, including 313 reCAPTCHA 4×4 and 262 reCAPTCHA 3×3. That is the
+same exclusion `grade.py` applies, and it is what makes these held-out numbers
+rather than a memorisation check.
+
+| Challenge | n | Exact match | 95% CI (Wilson) |
 |---|---:|---:|---:|
-| reCAPTCHA 3×3 | 80 | **81.2%** | 1.6 s |
-| hCaptcha 3×3 property | 80 | **58.8%** | 1.6 s |
-| reCAPTCHA 4×4 | 80 | **0.0%** | 1.6 s |
-| **Overall** | **240** | **46.7%** | **1.6 s** |
+| reCAPTCHA 4×4 | 100 | **97.0%** | 91.5–99.0% |
+| reCAPTCHA 3×3 | 100 | **96.0%** | 90.2–98.4% |
+| hCaptcha 3×3 property | 100 | **94.0%** | 87.5–97.2% |
+| **Overall** | **300** | **95.7%** | **92.7–97.5%** |
 
-Latency spread over the 240 requests: p10 0.9 s, median 1.6 s, p90 2.1 s.
-Median prompt 348 tokens, completion 7–19 tokens.
+Latency over the 300 requests: p10 0.84 s, median 1.36 s, p90 1.76 s, end to
+end including the network. Median prompt 341 tokens. Of the 13 failures, 5
+differ from the ground truth by exactly one tile.
 
-### reCAPTCHA 4×4 is broken, and here is the evidence
+### Grids must be sent with the cell numbers drawn on
 
-0/80 is not a harness artifact. The model selects the right *number* of tiles —
-median 6 against a median ground truth of 6 — but the wrong ones, at a **mean
-IoU of 0.33**. Every answer was regraded under transpose, horizontal flip,
-vertical flip, 180° rotation and ±1 index offset; the best of those moved the
-mean IoU to 0.34, so it is not an indexing or orientation mismatch.
+This is the single biggest thing to get right in a client, and getting it wrong
+does not look like a bug — it looks like a bad model.
 
-A 4×4 reCAPTCHA is one large photograph cut into sixteen tiles, and the task is
-"select every tile containing part of the object". That is a segmentation
-problem wearing a grid costume, and it is different enough from "pick the
-matching photographs" that the adapter has not learned it. It is the first
-target of the next Abyss training run.
+`solver.py` runs `find_grid`, renders `get_numbered_grid_overlay` (red labels,
+top-right, all cells 1..N — byte-identical to the overlay
+`scripts/build_grid_overlays.py` used to build the training data) and sends
+*that* image. The model reads the labels. It does not infer a numbering from
+tile positions, because it was never trained to.
 
-### Two label bugs found while measuring this
+Measured on the same 300 samples with the raw, un-numbered screenshots instead:
+
+| Challenge | With overlay | Raw screenshot |
+|---|---:|---:|
+| reCAPTCHA 3×3 | 96.0% | ~80% |
+| reCAPTCHA 4×4 | 97.0% | **0%** |
+
+The 4×4 collapse is the tell. A 4×4 is one continuous photograph with sixteen
+cells and no separate subjects to anchor on, so with no labels to read the
+model invents a convention and answers `1..k` — right number of tiles, wrong
+region, mean IoU 0.33. A 3×3 of nine distinct photographs degrades far more
+gently, which is exactly why this mistake can hide.
+
+### The prompt is not the same on both sides
+
+`canonical_instruction()` (training/grading) and `planner.SELECT_GRID_PROMPT`
+(the shipped client) are byte-identical for reCAPTCHA 4×4 and hCaptcha 3×3
+property, but **differ for reCAPTCHA 3×3**: the training prompt carries an
+extra paragraph the client omits —
+
+> "Tiles with a blue checkmark badge are ALREADY CLEARED. Do not include them
+> in your answer. Tiles that are fading to white (mid-transition) are also
+> cleared and must be excluded."
+
+Measured head-to-head on 240 paired reCAPTCHA 3×3 samples, the difference is
+not significant: 80.0% (client) vs 78.8% (training), 11 discordant pairs, exact
+two-sided sign test **p = 0.55**. That is expected on a static test set, where
+no tile is mid-transition. It may still matter in a live dynamic solve, where
+cleared tiles fade and are replaced — which is the case the paragraph exists
+for and the case this corpus cannot measure.
+
+### Two label bugs in the eval set
 
 Both are in `cleanSamples/test/test_solutions.json`, and both silently corrupt
-any evaluation that trusts the file naively:
+any harness that trusts the file naively:
 
 1. **Every one of the 288 real reCAPTCHA 4×4 images has a 3×3 instruction.**
    The `instruction` field says `Grid: 3x3 (9 cells)` while the ground truth
-   names cells up to 16. Grading against that field sends the model a 3×3
-   prompt and marks it wrong for not answering a 4×4. `src/testing/grade.py`
-   already sidesteps this — `synthesize_instruction()` rebuilds the prompt from
+   names cells up to 16. `src/testing/grade.py` already sidesteps this —
+   `synthesize_instruction()` rebuilds the prompt from
    `canonical_instruction(puzzle_type)` — so any new harness must do the same.
 2. **`rows`/`cols` disagree with `puzzle_type` on those same records.** Trust
    `puzzle_type`; it is the only field that agrees with the answer.
-
-### Why the old numbers are gone
-
-This page used to claim 94.7% for reCAPTCHA 3×3 and 85.8% overall, carried
-across releases behind a `TODO: re-confirm on latest LoRA`. Re-measuring did
-not reproduce them. They are removed rather than annotated, because a stale
-accuracy figure with a footnote is still the number a reader quotes.
 
 **Browser solve rates are a different measurement.** In live runs against
 `google.com/recaptcha/api2/demo` on 2026-07-27, Camoufox cleared 3/3 challenges
