@@ -55,15 +55,77 @@ _CLIENT_ENV = "CAPTCHA_KRAKEN_CLIENT"
 _SESSION_HEADER = "X-CK-Session"
 _SESSION_ENV = "CAPTCHA_KRAKEN_SESSION"
 
+# Arbitrary extra headers, as "Name: value" pairs separated by newlines or
+# commas. Empty and absent by default.
+#
+# WHY THIS EXISTS. Some endpoints sit behind a gate that is not the API key —
+# our own dev gateway (api.dev.captchakraken.com) wants X-CK-Dev-Auth, and a
+# corporate egress proxy may want its own token. Without this the published
+# client simply cannot reach such an endpoint, which meant the dev environment
+# could not exercise the real client path at all: the thing dev exists to
+# rehearse was the one thing it could not do.
+#
+# IT CANNOT OVERWRITE Authorization, Content-Type, OR THE X-CK-* HEADERS. Those
+# carry the credential and the billing attribution. Allowing an env var to
+# rewrite Authorization would turn a stray export into "your key is not the key
+# being charged", and allowing it to rewrite X-CK-Session would let a caller
+# escape the per-attempt billing cap by pinning one session id forever.
+_EXTRA_HEADERS_ENV = "CAPTCHA_KRAKEN_EXTRA_HEADERS"
+_PROTECTED_HEADERS = frozenset(
+    {"authorization", "content-type", _CLIENT_HEADER.lower(), _SESSION_HEADER.lower()}
+)
+
 # These values reach the wire verbatim from the environment, so they are
 # sanitized rather than trusted: a CR/LF would otherwise splice arbitrary
 # headers into the upstream request.
 _HEADER_VALUE_MAX = 128
 
 
+# RFC 7230 token characters. Anything else is not a header name.
+_VALID_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
 def _clean_header_value(raw: str) -> str:
     """Printable-ASCII, length-capped header value ("" when nothing survives)."""
     return "".join(c for c in raw.strip() if 0x20 <= ord(c) < 0x7F)[:_HEADER_VALUE_MAX]
+
+
+def _extra_headers(raw: str) -> Dict[str, str]:
+    """Parse CAPTCHA_KRAKEN_EXTRA_HEADERS into a header dict.
+
+    Accepts "Name: value" pairs separated by newlines or commas:
+
+        CAPTCHA_KRAKEN_EXTRA_HEADERS='X-CK-Dev-Auth: hunter2'
+        CAPTCHA_KRAKEN_EXTRA_HEADERS=$'X-One: a\nX-Two: b'
+
+    Malformed entries are DROPPED, never guessed at. A pair with no colon is
+    not a header, and inventing one from it would put an attacker-shaped string
+    on the wire. Names are restricted to the RFC 7230 token characters for the
+    same reason the values are sanitized: a CR/LF in either would splice extra
+    headers into the request.
+
+    Protected headers are refused, so this cannot be used to replace the
+    credential or the billing attribution.
+    """
+    out: Dict[str, str] = {}
+    if not raw.strip():
+        return out
+
+    for entry in raw.replace(",", "\n").splitlines():
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        name, _, value = entry.partition(":")
+        name = name.strip()
+        value = _clean_header_value(value)
+        if not name or not value:
+            continue
+        if not _VALID_HEADER_NAME.match(name):
+            continue
+        if name.lower() in _PROTECTED_HEADERS:
+            continue
+        out[name] = value
+    return out
 
 
 def routing_headers(env=None) -> Dict[str, str]:
@@ -92,6 +154,8 @@ def routing_headers(env=None) -> Dict[str, str]:
         value = _clean_header_value(env.get(var) or "")
         if value:
             headers[header] = value
+
+    headers.update(_extra_headers(env.get(_EXTRA_HEADERS_ENV) or ""))
 
     return headers
 
