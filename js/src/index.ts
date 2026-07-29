@@ -2,6 +2,30 @@ export * from './types';
 export { CaptchaKrakenSolver } from './solver';
 
 /**
+ * Errors raised when the **hosted** CaptchaKraken API refuses a solve — out of
+ * credits, rate limited, key rejected, attempt abandoned.
+ *
+ * `message` is already a complete sentence naming the product and, where one
+ * exists, the URL that fixes it, so printing it is enough. `code` is the stable
+ * contract to branch on; the prose is not.
+ *
+ * @example
+ * ```typescript
+ * import { CaptchaKrakenSolver, CaptchaKrakenAPIError } from 'captchakraken';
+ *
+ * try {
+ *   await solver.solve(page);
+ * } catch (e) {
+ *   if (e instanceof CaptchaKrakenAPIError && e.code === 'insufficient_credits') {
+ *     console.error(`Top up: ${e.resolutionUrl}`);
+ *   } else throw e;
+ * }
+ * ```
+ */
+export { CaptchaKrakenAPIError } from './errors';
+export type { CaptchaKrakenErrorCode } from './errors';
+
+/**
  * Adapter for driving the solver with **Puppeteer** instead of a Playwright
  * launcher. Puppeteer's `Page` is API-compatible with Playwright's except for a
  * few method names/options; `fromPuppeteer(page)` wraps it so `solve()` accepts

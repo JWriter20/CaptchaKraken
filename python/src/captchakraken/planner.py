@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from . import config
+from . import config, errors
 from .server_manager import ensure_server
 from .timing import timed
 
@@ -288,21 +288,18 @@ class ActionPlanner:
         with timed("planner.chat"):
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
 
-        # Surface auth / server errors with the actual body instead of letting
-        # resp.json() blow up with a cryptic "Expecting value: line 1 column 1"
-        # on a non-JSON response (e.g. a 401 {"error":"Unauthorized"} or an
-        # HTML error page). 401/403 almost always means the bearer token
-        # (CAPTCHA_KRAKEN_API_KEY) didn't reach this process.
+        # Surface auth / billing / server errors as something the reader can act
+        # on, instead of letting resp.json() blow up with a cryptic "Expecting
+        # value: line 1 column 1" on a non-JSON response.
+        #
+        # `errors.from_response` decides which of the two worlds we are in by
+        # looking for the gateway's `error.code`: present means the hosted API
+        # refused us and there is a real explanation to give (out of credits,
+        # rate limited, attempt abandoned); absent means a local vLLM or a proxy,
+        # and the old message — including the bearer-token hint on 401/403 — is
+        # reproduced unchanged.
         if not resp.ok:
-            body = (resp.text or "")[:300]
-            hint = ""
-            if resp.status_code in (401, 403):
-                hint = (
-                    " — check CAPTCHA_KRAKEN_API_KEY is set and forwarded to the CLI"
-                )
-            raise RuntimeError(
-                f"vLLM {resp.status_code} {resp.reason} at {url}{hint}. Body: {body}"
-            )
+            raise errors.from_response(resp, url)
 
         try:
             data = resp.json()

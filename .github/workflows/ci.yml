@@ -62,3 +62,31 @@ jobs:
         run: |
           node scripts/copy-python.mjs
           npx tsc --noEmit -p tsconfig.json
+
+  mcp-build:
+    name: MCP server build (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - run: npm ci
+      - name: Type-check + build
+        run: |
+          npx tsc --noEmit -p tsconfig.json
+          npm run build
+      # The server is only useful if it SPEAKS MCP, and a package that compiles
+      # but cannot complete a handshake would ship green. This starts the built
+      # binary over stdio, initializes, and asserts tools/list comes back
+      # non-empty — the same check A4 was signed off on by hand.
+      #
+      # No credentials involved: tools/list is answered before any sign-in, so
+      # this stays hermetic like the rest of the gate.
+      - name: Answers an MCP handshake
+        run: node ../.github/scripts/mcp-smoke.mjs node dist/index.js

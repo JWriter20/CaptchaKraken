@@ -56,6 +56,7 @@ import os
 import subprocess
 import sys
 
+from .errors import CaptchaKrakenAPIError
 from .solver import CaptchaSolver, UnsupportedCaptchaError
 from .timing import timed
 
@@ -707,6 +708,17 @@ def main():
         # checkboxes. Emit a clean error with no traceback.
         print(json.dumps({"error": str(e), "unsupported": True}), file=sys.stderr)
         sys.exit(2)
+    except CaptchaKrakenAPIError as e:
+        # The hosted API refused us and told us why. That is an answer, not a
+        # crash, so no traceback: a stack trace here buries the one line the
+        # user needs ("out of credits, top up at …") under frames from a module
+        # they have never opened.
+        #
+        # Exit 3, distinct from 1 (genuine failure) and 2 (unsupported puzzle),
+        # and the payload carries the machine-readable fields so the JS driver
+        # can rebuild the error rather than regex it out of prose.
+        print(json.dumps(e.to_payload()), file=sys.stderr)
+        sys.exit(3)
     except Exception as e:
         import traceback
 
