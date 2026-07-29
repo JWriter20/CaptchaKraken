@@ -21,7 +21,7 @@ claude mcp add captchakraken -- npx -y captchakraken-mcp
 | `get_balance` | The balance, and nothing else. |
 | `get_usage` | Billable responses and credits, per day and in total, plus purchases. |
 | `list_api_keys` | The account's solving keys, masked. |
-| `create_api_key` | Mints one. **The secret is returned once.** |
+| `create_api_key` | Mints one and **saves it to disk; the secret is never shown.** |
 | `revoke_api_key` | Kills one by id. Effective within ~30 seconds. |
 | `get_topup_link` | A Stripe URL for the human to open. Charges nothing. |
 | `get_pricing` | The rate card, and how many responses a captcha typically takes. |
@@ -65,12 +65,26 @@ from the dashboard.
 Nothing here can spend money. `get_topup_link` returns a URL; a person clicks
 it, on a page Stripe hosts. There is no tool that charges a card.
 
-## Where the token lives
+## Where the credentials live
 
-`~/.config/captchakraken/mcp.json`, mode 0600 in a 0700 directory, keyed by the
-control-plane origin — so rehearsing against a staging deployment and then
-running against production switches identity cleanly instead of presenting a
-staging token to production and 401ing with no explanation.
+Two files, because they are two credentials.
+
+**The management token** (`ckm_…`) is in `~/.config/captchakraken/mcp.json`,
+mode 0600 in a 0700 directory, keyed by the control-plane origin — so
+rehearsing against a staging deployment and then running against production
+switches identity cleanly instead of presenting a staging token to production
+and 401ing with no explanation.
+
+**The solving key** (`ck_live_…`) is in `~/.captchakraken/credentials`, also
+0600, written by `create_api_key` and read by the solver itself. It carries the
+endpoint alongside the key, so after `create_api_key` a solve works with **no
+environment variables set at all**.
+
+The secret is never returned through a tool result. It goes straight to that
+file and the tool reports the path, because a key in a tool result is a key in
+the transcript the moment an agent repeats it back in a summary — and asking an
+agent nicely not to do that is not a control. If you need the key in an env var
+instead, read it out of the file yourself; nothing in this server will print it.
 
 It is not encrypted. A local secret encrypted with a local key is ceremony, not
 protection: whoever can read the file can read the key. The real defences are
