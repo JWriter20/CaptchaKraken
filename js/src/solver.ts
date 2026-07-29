@@ -21,6 +21,7 @@ import { createHash, randomUUID } from 'crypto';
 import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 import { parseApiError } from './errors';
+import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -1681,7 +1682,8 @@ export class CaptchaKrakenSolver {
     grid: { boxes: number[][]; size: 3 | 4; screenshotW: number; screenshotH: number },
     elementBox: { x: number; y: number; width: number; height: number },
   ): Promise<{ didInteract: boolean; tokenUsage: TokenUsage[] }> {
-    const maxRounds = this.config.recaptchaMaxDynamicRounds ?? 8;
+    const maxRounds =
+      this.config.recaptchaMaxDynamicRounds ?? DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS;
 
     const session: GridSession = {
       gridBoxes: grid.boxes,
