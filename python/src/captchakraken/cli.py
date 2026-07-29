@@ -9,6 +9,9 @@ Modes:
   captchakraken check-movement   img1.png img2.png [threshold]
   captchakraken check-movement-batch threshold img1 img2 [img3 ...]
         Frame-diff helpers used by the Playwright lib's video flow.
+  captchakraken encode-burst fps out.mp4 frame1.png [frame2.png ...]
+        Encode a recorded burst of an ANIMATED challenge into one clip, so the
+        JS driver can hand the model the motion instead of a single frame.
 
   captchakraken find-grid       image.png
   captchakraken detect-selected image.png
@@ -135,6 +138,34 @@ def _handle_movement_commands() -> bool:
                 }
             )
         )
+        return True
+
+    if cmd == "encode-burst":
+        # `captchakraken encode-burst <fps> <out.mp4> <frame.png> ...`
+        #
+        # The JS driver records an animated challenge as a burst of PNGs and
+        # needs them as one clip to hand the model. Node has no encoder in this
+        # dependency set and the Python half already carries OpenCV, so the
+        # encode lives here — the same subprocess boundary every other CV step
+        # crosses.
+        if len(sys.argv) < 5:
+            print(
+                json.dumps({"error": "Usage: captchakraken encode-burst fps out.mp4 frame1.png [frame2.png ...]"}),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        from .image_processor import ImageProcessor
+
+        try:
+            fps = float(sys.argv[2])
+        except ValueError:
+            fps = 10.0
+        out_path = sys.argv[3]
+        frames = sys.argv[4:]
+        ok = ImageProcessor.encode_frames_to_mp4(frames, out_path, fps)
+        print(json.dumps({"ok": bool(ok), "path": out_path if ok else None,
+                          "frames": len(frames)}))
         return True
 
     if cmd == "is-cell-changing":

@@ -265,13 +265,37 @@ export interface CaptchaKrakenConfig {
 
   /**
    * If the challenge keeps changing continuously for at least this long without
-   * ever settling, it's treated as an **animated / video** challenge (surfaced
-   * distinctly, not as "unsupported"). Static grids settle in ~1–2s; a video
-   * never does.
+   * ever settling, it's treated as an **animated / video** challenge. Static
+   * grids settle in ~1–2s; a video never does.
    *
    * Default: 4500
    */
   animatedChallengeAfterMs?: number;
+
+  /**
+   * Solve animated challenges by RECORDING them instead of giving up.
+   *
+   * Some hCaptcha puzzles ("select the odd animal", "select the object with a
+   * unique motion pattern") are supposed to move, and the motion is the only
+   * thing that distinguishes the answer — every individual frame is
+   * unsolvable. When this is on, a challenge that never settles is captured as
+   * a short clip and the model is asked about the clip. Turn it off to get the
+   * old behaviour, where an animated challenge is a terminal failure.
+   *
+   * Default: true
+   */
+  videoSolveEnabled?: boolean;
+
+  /**
+   * Frame rate and duration of that recording. The defaults match the corpus
+   * collector's burst, so a challenge recorded live is the same shape of
+   * artifact the model was trained on — changing them moves inference
+   * off-distribution.
+   *
+   * Defaults: 10 fps, 4000 ms
+   */
+  videoBurstFps?: number;
+  videoBurstMs?: number;
 
   /**
    * After clicking Submit/Verify, the solver EXPECTS the frame to change (advance

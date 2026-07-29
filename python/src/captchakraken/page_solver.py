@@ -173,6 +173,18 @@ class PageSolverConfig:
     settle_diff_threshold: float = 0.01
     post_submit_change_timeout_ms: int = 4_000
 
+    # Animated challenges. A puzzle that never settles is not necessarily
+    # unsolvable — hCaptcha's "select the odd animal" and "select the object
+    # with a unique motion pattern" are *supposed* to move, and the motion is
+    # the only thing that distinguishes the answer. Rather than giving up, the
+    # driver records a burst and asks the model about the CLIP.
+    #
+    # 4s @ 10fps mirrors the collector's burst (see CAPTCHA-SOURCES.md), so a
+    # challenge recorded live is the same shape of artifact the model trained on.
+    video_solve_enabled: bool = True
+    video_burst_fps: float = 10.0
+    video_burst_ms: int = 4_000
+
     # Grid load / dynamic-refresh timing.
     grid_load_poll_interval_ms: int = 250
     grid_load_timeout_ms: int = 8_000
@@ -767,6 +779,45 @@ class PageSolver:
             for path in frames:
                 _unlink(path)
 
+    def _record_burst(self, element: Any) -> Optional[str]:
+        """Screenshot the element on a fixed cadence and encode an mp4.
+
+        Returns the clip path (caller owns it) or None if too little was
+        captured to encode — the element going stale mid-burst is normal, and
+        one dropped frame must not cost the solve.
+        """
+        cfg = self.config
+        total = max(2, int(round(cfg.video_burst_ms / (1000.0 / cfg.video_burst_fps))))
+        interval = 1.0 / cfg.video_burst_fps
+        frames: List[str] = []
+        try:
+            for i in range(total):
+                self._check_deadline("recording the animated challenge")
+                started = time.monotonic()
+                path = _tmp_png("burst")
+                try:
+                    self._screenshot(element, path)
+                    frames.append(path)
+                except Exception:
+                    _unlink(path)
+                remaining = interval - (time.monotonic() - started)
+                if remaining > 0 and i < total - 1:
+                    _delay(int(remaining * 1000))
+
+            if len(frames) < 2:
+                return None
+            from .image_processor import ImageProcessor
+
+            fd, clip = tempfile.mkstemp(prefix="challenge_", suffix=".mp4")
+            os.close(fd)
+            if ImageProcessor.encode_frames_to_mp4(frames, clip, cfg.video_burst_fps):
+                return clip
+            _unlink(clip)
+            return None
+        finally:
+            for path in frames:
+                _unlink(path)
+
     def _wait_for_change_since(self, element: Any, since_hash: str) -> bool:
         """After a submit the frame MUST change (next round, or closing)."""
         cfg = self.config
@@ -1215,6 +1266,11 @@ class PageSolver:
             pass
         src = src or ""
 
+        # Set when the challenge turns out to be animated and we managed to
+        # record it. Non-None means the model is asked about the CLIP rather
+        # than a still, and the frame-freshness guard is skipped.
+        animated_clip: Optional[str] = None
+
         # The vendor hint routes to the right pipeline. It matters: hCaptcha
         # click puzzles must never go through grid detection, because find_grid
         # false-positives on the header/footer bands.
@@ -1236,9 +1292,19 @@ class PageSolver:
                 self._last_submit_frame_hash = None
             self._wait_for_hcaptcha_challenge_images(element)
             if self._wait_for_element_settled(element) == "animated":
-                raise AnimatedChallengeError(
-                    "the challenge never settles (likely a video/animated puzzle)"
-                )
+                # NOT a dead end. hCaptcha's "select the odd animal" and
+                # "select the object with a unique motion pattern" are supposed
+                # to move — the motion is the entire signal, and no frame of
+                # them is solvable on its own. Record the challenge and let the
+                # model watch it. Only give up if the recording fails.
+                if self.config.video_solve_enabled:
+                    animated_clip = self._record_burst(element)
+                    if animated_clip:
+                        _log("challenge is animated; solving from a recorded clip")
+                if animated_clip is None:
+                    raise AnimatedChallengeError(
+                        "the challenge never settles and could not be recorded"
+                    )
 
         # Only the image-challenge frame holds a grid. Running grid detection on
         # the anchor checkbox just burns an 8s timeout before the click.
@@ -1264,11 +1330,20 @@ class PageSolver:
         try:
             self._screenshot(element, shot, timeout_ms=self.config.element_screenshot_timeout_ms)
 
-            actions, all_usage = self._solve_frame_freshness_guarded(
-                element,
-                shot,
-                lambda image_path: self._get_solution(image_path, puzzle_source, retry_mode),
-            )
+            if animated_clip:
+                # The freshness guard is deliberately skipped here: it exists to
+                # catch a frame that changed during inference, and an animated
+                # challenge changes constantly by design. Running it would
+                # re-solve until the retry budget ran out, every time.
+                actions, all_usage = self._get_solution(
+                    animated_clip, puzzle_source, retry_mode
+                )
+            else:
+                actions, all_usage = self._solve_frame_freshness_guarded(
+                    element,
+                    shot,
+                    lambda image_path: self._get_solution(image_path, puzzle_source, retry_mode),
+                )
 
             element_box = element.bounding_box()
             if not element_box:
@@ -1328,6 +1403,7 @@ class PageSolver:
                 self._last_submit_frame_hash = self._element_frame_hash(element)
         finally:
             _unlink(shot)
+            _unlink(animated_clip)
 
         return performed_action, all_usage
 
