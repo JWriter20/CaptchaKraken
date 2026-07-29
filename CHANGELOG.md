@@ -3,6 +3,51 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [2.4.0] — 2026-07-29
+
+The release that makes the **hosted** API usable by someone who has never heard
+of vLLM. Nothing here changes self-hosting.
+
+### Added
+- **`captchakraken-mcp`, a new npm package**, published from this repo as a
+  third workspace (`mcp/`). Signs you in with GitHub, mints a solving key, and
+  reports balance, usage and a top-up link. `npx captchakraken-mcp`.
+
+  It is a **separate install** from `captchakraken`, deliberately: `npx`
+  resolves by package name, and the MCP's dependencies have no business on
+  every browser-driver install. It also keeps its own version line — 0.1.0
+  here — so a solver change does not force an MCP release.
+- `CaptchaKrakenAPIError` is exported from the TypeScript port, carrying
+  `code`, `resolutionUrl` and `retryAfterSeconds`. Branch on `code`; the prose
+  is not a contract.
+- The credentials file may now carry the **endpoint** alongside the key
+  (`VLLM_BASE_URL=` or `CAPTCHA_KRAKEN_BASE_URL=`).
+
+### Changed
+- **Hosted-API refusals now explain themselves.** Running out of credits used
+  to produce `vLLM 402 Payment Required at https://api.captchakraken.com/...`,
+  naming infrastructure the user never installed. Out of credits, rate limited,
+  account suspended, request too large, and abandoned attempts now each produce
+  a sentence naming CaptchaKraken and the URL that resolves it, in both ports.
+  429 honours `Retry-After`.
+
+  An unrecognised code still produces a useful message — it carries the
+  server's own text through — rather than falling back to something generic.
+- **`create_api_key` no longer returns the secret.** It writes
+  `~/.captchakraken/credentials` at 0600 and reports the path, so a live key
+  cannot reach an agent transcript. It writes the endpoint at the same time.
+- **A key from the MCP no longer needs `VLLM_BASE_URL` set.** `base_url()`
+  reads the credentials file when the env var is absent, so a hosted user's
+  first solve reaches `api.captchakraken.com` instead of dialling a local port
+  with nothing behind it. An explicit `VLLM_BASE_URL` still wins, and a machine
+  with no credentials file still defaults to localhost.
+
+### Unchanged, on purpose
+- Self-hosting. A local vLLM sends no error envelope, so it still produces the
+  old message, bearer-token hint and all. A bare-token credentials file still
+  yields no endpoint, so nobody who hand-wrote a local key into that file gets
+  silently redirected at our servers.
+
 ## [2.3.0] — 2026-07-24
 
 ### Added

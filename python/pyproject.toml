@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "captchakraken"
-version = "2.3.0"
+version = "2.4.0"
 description = "Self-hosted captcha solver: OpenCV grid detection + a fine-tuned Qwen3.5-9B vision LoRA served on vLLM."
 readme = "README.md"
 requires-python = ">=3.10"
