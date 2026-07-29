@@ -45,3 +45,4 @@ captcha_videos/
 # Personal VSCode workspace files (machine-specific; belong at a project
 # root, not in the tree). One strayed into python/tests/.
 *.code-workspace
+js/.test-build/

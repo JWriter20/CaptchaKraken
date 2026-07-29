@@ -62,6 +62,13 @@ jobs:
         run: |
           node scripts/copy-python.mjs
           npx tsc --noEmit -p tsconfig.json
+      # `npm test` is no longer a synonym for `tsc --noEmit`: it now also runs
+      # the node:test suite that pins the 5 < 8 < 10 round-cap ordering against
+      # the gateway. A type-check cannot notice a changed integer, and that
+      # ordering was previously described as "pinned by a test" when nothing
+      # pinned it at all.
+      - name: Unit tests (node:test)
+        run: npm test
 
   mcp-build:
     name: MCP server build (TypeScript)
