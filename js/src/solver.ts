@@ -513,6 +513,11 @@ export class CaptchaKrakenSolver {
     //      transition starting) so we're past the previous round.
     //   2. Wait for the tiles to paint (DOM) AND for the pixels to stop moving
     //      (settle monitor). If it never settles, it's an animated/video puzzle.
+    // Set when the challenge turns out to be animated and the burst recorded.
+    // Non-null means the model is asked about the CLIP rather than a still, and
+    // the frame-freshness guard is skipped (see below).
+    let animatedClipPath: string | null = null;
+
     if (puzzleSource === 'hcaptcha' && src && src.includes('frame=challenge')) {
       if (this.lastSubmitFrameHash) {
         this.setState(CaptchaState.Transitioning);
@@ -523,11 +528,22 @@ export class CaptchaKrakenSolver {
       await this.waitForHcaptchaChallengeImages(captchaElement);
       const settle = await this.waitForElementSettled(captchaElement);
       if (settle === 'animated') {
-        const e: any = new Error(
-          'ANIMATED_CHALLENGE: the challenge never settles (likely a video/animated puzzle).',
-        );
-        e.animated = true;
-        throw e;
+        // NOT a dead end. hCaptcha's "select the odd animal" and "select the
+        // object with a unique motion pattern" are MEANT to move — the motion
+        // is the only thing separating the answer from the distractors, and no
+        // single frame of them is solvable. Record the challenge and hand the
+        // model the clip. Only bail if the recording itself fails.
+        if (this.config.videoSolveEnabled !== false) {
+          animatedClipPath = await this.recordBurst(captchaElement);
+        }
+        if (!animatedClipPath) {
+          const e: any = new Error(
+            'ANIMATED_CHALLENGE: the challenge never settles and could not be recorded.',
+          );
+          e.animated = true;
+          throw e;
+        }
+        console.log('[captchakraken] challenge is animated; solving from a recorded clip.');
       }
       this.setState(CaptchaState.Ready);
     }
@@ -600,7 +616,13 @@ export class CaptchaKrakenSolver {
       //    instead of freezing it in place. Wrapped in the freshness guard: if
       //    the frame changes mid-inference (a tile fades in), the answer is for
       //    a stale frame, so we re-screenshot and re-solve on the developed one.
-      const response = await this.solveFrameFreshnessGuarded(
+      // An animated challenge skips the freshness guard on purpose: that guard
+      // re-solves when the frame changed during inference, and this frame is
+      // changing by design — it would burn the whole retry budget every time.
+      const response = animatedClipPath
+        ? await this.withIdleWander(page, captchaElement, () =>
+            this.getSolution(animatedClipPath as string, puzzleSource, retryMode))
+        : await this.solveFrameFreshnessGuarded(
         captchaElement, screenshotPath,
         (imagePath) => this.withIdleWander(page, captchaElement, () =>
           this.getSolution(imagePath, puzzleSource, retryMode)),
@@ -691,6 +713,9 @@ export class CaptchaKrakenSolver {
       // Cleanup
       if (fs.existsSync(screenshotPath)) {
         fs.unlinkSync(screenshotPath);
+      }
+      if (animatedClipPath && fs.existsSync(animatedClipPath)) {
+        try { fs.unlinkSync(animatedClipPath); } catch { /* best-effort */ }
       }
     }
 
@@ -1968,6 +1993,7 @@ export class CaptchaKrakenSolver {
         (e as any).unsupported = true;
         throw e;
       }
+
       console.error('Error executing CaptchaKraken CLI:', error);
       if (error.stdout) console.log('CLI stdout on error:', error.stdout);
       if (error.stderr) console.error('CLI stderr on error:', error.stderr);
@@ -2121,6 +2147,51 @@ export class CaptchaKrakenSolver {
    * `waitForHcaptchaChallengeImages` so a static loading frame (spinner on grey,
    * below the pixel threshold) isn't mistaken for painted tiles. Cleans up.
    */
+  /**
+   * Record an animated challenge as an mp4 the model can be asked about.
+   *
+   * Screenshots the element on a fixed cadence and hands the frames to the
+   * Python half's `encode-burst` (Node has no encoder in this dependency set,
+   * and the CV subprocess boundary already exists). 4s @ 10fps matches the
+   * corpus collector's burst, so a challenge recorded live is the same shape of
+   * artifact the model was trained on.
+   *
+   * Returns null when too few frames survived to encode — the element going
+   * stale mid-burst is routine and must not cost the solve.
+   */
+  private async recordBurst(el: ElementHandle): Promise<string | null> {
+    const fps = this.config.videoBurstFps ?? 10;
+    const totalMs = this.config.videoBurstMs ?? 4000;
+    const intervalMs = 1000 / fps;
+    const total = Math.max(2, Math.round(totalMs / intervalMs));
+    const frames: string[] = [];
+    const tmp = (ext: string) =>
+      path.join(os.tmpdir(), `burst_${Date.now()}_${Math.floor(Math.random() * 1e9)}.${ext}`);
+    try {
+      for (let i = 0; i < total; i++) {
+        const started = Date.now();
+        const f = tmp('png');
+        try {
+          await el.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+          frames.push(f);
+        } catch { /* dropped frame — keep recording */ }
+        const remaining = intervalMs - (Date.now() - started);
+        if (remaining > 0 && i < total - 1) await delay(remaining);
+      }
+      if (frames.length < 2) return null;
+
+      const out = tmp('mp4');
+      const res = await this.runCliTool(['encode-burst', String(fps), out, ...frames]);
+      if (res && res.ok && fs.existsSync(out)) return out;
+      if (fs.existsSync(out)) { try { fs.unlinkSync(out); } catch { /* best-effort */ } }
+      return null;
+    } finally {
+      for (const f of frames) {
+        if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
+      }
+    }
+  }
+
   private async waitForElementSettled(
     el: ElementHandle,
     opts?: { pollMs?: number; settleFrames?: number; maxMs?: number; animatedAfterMs?: number; threshold?: number },

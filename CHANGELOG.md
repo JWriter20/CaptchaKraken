@@ -3,6 +3,44 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [Unreleased]
+
+### Added
+- **Animated challenges are now solved instead of abandoned.** Some hCaptcha
+  puzzles are supposed to move: *"select the object with a unique motion
+  pattern"* shows several identical objects and the answer is the one that spins
+  differently; *"select the odd animal"* fades its sprites in and out on
+  independent cycles so no single frame shows them all. Every frame of those is
+  unsolvable on its own, which is why the settle monitor rightly called them
+  animated — but "animated" was a terminal failure.
+
+  Both drivers now record the challenge (4 s at 10 fps, matching the corpus
+  collector's burst so live captures match the training distribution), encode it
+  to mp4, and ask the model about the clip:
+
+  - Python: `PageSolver._record_burst`, gated by `video_solve_enabled` /
+    `video_burst_fps` / `video_burst_ms` on `PageSolverConfig`.
+  - TypeScript: `Solver.recordBurst`, gated by `videoSolveEnabled` /
+    `videoBurstFps` / `videoBurstMs` on `CaptchaKrakenConfig`.
+
+  `AnimatedChallengeError` / `error.animated` now means *"could not be
+  recorded"*, not *"is animated"*. Set the flag to `false` for the old
+  behaviour.
+- `captchakraken encode-burst <fps> <out.mp4> <frame.png> ...` — encodes a
+  recorded burst into one clip. The JS driver has no encoder in its dependency
+  set; the Python half already carries OpenCV.
+
+### Changed
+- **A video reaches the model as a video.** `planner` sends an mp4 as a
+  `video_url` content part; previously everything went out as `image_url`, which
+  the endpoint decodes to a single frame — discarding the only signal an
+  animated puzzle has.
+- `CaptchaSolver.solve` no longer collapses a clip to its first frame before
+  reasoning about it. The OpenCV steps (grid and checkbox detection) still take
+  one frame because they need an array of pixels, but the model query now gets
+  the original media. Grid puzzles deliberately stay on the still: the model
+  picks cells off a numbered overlay, which can only be drawn on one frame.
+
 ## [2.3.0] — 2026-07-24
 
 ### Added

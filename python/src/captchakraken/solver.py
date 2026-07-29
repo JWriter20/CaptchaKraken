@@ -7,10 +7,15 @@ Flow:
      per-tile bounding boxes.
   2. find_checkbox on small images → if a lone checkbox is detected, return a
      ClickAction targeting it directly.
-  3. Otherwise (click / drag / other still-image puzzle) → route the image to
-     the full-puzzle pixel/action path (planner.get_pixel_actions), which the
-     LoRA is trained on. Only raise UnsupportedCaptchaError if the model returns
-     nothing usable. Video challenges are filtered out upstream by the caller.
+  3. Otherwise (click / drag / video puzzle) → route the MEDIA to the
+     full-puzzle pixel/action path (planner.get_pixel_actions), which the LoRA
+     is trained on. Only raise UnsupportedCaptchaError if the model returns
+     nothing usable.
+
+Video challenges are solved, not skipped. A clip reaches the model as a clip:
+the OpenCV steps take its first frame because they need an array of pixels, but
+the model query gets the mp4, because for types like "select the object with a
+unique motion pattern" every frame looks identical and only the motion differs.
 
 v1 had a SAM3-backed tool-using planner with detect/segment/drag-refine; it
 lives on the `v1-old-architecture` branch.
@@ -35,7 +40,7 @@ from .action_types import (
     WaitAction,
 )
 from .image_processor import ImageProcessor
-from .planner import ActionPlanner
+from .planner import VIDEO_EXTS, ActionPlanner
 from .timing import timed
 from .tool_calls.find_checkbox import find_checkbox
 from .tool_calls.find_grid import (
@@ -145,7 +150,14 @@ class CaptchaSolver:
         if not os.path.exists(media_path):
             raise FileNotFoundError(f"Media not found: {media_path}")
 
+        # Two paths on purpose. The OpenCV steps below (grid detection, checkbox
+        # detection, the real-grid sanity check) only work on a still, so they
+        # get one frame. The MODEL gets the original media: for an animated
+        # challenge the motion IS the puzzle — hCaptcha's "unique motion pattern"
+        # shows several identical objects that differ only in how they spin —
+        # and collapsing that to frame 0 destroys the only signal there is.
         cv_image_path = self._materialize_image(media_path)
+        model_media_path = media_path if self._is_video(media_path) else cv_image_path
         self.debug.save_image(cv_image_path, "00_base_image.png")
         assert self._image_size is not None
         img_w, img_h = self._image_size
@@ -154,6 +166,9 @@ class CaptchaSolver:
             grid_boxes = find_grid(cv_image_path)
         if grid_boxes and self._is_real_grid(cv_image_path, grid_boxes):
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
+            # Grids stay on the still: the model is asked to pick cells off a
+            # NUMBERED OVERLAY, which can only be drawn on one frame, and no
+            # grid captcha in the corpus needs motion to be read.
             return self._solve_grid(cv_image_path, grid_boxes, retry_mode=retry_mode)
         elif grid_boxes:
             # find_grid latched onto e.g. an hCaptcha click-puzzle's
@@ -177,11 +192,9 @@ class CaptchaSolver:
                 )
 
         # Not a grid or checkbox → a click/drag/pixel puzzle. The full-puzzle
-        # LoRA is trained on all of these, so route the image to the pixel
-        # action path rather than bailing. (Video challenges are skipped
-        # upstream by the caller before they reach the solver, so anything here
-        # is a still-image puzzle worth attempting.)
-        actions = self._solve_pixel(cv_image_path)
+        # LoRA is trained on all of these, including the video types, so route
+        # the media (clip when there is one) to the pixel action path.
+        actions = self._solve_pixel(model_media_path)
         if actions:
             return actions
 
@@ -230,10 +243,17 @@ class CaptchaSolver:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+    @staticmethod
+    def _is_video(media_path: str) -> bool:
+        return media_path.lower().endswith(VIDEO_EXTS)
+
     def _materialize_image(self, media_path: str) -> str:
-        """Return a path to a static PNG (extracting first frame for videos)."""
-        is_video = any(media_path.lower().endswith(ext) for ext in [".mp4", ".gif", ".avi", ".webm"])
-        if is_video:
+        """A static PNG for the OpenCV steps (first frame, for a clip).
+
+        This is NOT what the model sees for a video — see `solve()`. It exists
+        only because grid/checkbox detection needs a single array of pixels.
+        """
+        if self._is_video(media_path):
             import cv2
 
             cap = cv2.VideoCapture(media_path)

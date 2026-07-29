@@ -75,6 +75,43 @@ class ImageProcessor:
         return change_ratio > threshold
 
     @staticmethod
+    def encode_frames_to_mp4(frame_paths: List[str], out_path: str,
+                             fps: float = 10.0) -> bool:
+        """Encode a screenshot burst into an mp4 the model can be asked about.
+
+        This is the inference-side twin of the collector's burst encoder
+        (CaptchaKrakenFinetune/src/captchaCollection/_collect_common.py) — same
+        codec and same default frame rate, so a challenge recorded live is the
+        same kind of artifact the model was trained on. Frames that fail to read
+        are skipped rather than aborting the burst; a dropped frame costs a
+        little temporal resolution, a raised exception costs the whole solve.
+
+        Returns False if nothing could be written, so the caller can fall back
+        to a still instead of handing the model an empty file.
+        """
+        first = None
+        for path in frame_paths:
+            first = cv2.imread(path)
+            if first is not None:
+                break
+        if first is None:
+            return False
+        h, w = first.shape[:2]
+        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"),
+                                 float(fps), (w, h))
+        try:
+            for path in frame_paths:
+                img = cv2.imread(path)
+                if img is None:
+                    continue
+                if img.shape[:2] != (h, w):
+                    img = cv2.resize(img, (w, h))
+                writer.write(img)
+        finally:
+            writer.release()
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 0
+
+    @staticmethod
     def to_greyscale(image_path: str, output_path: str) -> None:
         """Convert an image to greyscale and save it."""
         img = cv2.imread(image_path)

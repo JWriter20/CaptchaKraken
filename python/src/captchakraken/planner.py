@@ -21,6 +21,11 @@ from . import config
 from .server_manager import ensure_server
 from .timing import timed
 
+# Media extensions that make a sample a CLIP rather than a still. Kept next to
+# the request builder because that is the only place the distinction matters:
+# everything downstream works on the model's JSON, not the pixels.
+VIDEO_EXTS = (".mp4", ".webm", ".avi")
+
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
 # Header the fleet's haproxy front (on the reverse-proxy EC2) routes on. When a
@@ -230,13 +235,30 @@ class ActionPlanner:
         if self.debug_callback:
             self.debug_callback(f"[Planner] {message}")
 
-    def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512) -> str:
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        mime, _ = guess_type(image_path)
-        if mime is None:
-            mime = "image/png"
+    @staticmethod
+    def _media_part(media_path: str) -> Dict[str, Any]:
+        """The chat content part carrying this media.
 
+        Videos go through `video_url`, NOT `image_url`. Some captchas cannot be
+        expressed in a still at all — hCaptcha's "select the object with a
+        unique motion pattern" shows several identical objects and the only
+        difference between them is how they rotate — so handing the endpoint an
+        mp4 as an image_url (which decodes one frame) throws away the entire
+        signal. The model is trained with `<video>` rows for those types; this
+        is the inference-side half of that contract.
+        """
+        with open(media_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        mime, _ = guess_type(media_path)
+        if media_path.lower().endswith(VIDEO_EXTS):
+            return {"type": "video_url",
+                    "video_url": {"url": f"data:{mime or 'video/mp4'};base64,{b64}"}}
+        return {"type": "image_url",
+                "image_url": {"url": f"data:{mime or 'image/png'};base64,{b64}"}}
+
+    def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512) -> str:
+        """Send one media file + prompt. Named for images for back-compat; it
+        takes a clip just as happily (see `_media_part`)."""
         messages = [
             {
                 "role": "system",
@@ -245,7 +267,7 @@ class ActionPlanner:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                    self._media_part(image_path),
                     {"type": "text", "text": prompt},
                 ],
             },
