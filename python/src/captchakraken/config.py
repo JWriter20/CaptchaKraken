@@ -47,8 +47,31 @@ def pinned() -> Dict[str, Any]:
 
 # ── Inference endpoint ──────────────────────────────────────────────────────
 def base_url() -> str:
-    """OpenAI-compatible endpoint, e.g. http://localhost:8000/v1."""
-    return os.getenv("VLLM_BASE_URL", f"http://localhost:{port()}/v1")
+    """OpenAI-compatible endpoint, e.g. http://localhost:8000/v1.
+
+    Precedence mirrors `api_key()` exactly — env, then the credentials file,
+    then the local default — because the two values are set together and a
+    reader who has learned one ordering should not have to learn a second.
+
+      1. VLLM_BASE_URL. An explicit override always wins; self-hosters and the
+         dev environment depend on this and must not be silently redirected.
+      2. The credentials file. Written by the MCP signup flow alongside the key,
+         so onboarding configures the endpoint in the same step and a hosted
+         user needs no env plumbing at all.
+      3. localhost. Unchanged, and still correct: someone with no credentials
+         file is by definition not a hosted user, so the self-hosted default is
+         the right guess for them.
+
+    The bug this closes: a camoufox user who signed up through the MCP had a
+    valid key and no endpoint, so every solve dialled a local port with nothing
+    behind it and failed with connection-refused — a message that says nothing
+    about the fact that their requests were meant to go to api.captchakraken.com.
+    """
+    return (
+        os.getenv("VLLM_BASE_URL")
+        or _base_url_from_credentials_file()
+        or f"http://localhost:{port()}/v1"
+    )
 
 
 def state_dir() -> Path:
@@ -60,36 +83,81 @@ def credentials_path() -> Path:
     return state_dir() / "credentials"
 
 
-def _key_from_credentials_file() -> str:
-    """Key written by the MCP server's signup flow (or a future `login` command).
+# Names the credentials file may use for each value. Two spellings each, because
+# the file doubles as something a user can `source` — the VLLM_* names are the
+# env vars this module already honours, and the CAPTCHA_KRAKEN_* names are what
+# the product calls them. Accepting both costs nothing and spares anyone the
+# discovery that they picked the wrong one.
+_KEY_NAMES = ("CAPTCHA_KRAKEN_API_KEY", "VLLM_API_KEY")
+_BASE_URL_NAMES = ("CAPTCHA_KRAKEN_BASE_URL", "VLLM_BASE_URL")
+
+
+def _read_credentials_file() -> Dict[str, str]:
+    """Parse the file the MCP server's signup flow writes.
 
     Hosted-API onboarding writes the key to a 0600 file rather than returning it
     through the agent transcript, so it never lands in an LLM context window.
     Reading it here is what lets a solve authenticate with NO env vars set.
 
-    Deliberately tolerant of a bare token, an env-file line, or surrounding
-    quotes: the file is written by a *separate* tool, and a format mismatch here
-    would surface as a baffling 401 rather than an obvious parse error.
-    Returns "" whenever the file is missing, unreadable, or has no usable line.
+    Returns a mapping of recognised name -> value. The special key ``""`` holds a
+    BARE TOKEN — a file containing nothing but `ck_live_…`, which is what the
+    original single-value format was and what a user hand-writing this file is
+    most likely to produce. Dropping that would silently break every existing
+    credentials file, so it is still accepted and still means "the API key".
+
+    Deliberately tolerant of quoting and comments: the file is written by a
+    *separate* tool, and a format mismatch here surfaces as a baffling 401
+    rather than an obvious parse error. Returns {} whenever the file is missing
+    or unreadable — the self-hosted case, which must stay silent.
     """
     try:
         text = credentials_path().read_text(encoding="utf-8")
     except OSError:
-        return ""
+        return {}
 
+    found: Dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if "=" in line:
             name, _, value = line.partition("=")
+            name = name.strip()
             # An env-file with unrelated keys must not yield a bogus token.
-            if name.strip() not in {"CAPTCHA_KRAKEN_API_KEY", "VLLM_API_KEY"}:
+            if name not in _KEY_NAMES and name not in _BASE_URL_NAMES:
                 continue
-            line = value.strip()
-        return line.strip("'\"")
+            found.setdefault(name, value.strip().strip("'\""))
+        elif "" not in found:
+            # A bare token. Only the first such line counts; later prose in a
+            # hand-edited file must not overwrite the credential.
+            found[""] = line.strip("'\"")
 
+    return found
+
+
+def _first_present(values: Dict[str, str], names) -> str:
+    """First non-empty value among `names`, in the order given."""
+    for name in names:
+        value = values.get(name, "").strip()
+        if value:
+            return value
     return ""
+
+
+def _key_from_credentials_file() -> str:
+    """The API key from the credentials file, or "" if there isn't one."""
+    values = _read_credentials_file()
+    return _first_present(values, _KEY_NAMES) or values.get("", "").strip()
+
+
+def _base_url_from_credentials_file() -> str:
+    """The endpoint from the credentials file, or "" if it names none.
+
+    A bare-token file deliberately yields nothing here: it carries no endpoint,
+    and inventing the hosted one for it would silently redirect a self-hoster
+    who wrote a token into that file by hand.
+    """
+    return _first_present(_read_credentials_file(), _BASE_URL_NAMES)
 
 
 def api_key() -> str:
