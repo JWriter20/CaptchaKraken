@@ -11,6 +11,9 @@
     "declaration": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  // Tests are compiled separately by `npm test` into .test-build/ and must not
+  // reach dist/: they would be published to npm and would drag node:test into
+  // the type surface of a package consumers import for its solver.
+  "exclude": ["node_modules", "src/**/*.test.ts"]
 }
 

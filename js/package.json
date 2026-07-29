@@ -14,7 +14,7 @@
     "prebuild": "node scripts/copy-python.mjs",
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc --noEmit -p tsconfig.json && tsc src/limits.ts src/limits.test.ts --outDir .test-build --module commonjs --target ES2020 --esModuleInterop --skipLibCheck && node --test .test-build",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup-python.js"
   },
