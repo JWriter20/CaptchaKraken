@@ -20,6 +20,7 @@ import * as os from 'os';
 import { createHash, randomUUID } from 'crypto';
 import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
+import { parseApiError } from './errors';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -1968,6 +1969,18 @@ export class CaptchaKrakenSolver {
         (e as any).unsupported = true;
         throw e;
       }
+
+      // The hosted API refused the solve and said why (out of credits, rate
+      // limited, attempt abandoned…). The CLI exits 3 with the already-worded
+      // sentence plus the machine-readable fields; both are rethrown as-is.
+      //
+      // Wrapping this in "Failed to execute captcha solver CLI: Command failed
+      // …" — which is what happens to every other non-zero exit — would bury a
+      // billing problem under a sentence about a subprocess. camoufox surfaces
+      // whatever we throw, so this is the message its users actually read.
+      const apiError = parseApiError(stderr);
+      if (apiError) throw apiError;
+
       console.error('Error executing CaptchaKraken CLI:', error);
       if (error.stdout) console.log('CLI stdout on error:', error.stdout);
       if (error.stderr) console.error('CLI stderr on error:', error.stderr);
