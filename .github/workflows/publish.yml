@@ -5,12 +5,22 @@ name: Publish
 # Each publish is idempotent (a version already on the registry is skipped, not
 # failed), so re-running a partially-failed release is safe.
 #
-# Auth is TOKENLESS via OIDC trusted publishing on both registries — no secrets.
-# One-time config (after any repo rename, redo these):
+# Auth is TOKENLESS via OIDC trusted publishing on all three — no secrets.
+# One-time config, PER PACKAGE (after any repo rename, redo all of these):
 #   npm:  npmjs.com → captchakraken → Settings → Trusted Publisher →
 #         GitHub Actions: JWriter20/CaptchaKraken, workflow publish.yml
+#   npm:  npmjs.com → captchakraken-mcp → same, as its own entry. The
+#         `captchakraken` entry does NOT cover it; trusted publishers are scoped
+#         to one package name.
 #   PyPI: pypi.org → captchakraken → Publishing → add a GitHub trusted publisher:
 #         JWriter20/CaptchaKraken, workflow publish.yml
+#
+# A BRAND-NEW npm package cannot be configured before it exists: npm's trusted
+# publisher settings live on the package page. So the FIRST publish of
+# captchakraken-mcp needs a one-off `npm publish` from a logged-in machine (or a
+# pending-publisher entry created on npmjs.com); every release after that is
+# tokenless like the rest. This is a one-time cost and it is why publish-mcp can
+# legitimately fail on the very first run while the other two jobs succeed.
 on:
   push:
     branches: [main]
@@ -56,6 +66,47 @@ jobs:
           VER=$(node -p "require('./package.json').version")
           if npm view "captchakraken@$VER" version >/dev/null 2>&1; then
             echo "captchakraken@$VER already published — skipping."
+          else
+            npm publish --access public --provenance
+          fi
+
+  # The MCP server is a SEPARATE package on its own version line (0.1.0 while
+  # the client is at 2.4.0) and is deliberately not locked to the client's
+  # number: tying them together would mean cutting an MCP release every time the
+  # solver changes. What ties them is the repo and the release train, not the
+  # integer — and `npm view` below reads this manifest independently anyway.
+  #
+  # It is NOT a dependency of the `captchakraken` package on purpose. The client
+  # has one runtime dep; the MCP needs the MCP SDK and zod. Those belong on the
+  # one-time onboarding path, not on every browser-driver install.
+  publish-mcp:
+    name: Publish npm (captchakraken-mcp)
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # OIDC trusted publishing + provenance
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 for the same reason as publish-npm: trusted publishing needs
+          # npm >= 11.5.1, and self-upgrading npm inside the toolcache breaks
+          # `publish --provenance`.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Publish (idempotent)
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          if npm view "captchakraken-mcp@$VER" version >/dev/null 2>&1; then
+            echo "captchakraken-mcp@$VER already published — skipping."
           else
             npm publish --access public --provenance
           fi
