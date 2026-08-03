@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "The models this client knows how to talk to, and WHICH GENERATION OF",
+    "PROMPTS each one was trained on.",
+    "",
+    "Why a map and not a constant: a model answers in whatever schema its prompt",
+    "asks for. Send a version-1 model the version-2 prompt and nothing errors —",
+    "it just answers worse, on every puzzle, silently. That is exactly the",
+    "2026-07-18 regression (failure-mode 3 in the finetune repo's",
+    "scripts/check_prompt_parity.py), where the shipped prompt kept asking for",
+    "the legacy output/simulate_drag/PascalCase schema long after the LoRA had",
+    "been retrained on action: drag / drags[].",
+    "",
+    "Hardcoding one generation makes that inevitable the moment a new model",
+    "trains on different prompts: updating the constants breaks every already-",
+    "published model, and not updating them breaks the new one. So each model",
+    "declares its generation here, captchakraken.prompts serves the matching",
+    "built-ins, and both keep working.",
+    "",
+    "`latest` is what you get by default. Pin a specific model with",
+    "CAPTCHA_LORA_ADAPTER (or CAPTCHA_LORA_NAME for a served alias) — pinning is",
+    "opt-in, so the default download and the default prompt always move forward",
+    "together.",
+    "",
+    "Adding a model: add its entry here IN THE SAME COMMIT as publishing it. The",
+    "finetune repo's check_prompt_parity.py fails if any registered model names a",
+    "prompt_version this client ships no built-ins for, so an unmapped model",
+    "cannot reach a release."
+  ],
+
+  "latest": "CaptchaKraken/CaptchaKraken_v1.1",
+
+  "models": {
+    "CaptchaKraken/CaptchaKraken_v1.1": {
+      "prompt_version": "1",
+      "kind": "lora",
+      "base_model": "RedHatAI/Qwen3.5-9B-FP8-dynamic",
+      "lora_revision": "main",
+      "lora_name": "captcha",
+      "note": "Currently served in production. PRIVATE on the Hub, so prompts.json can never be fetched for it — this entry is the only thing that maps it to a prompt generation."
+    },
+    "CaptchaKraken/CaptchaKrakenV1_Lora": {
+      "prompt_version": "1",
+      "kind": "lora",
+      "base_model": "RedHatAI/Qwen3.5-9B-FP8-dynamic",
+      "lora_revision": "main",
+      "lora_name": "captcha",
+      "note": "Published before prompts.json existed — no such file in the repo, so it resolves from here."
+    },
+    "CaptchaKraken/Sunlight-AWQ-4bit": {
+      "prompt_version": "1",
+      "kind": "merged",
+      "lora_name": "captcha",
+      "note": "Ships its own prompts.json; this entry keeps it resolvable offline."
+    },
+    "CaptchaKraken/Twilight-FP8": {
+      "prompt_version": "1",
+      "kind": "merged",
+      "lora_name": "captcha",
+      "note": "Ships its own prompts.json; this entry keeps it resolvable offline."
+    }
+  },
+
+  "served_aliases": {
+    "_comment": "A hosted endpoint serves a bare name, not a repo id. Map it back so prompt resolution works for callers who only ever see the alias.",
+    "captcha": "CaptchaKraken/CaptchaKraken_v1.1"
+  }
+}

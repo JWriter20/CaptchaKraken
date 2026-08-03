@@ -15,16 +15,25 @@ the finetune repo was intact. Only the SHIPPED prompt had drifted.
 So: editing a serving prompt fails this test until someone updates the manifest,
 which forces the question "does the pinned adapter still expect this prompt?".
 Hermetic — reads constants and a JSON file, no model or network.
+
+The prompts hashed here are THE ONES THE PINNED ADAPTER ACTUALLY GETS, resolved
+through `models.json`, not the module-level `planner.PIXEL_ACTION_PROMPT`. Since
+prompts became per-model those constants are aliases for the NEWEST generation,
+which is not necessarily the pinned model's — hashing them made this test fail
+the moment the client learned a new generation, while saying nothing about
+whether the pinned pair still matched. Resolving first restores the meaning:
+"the prompts this release sends the adapter it pins".
 """
 import hashlib
 
-from captchakraken import config
-from captchakraken.planner import PIXEL_ACTION_PROMPT, SELECT_GRID_PROMPT
+from captchakraken import config, prompts
+
+_PINNED = prompts.resolve(config.pinned()["lora_adapter"])
 
 # The prompts CI guards, by the name used in pinned_model.json.
 SERVING_PROMPTS = {
-    "PIXEL_ACTION_PROMPT": PIXEL_ACTION_PROMPT,
-    "SELECT_GRID_PROMPT": SELECT_GRID_PROMPT,
+    "PIXEL_ACTION_PROMPT": _PINNED.action_prompt,
+    "SELECT_GRID_PROMPT": _PINNED.grid_template,
 }
 
 

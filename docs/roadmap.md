@@ -26,12 +26,12 @@ Where CaptchaKraken is headed. Legend: 🟢 shipped · 🟡 in progress · ⚪ p
 | ⬛ **Abyss** | 🟡 in progress | The hosted-only model, trained against the open weights' measured failures. Video challenges land here first. |
 | 🪶 **Sunlight / Twilight merges** | 🟡 in progress | The adapter merged into the base at 4-bit and 8-bit, so self-hosting is one download instead of two. Ids reserved, weights not yet uploaded. |
 | 📈 **More real labeled data** | 🟡 in progress | Broader coverage for under-represented prompts. |
+| 🎥 **Video challenge support** | 🟡 in progress | **The driver half has shipped.** A challenge that never settles is now recorded (4 s @ 10 fps), cut into keyframes, and sent to the model as one multi-image prompt; the answer names which keyframe it acted on, and the driver waits for the widget to return to that frame before clicking. What remains is the model: an adapter trained on the keyframe format. **Abyss** first. |
 
 ## ⚪ Planned
 
 | Item | Status | Notes |
 |---|---|---|
-| 🎥 **Video challenge support** | ⚪ planned | Solve the video challenges currently detected-and-skipped upstream. **Abyss only** — the open weights will keep skipping them. |
 | 🧩 **More captcha types** | ⚪ planned | Non-grid hCaptcha puzzles: drag-and-drop, path/connect, tetris-fit, and "choose the card". |
 
 ---

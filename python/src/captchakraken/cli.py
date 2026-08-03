@@ -3,12 +3,25 @@ CaptchaKraken CLI (v2).
 
 Modes:
   captchakraken image.png [model_name] [api_provider] [api_key]
-        Solve a captcha image / video. `api_provider` is kept for v1
+        Solve a captcha from ONE still image. `api_provider` is kept for v1
         compat; only `captchaKrakenApi` is supported and is the default.
+
+  captchakraken solve-animated --frames-dir DIR [--fps N] [--model M] [--api-key K]
+        Solve an ANIMATED challenge from a recorded burst. DIR holds one
+        zero-padded PNG per frame; the burst is sliced into keyframes (written to
+        DIR/keyframes/) and sent to the model as one multi-image request. Prints
+        {"actions": [...], "keyframes": [...], "keyframe_mode": ...}. Every action
+        carries `await_keyframe` — the still the driver must see on screen before
+        acting — and `frame`, its number. Poll for that state with `match-region`.
+
+  captchakraken match-region ref.png live.png cx cy [tolerance]
+        Does `live` look like `ref` around the 0-1 point (cx, cy)? The wait gate
+        behind an animated click -> {"match": bool, "diff": float}. Also a `serve`
+        cmd (`match-region`), which is what a driver polling every ~120ms wants.
 
   captchakraken check-movement   img1.png img2.png [threshold]
   captchakraken check-movement-batch threshold img1 img2 [img3 ...]
-        Frame-diff helpers used by the Playwright lib's video flow.
+        Frame-diff helpers used by the Playwright lib's settle monitor.
 
   captchakraken find-grid       image.png
   captchakraken detect-selected image.png
@@ -55,6 +68,7 @@ import json
 import os
 import subprocess
 import sys
+from typing import Optional
 
 from .errors import CaptchaKrakenAPIError
 from .solver import CaptchaSolver, UnsupportedCaptchaError
@@ -414,6 +428,13 @@ def _handle_serve() -> bool:
             threshold = float(req.get("threshold", 0.005))
             moved = ImageProcessor.detect_movement(req["a"], req["b"], threshold)
             return {"has_movement": bool(moved)}
+        if cmd == "match-region":
+            # Animated wait gate: is the widget back in the state the model
+            # answered about? Polled every ~120ms while a click is held, so it
+            # belongs on the worker rather than paying a process spawn per poll.
+            return _match_region(req["ref"], req["live"],
+                                 float(req["cx"]), float(req["cy"]),
+                                 req.get("tolerance"))
         raise ValueError(f"unknown cmd: {cmd!r}")
 
     # Signal readiness so the JS side knows imports are done before it polls.
@@ -433,6 +454,142 @@ def _handle_serve() -> bool:
         except Exception as e:  # noqa: BLE001 — worker must never die on one bad req
             sys.stdout.write(json.dumps({"id": rid, "ok": False, "error": str(e)}) + "\n")
         sys.stdout.flush()
+    return True
+
+
+def _frames_in(frames_dir: str) -> list:
+    """The recorded burst's frames in capture order.
+
+    Sorted by NAME, which is why the recorder must zero-pad: `frame_9.png` sorts
+    after `frame_10.png`, and a shuffled burst destroys the temporal structure the
+    cycle detector reads. `_handle_solve_animated` rejects an unsorted-looking set
+    rather than silently slicing noise.
+    """
+    import glob
+
+    return sorted(
+        p for ext in ("png", "jpg", "jpeg")
+        for p in glob.glob(os.path.join(frames_dir, f"*.{ext}"))
+    )
+
+
+def _handle_solve_animated() -> bool:
+    """`captchakraken solve-animated --frames-dir DIR [--fps N] [...]`
+
+    The animated counterpart of the default solve command, for the TypeScript
+    driver: TS owns the browser, so IT records the burst (one zero-padded PNG per
+    frame into a directory it owns) and this slices the burst into keyframes, sends
+    them to the model as one multi-image request, and prints the actions.
+
+    Each action carries `await_keyframe`, an absolute path to the still the driver
+    must see on screen before it acts. Those files are written into
+    `DIR/keyframes/`, i.e. inside the caller's own directory — the CLI never leaves
+    temp files behind for the caller to guess at, and the caller cleans up when it
+    cleans up the burst. Poll for the state with `match-region`.
+    """
+    if len(sys.argv) <= 1 or sys.argv[1] != "solve-animated":
+        return False
+
+    parser = argparse.ArgumentParser(prog="captchakraken solve-animated")
+    parser.add_argument("--frames-dir", required=True,
+                        help="Directory of the recorded burst (zero-padded PNGs).")
+    parser.add_argument("--fps", type=float, default=10.0,
+                        help="Frame rate the burst was recorded at (default 10, the "
+                             "rate the training data was collected at).")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--api-key", default=None)
+    args = parser.parse_args(sys.argv[2:])
+
+    frames = _frames_in(args.frames_dir)
+    if not frames:
+        print(json.dumps({"error": f"no frames in {args.frames_dir}"}), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import cv2
+
+        from .keyframes import extract_keyframes, write_keyframes
+
+        with timed("cli.total"):
+            imgs = [im for im in (cv2.imread(p) for p in frames) if im is not None]
+            if not imgs:
+                print(json.dumps({"error": "no frame decoded"}), file=sys.stderr)
+                sys.exit(1)
+            kfset = extract_keyframes(imgs, fps=float(args.fps))
+            kf_dir = os.path.join(args.frames_dir, "keyframes")
+            paths = [str(os.path.abspath(p))
+                     for p in write_keyframes(kfset, kf_dir, stem="challenge")]
+
+            solver = CaptchaSolver(model=args.model, api_key=args.api_key)
+            result = solver.solve_keyframes(paths)
+
+        action_data = [a.model_dump() for a in result]
+        print(json.dumps({
+            "actions": action_data,
+            "token_usage": solver.planner.token_usage,
+            # Reported so the driver can log what it actually sent, and so a
+            # surprising slicing (6 frames collapsing to 1) is visible in the
+            # solve log rather than only inferable from the answer.
+            "keyframes": paths,
+            "keyframe_mode": kfset.mode,
+            "source_frames": len(imgs),
+        }))
+    except UnsupportedCaptchaError as e:
+        print(json.dumps({"error": str(e), "unsupported": True}), file=sys.stderr)
+        sys.exit(2)
+    except CaptchaKrakenAPIError as e:
+        print(json.dumps(e.to_payload()), file=sys.stderr)
+        sys.exit(3)
+    except Exception as e:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(1)
+    return True
+
+
+def _match_region(ref: str, live: str, cx: float, cy: float,
+                  tolerance: Optional[float] = None) -> dict:
+    """Does `live` look like `ref` around the 0–1 point (cx, cy)?
+
+    The wait-for-state gate behind an animated click. Compares only the
+    neighbourhood of the action point, with the same box and metric the training
+    label's frame was chosen with (`keyframes.region_box` / `region_diff_ratio`) —
+    local rather than whole-frame because everything else in these puzzles is also
+    moving, so a whole-frame match would need every unrelated sprite to align too
+    and would essentially never open.
+    """
+    import cv2
+
+    from .keyframes import MATCH_REGION_TOLERANCE, region_box, region_diff_ratio
+
+    tol = MATCH_REGION_TOLERANCE if tolerance is None else float(tolerance)
+    a, b = cv2.imread(ref), cv2.imread(live)
+    if a is None or b is None:
+        return {"match": False, "diff": 1.0, "error": "unreadable image"}
+    box = region_box(a.shape[1::-1], (cx, cy))
+    d = region_diff_ratio(a, b, box)
+    return {"match": bool(d <= tol), "diff": float(d), "tolerance": tol}
+
+
+def _handle_match_region() -> bool:
+    """`captchakraken match-region ref.png live.png cx cy [tolerance]`
+
+    cx/cy are 0–1 fractions of the reference image (the centre of the action).
+    Also available over the persistent worker as cmd `match-region`, which is what
+    the driver should use — this is polled every ~120 ms while waiting.
+    """
+    if len(sys.argv) <= 1 or sys.argv[1] != "match-region":
+        return False
+    if len(sys.argv) < 6:
+        print(json.dumps({
+            "error": "Usage: captchakraken match-region ref.png live.png cx cy [tolerance]"
+        }), file=sys.stderr)
+        sys.exit(1)
+    tol = float(sys.argv[6]) if len(sys.argv) > 6 else None
+    print(json.dumps(_match_region(sys.argv[2], sys.argv[3],
+                                   float(sys.argv[4]), float(sys.argv[5]), tol)))
     return True
 
 
@@ -640,6 +797,10 @@ def main():
     if _handle_cell_commands():
         return
     if _handle_tool_commands():
+        return
+    if _handle_solve_animated():
+        return
+    if _handle_match_region():
         return
 
     parser = argparse.ArgumentParser(description="CaptchaKraken v2 (vLLM)")

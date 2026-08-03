@@ -3,6 +3,64 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [Unreleased]
+
+### Added
+- **Animated challenges are solved instead of skipped.** hCaptcha's "select the
+  odd animal" (sprites cross-fading on independent cycles) and "unique motion
+  pattern" (identical meshes, only the rotation differs) carry none of their
+  answer in any single frame. The driver now records the widget for 4 s at 10 fps,
+  reduces the recording to the few stills that carry the answer, and sends those
+  as **one multi-image request**.
+
+  The answer gains a `"frame"` naming which still it acted on, and the driver
+  **holds the mouse until the widget looks like that frame again** before
+  clicking — comparing only the neighbourhood of the click point, because
+  everything else on these puzzles is moving too. Without that wait, a click on a
+  fading sprite lands on background.
+
+  New surface: `CaptchaSolver.solve_keyframes()`,
+  `ActionPlanner.get_keyframe_actions()`, `keyframes.py` (a verbatim copy of the
+  training repo's slicer — the two are checked byte-for-byte in CI, because the
+  model answers with a frame NUMBER and a solver that sliced differently would
+  wait for a picture that does not exist). Actions carry `await_keyframe` +
+  `frame`. CLI: `solve-animated --frames-dir DIR` and `match-region` (also a
+  `serve` cmd, since the wait gate polls it every ~120 ms).
+
+  Config: `video_solve_enabled` / `videoSolveEnabled` (default on),
+  `video_burst_duration_ms` / `video_burst_fps`, `keyframe_wait_timeout_ms` /
+  `keyframe_wait_poll_ms`, and the camelCase equivalents on the TS side.
+
+  **The clip is never sent to the model.** Every mp4 this project can write is
+  MPEG-4 Part 2, whose decodability on the serving side was never verified, and a
+  clip cannot carry a frame number in the first place. Frames stay in memory and
+  are sliced there, so no encode happens on the solve path at all.
+
+  Accuracy depends on the adapter: the pipeline is in place, and an adapter
+  trained on the keyframe format is what makes the answers good.
+
+### Changed
+- **`AnimatedChallengeError` / `.animated` narrowed.** It used to mean "the
+  challenge never settles, give up". It now means "an animated challenge we could
+  not RECORD" — the element refused to screenshot, or `video_solve_enabled` is
+  off. A moving challenge is no longer a failure.
+- The Python driver now runs the settle probe for `puzzle_source == "unknown"`
+  (GeeTest, Tencent, …) as well as hCaptcha. It never did, so an animated
+  non-hCaptcha widget was screenshotted mid-cycle and answered from whatever
+  single moment happened to be caught. reCAPTCHA is deliberately excluded: it has
+  its own readiness gate and its grids are never animated.
+- `"unsupported"` mid-solve followed by a never-settling next round used to be
+  terminal. It now retries into the recording path, still bounded by
+  `max_unsupported_resolves`.
+- The frame-freshness guard is skipped for animated challenges. It re-solves when
+  the frame changes during inference, and these change by definition — every
+  attempt would be judged stale and the whole re-solve budget would burn without
+  ever acting. The `frame` in the answer is the guard that replaces it.
+- `CaptchaSolver.solveVideo()` still aliases `solve()` (one still, one answer) and
+  is NOT redirected to `solve_keyframes()`: callers of that name pass a single
+  media path, and reinterpreting it as "record and slice" would change what an
+  existing integration does. New code calls `solve_keyframes()` explicitly.
+
 ## [2.4.0] — 2026-07-29
 
 The release that makes the **hosted** API usable by someone who has never heard

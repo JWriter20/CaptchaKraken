@@ -273,6 +273,49 @@ export interface CaptchaKrakenConfig {
    */
   animatedChallengeAfterMs?: number;
 
+  // ── Animated challenges ───────────────────────────────────────────────────
+  // A challenge that never settles is animated BY DESIGN (hCaptcha fades sprites
+  // on independent cycles; GeeTest's svg board cycles its glyphs). Those are
+  // RECORDED and solved from keyframes rather than abandoned.
+
+  /**
+   * Record and solve animated challenges. When false, a challenge that never
+   * settles fails with `.animated = true` as it did before — for callers who
+   * would rather fail fast than spend the recording time.
+   *
+   * Default: true
+   */
+  videoSolveEnabled?: boolean;
+
+  /**
+   * Length (ms) and frame rate of the burst recorded from an animated challenge.
+   *
+   * Do not tune these casually. They are deliberately identical to the geometry
+   * the training corpus was collected at (4000ms @ 10fps), and the keyframe
+   * slicer reads the clip's temporal structure — a different length or rate
+   * changes where a cycle's period lands across the frames, so the live set gets
+   * sliced differently from the trained set and the model's frame number stops
+   * meaning what the driver thinks it means.
+   *
+   * Defaults: 4000 / 10
+   */
+  videoBurstDurationMs?: number;
+  videoBurstFps?: number;
+
+  /**
+   * How long (ms) to wait for the widget to return to the keyframe the model
+   * chose, before clicking anyway; and the poll interval while waiting.
+   *
+   * Bounded because the alternative is worse: these puzzles cycle, so the state
+   * does come back — but if the recording caught a one-off transition it never
+   * will, and a click on the model's coordinates is a better use of the
+   * remaining budget than a timeout.
+   *
+   * Defaults: 6000 / 120
+   */
+  keyframeWaitTimeoutMs?: number;
+  keyframeWaitPollMs?: number;
+
   /**
    * After clicking Submit/Verify, the solver EXPECTS the frame to change (advance
    * to the next round, or close because it was accepted). This is how long (ms)
@@ -331,7 +374,28 @@ export interface BoundingBox {
   3: number; // max_y
 }
 
-export interface ClickAction {
+/**
+ * Fields present ONLY on actions from an animated challenge.
+ *
+ * Why an action carries a picture: on an animated puzzle the target is visible
+ * only part of the time, so the coordinates are correct only while the widget
+ * looks the way it did in that keyframe. The driver holds the mouse until the
+ * live neighbourhood around the click point matches the same neighbourhood of
+ * `await_keyframe`, then clicks. Without the wait, a click on a fading sprite
+ * lands on background.
+ *
+ * Both are set together or not at all — a number with no image cannot be waited
+ * on, and an image with no number cannot be reported. Absent on every still
+ * puzzle, where there is no moment to wait for.
+ */
+export interface AnimatedActionFields {
+  /** Absolute path to the keyframe the model chose to act on. */
+  await_keyframe?: string | null;
+  /** Its 1-based number in the keyframe set that was sent. */
+  frame?: number | null;
+}
+
+export interface ClickAction extends AnimatedActionFields {
   action: 'click';
   /**
    * One or more normalized [x1, y1, x2, y2] bboxes (0–1 fractions of the
@@ -345,7 +409,7 @@ export interface ClickAction {
   target_coordinates?: [number, number] | null;
 }
 
-export interface DragAction {
+export interface DragAction extends AnimatedActionFields {
   action: 'drag';
   source_bounding_box: [number, number, number, number];
   target_bounding_box: [number, number, number, number];

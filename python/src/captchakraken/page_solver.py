@@ -41,6 +41,7 @@ import hashlib
 import os
 import random
 import re
+import shutil
 import tempfile
 import time
 import uuid
@@ -104,7 +105,14 @@ class CaptchaSolveError(Exception):
 
 
 class AnimatedChallengeError(CaptchaSolveError):
-    """The challenge never stops moving — a video/animated puzzle we can't read."""
+    """An animated challenge we could not RECORD.
+
+    Note the narrowed meaning. "The challenge never stops moving" is no longer a
+    failure: `video_solve_enabled` records the widget, slices the recording into
+    keyframes and solves those. This is raised only when that path cannot get an
+    artifact to work with — the element refuses to screenshot, or the recording
+    decodes to nothing.
+    """
 
 
 class UnsupportedChallengeError(CaptchaSolveError):
@@ -173,6 +181,25 @@ class PageSolverConfig:
     settle_diff_threshold: float = 0.01
     post_submit_change_timeout_ms: int = 4_000
 
+    # ── Animated challenges ────────────────────────────────────────────────
+    # A challenge that never settles is RECORDED and solved from keyframes rather
+    # than abandoned. Off switch for callers who would rather fail fast than spend
+    # the recording time.
+    video_solve_enabled: bool = True
+    # Burst geometry. Deliberately identical to the collector's
+    # (`_collect_common.BURST_DURATION_MS` / `BURST_FPS` in the finetune repo), so a
+    # challenge recorded here is the same shape of artifact the model trained on —
+    # same clip length, same frame rate, therefore the same keyframe slicing.
+    video_burst_duration_ms: int = 4_000
+    video_burst_fps: int = 10
+    # How long to wait for the widget to return to the keyframe the model chose,
+    # before clicking anyway. Bounded because the alternative is worse: these
+    # puzzles cycle, so the state DOES come back — but if the recording caught a
+    # one-off transition it never will, and a click on the model's coordinates is
+    # still a better use of the remaining budget than a timeout.
+    keyframe_wait_timeout_ms: int = 6_000
+    keyframe_wait_poll_ms: int = 120
+
     # Grid load / dynamic-refresh timing.
     grid_load_poll_interval_ms: int = 250
     grid_load_timeout_ms: int = 8_000
@@ -181,6 +208,24 @@ class PageSolverConfig:
     recaptcha_dynamic_fade_poll_ms: int = 250
     recaptcha_dynamic_fade_wait_ms: int = 6_000
     recaptcha_tile_hover_enabled: bool = True
+
+
+# Vendors with no checkbox/challenge split — one container, one interactive
+# surface. Checked in detect_captcha() after the five hard-coded reCAPTCHA /
+# hCaptcha / Turnstile checks above, so those keep first refusal. Selectors
+# lifted from src/captchaCollection/sources.py, which already drives these 8
+# vendors nightly in the collector. Mirror of VENDOR_WIDGET_LOCATORS in
+# solver.ts — keep both in the same order with the same selectors.
+VENDOR_WIDGET_LOCATORS = [
+    {"puzzle_source": "geetest", "selectors": [".geetest_box", ".geetest_panel_box", ".geetest_popup_window", ".geetest_widget"]},
+    {"puzzle_source": "tencent", "selectors": ['iframe#tcaptcha_iframe_dy', 'iframe[id*="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]']},
+    {"puzzle_source": "yidun", "selectors": [".yidun_panel", ".yidun"]},
+    {"puzzle_source": "yandex", "selectors": [".CheckboxCaptcha"]},
+    {"puzzle_source": "lemin", "selectors": ["#lemin-cropped-captcha", ".lemin-captcha-popup"]},
+    {"puzzle_source": "prosopo", "selectors": [".prosopo-modalInner", ".procaptcha-checkbox"]},
+    {"puzzle_source": "mtcaptcha", "selectors": [".mtcap"]},
+    {"puzzle_source": "botdetect", "selectors": [".BDC_CaptchaDiv"]},
+]
 
 
 class PageSolver:
@@ -208,6 +253,9 @@ class PageSolver:
         # accumulates token usage and holds the HTTP session to vLLM.
         self._solver = solver or CaptchaSolver(**solver_kwargs)
         self._last_mouse: Tuple[float, float] = (0.0, 0.0)
+        # See _seed_cursor: the (0, 0) origin wedges camoufox's humanised
+        # mouse, so the first move of each solve must step off it plainly.
+        self._cursor_seeded = False
         self._last_submit_frame_hash: Optional[str] = None
         # Absolute deadline for the current solve, in the same clock as
         # time.monotonic() * 1000. None outside a solve.
@@ -302,6 +350,24 @@ class PageSolver:
             actions = [actions]
         return actions, usage
 
+    def _get_keyframe_solution(
+        self, keyframe_paths: Sequence[str]
+    ) -> Tuple[List[CaptchaAction], List[Dict[str, Any]]]:
+        """The model query for an animated challenge. Usage read by DELTA, as above.
+
+        One request for the whole keyframe set, not one per frame: the model has to
+        compare the frames to find what differs between them, which it can only do
+        with all of them in a single context. Per-frame queries would also cost N
+        billable rounds for one puzzle.
+        """
+        planner = self._solver.planner
+        before = len(planner.token_usage)
+        actions = self._solver.solve_keyframes(keyframe_paths)
+        usage = [dict(u) for u in planner.token_usage[before:]]
+        if not isinstance(actions, list):
+            actions = [actions]
+        return actions, usage
+
     # ------------------------------------------------------------------
     # Mouse
     # ------------------------------------------------------------------
@@ -388,7 +454,47 @@ class PageSolver:
                 # Any other per-sample failure is skipped rather than fatal —
                 # losing one mousemove must not lose the solve.
 
+    def _seed_cursor(self, page: Any) -> None:
+        """Move the cursor off its (0, 0) origin once per solve, in ONE plain
+        move, before any humanised trajectory runs.
+
+        Without this, the first trajectory of a solve begins at (0, 0) — the
+        exact window corner, because that is where the pointer starts and
+        nothing has moved it. Under camoufox's `humanize` juggler a short move
+        from that origin never returns: `page.mouse.move()` blocks forever at 0%
+        CPU, and since dispatch is serialised on a process-global activation
+        chain, every later input event blocks behind it too. The solve looks
+        hung with no error anywhere and the Tier 3 fixture run times out on all
+        three attempts.
+
+        Reduced to four lines against camoufox directly:
+
+            with Camoufox(headless=True, humanize=True) as b:
+                p = b.new_page(); p.goto("about:blank")
+                p.mouse.move(1.0, 1.0)      # never returns
+
+        The same move after ANY interior move completes in ~1.1s, which is what
+        makes this the fix rather than a workaround: it is the ORIGIN that is
+        poisoned, not the destination. Same failure family as camoufox #225.
+
+        Deliberately not routed through `_smooth_move`: that would generate a
+        trajectory from (0, 0) and reintroduce exactly the move being avoided.
+        """
+        if self._cursor_seeded:
+            return
+        self._cursor_seeded = True
+        vp = self._viewport(page)
+        # Centre when the window is known, else a modest interior point — any
+        # coordinate comfortably off the corner will do.
+        cx, cy = (vp["width"] / 2, vp["height"] / 2) if vp else (200.0, 200.0)
+        try:
+            page.mouse.move(cx, cy)
+            self._last_mouse = (cx, cy)
+        except Exception:  # noqa: BLE001 — an adapter without a mouse must not fail the solve
+            pass
+
     def _smooth_move(self, page: Any, x: float, y: float) -> None:
+        self._seed_cursor(page)
         points, timings = generate_trajectory(self._last_mouse, (x, y), 60)
         self._trace_path(page, points, timings)
 
@@ -580,6 +686,14 @@ class PageSolver:
         ):
             return turnstile_container
 
+        # Vendors with one interactive surface (no checkbox/challenge split) —
+        # GeeTest, Tencent, Yidun, Yandex, Lemin, Prosopo, MTCaptcha, BotDetect.
+        for entry in VENDOR_WIDGET_LOCATORS:
+            for selector in entry["selectors"]:
+                el = page.query_selector(selector)
+                if self._visible(el):
+                    return el
+
         return None
 
     def is_captcha_solved(self, page: Any) -> bool:
@@ -766,6 +880,151 @@ class PageSolver:
         finally:
             for path in frames:
                 _unlink(path)
+
+    # ------------------------------------------------------------------
+    # Animated challenges
+    # ------------------------------------------------------------------
+
+    def _settle_or_animated(self, element: Any) -> bool:
+        """Wait for the widget to settle; return whether it is animated instead.
+
+        "Never settles" stopped being a failure. hCaptcha's "select the odd animal"
+        fades its sprites on independent cycles and its "unique motion pattern"
+        puzzle spins identical meshes — those challenges are animated BY DESIGN, and
+        the answer only exists across frames. True here routes the caller to the
+        recording path.
+
+        `video_solve_enabled=False` restores the old behaviour for callers who would
+        rather fail fast than spend the recording time.
+        """
+        if self._wait_for_element_settled(element) != "animated":
+            return False
+        if not self.config.video_solve_enabled:
+            raise AnimatedChallengeError(
+                "the challenge never settles and video_solve_enabled is off"
+            )
+        _log("[animated] challenge never settles — recording it")
+        return True
+
+    def _record_keyframes(self, element: Any) -> Tuple[List[str], str]:
+        """Record the widget and return `(keyframe_paths, temp_dir)`.
+
+        Screenshots the element at the collector's burst geometry (4 s @ 10 fps),
+        then hands the frames to the SAME slicer the training data was cut with
+        (`keyframes.extract_keyframes`). That shared code path is the whole point:
+        the model answers with a frame NUMBER, and a number only means something if
+        the live set was sliced the way the trained set was.
+
+        Frames are kept in memory and sliced from there — no intermediate mp4. The
+        old pipeline encoded one, and every clip it produced was mp4v, a codec the
+        serving side may or may not decode. Skipping the encode removes that whole
+        class of silent failure along with the disk round-trip.
+
+        The caller owns `temp_dir` and must remove it once the actions are done
+        with: the returned paths are read back by the wait gate on every poll, so
+        cleaning up any earlier would break the click.
+
+        Raises AnimatedChallengeError if nothing could be captured.
+        """
+        from .keyframes import extract_keyframes, write_keyframes
+
+        cfg = self.config
+        fps = max(1, int(cfg.video_burst_fps))
+        total = max(1, round(cfg.video_burst_duration_ms / (1000.0 / fps)))
+        interval = 1.0 / fps
+
+        shot = _tmp_png("burst")
+        frames = []
+        try:
+            for i in range(total):
+                self._check_deadline("recording the animated challenge")
+                start = time.monotonic()
+                try:
+                    self._screenshot(element, shot)
+                except Exception as exc:  # noqa: BLE001 — a dropped frame is not fatal
+                    _debug(f"burst frame {i} failed: {exc}")
+                else:
+                    import cv2
+
+                    img = cv2.imread(shot)
+                    if img is not None:
+                        frames.append(img)
+                # Drift-corrected: a slow screenshot must not stretch the clip, or
+                # the recording covers more wall-clock than the model trained on and
+                # a cycle's period lands differently across the frames.
+                wait = interval - (time.monotonic() - start)
+                if wait > 0 and i < total - 1:
+                    time.sleep(wait)
+        finally:
+            _unlink(shot)
+
+        if not frames:
+            raise AnimatedChallengeError(
+                "could not record the animated challenge (no frame screenshotted)"
+            )
+        _log(f"[animated] recorded {len(frames)} frames at {fps}fps")
+
+        kfset = extract_keyframes(frames, fps=float(fps))
+        temp_dir = tempfile.mkdtemp(prefix="ck_keyframes_")
+        paths = write_keyframes(kfset, temp_dir, stem="challenge")
+        _log(f"[animated] sliced to {len(paths)} keyframe(s) (mode={kfset.mode})")
+        return [str(p) for p in paths], temp_dir
+
+    def _wait_for_keyframe(self, element: Any, keyframe_path: str,
+                           point_norm: Tuple[float, float]) -> bool:
+        """Hold until the widget looks like `keyframe_path` around `point_norm`.
+
+        This is the reason an animated answer names a frame. The model picked the
+        moment its target was visible; the coordinates are only correct at that
+        moment. Clicking as soon as the answer arrives lands on whatever the sprite
+        happens to be doing — for a cross-fade, usually background.
+
+        Compares only the neighbourhood of the action point, with the same box and
+        the same metric the training label was chosen with
+        (`keyframes.region_box` / `region_diff_ratio`). Local rather than
+        whole-frame because everything ELSE in these puzzles is also moving: a
+        whole-frame match would need every unrelated sprite to align too, and would
+        essentially never open.
+
+        Returns whether the state was reached. On timeout the caller clicks anyway
+        — see `keyframe_wait_timeout_ms`.
+        """
+        import cv2
+
+        from .keyframes import MATCH_REGION_TOLERANCE, region_box, region_diff_ratio
+
+        ref = cv2.imread(keyframe_path)
+        if ref is None:
+            _debug(f"keyframe {keyframe_path} unreadable; not waiting")
+            return False
+        box = region_box(ref.shape[1::-1], point_norm)
+
+        cfg = self.config
+        deadline = (time.monotonic() * 1000.0) + cfg.keyframe_wait_timeout_ms
+        probe = _tmp_png("kfwait")
+        best = 1.0
+        try:
+            while (time.monotonic() * 1000.0) < deadline:
+                self._check_deadline("waiting for the challenge keyframe")
+                try:
+                    self._screenshot(element, probe)
+                    live = cv2.imread(probe)
+                except Exception as exc:  # noqa: BLE001
+                    _debug(f"keyframe probe failed: {exc}")
+                    live = None
+                if live is not None:
+                    d = region_diff_ratio(ref, live, box)
+                    best = min(best, d)
+                    if d <= MATCH_REGION_TOLERANCE:
+                        _log(f"[animated] widget matched the chosen keyframe (diff={d:.4f})")
+                        return True
+                _delay(cfg.keyframe_wait_poll_ms)
+        finally:
+            _unlink(probe)
+        _log(f"[animated] widget never matched the chosen keyframe within "
+             f"{cfg.keyframe_wait_timeout_ms}ms (closest diff={best:.4f}); "
+             f"clicking on the model's coordinates anyway")
+        return False
 
     def _wait_for_change_since(self, element: Any, since_hash: str) -> bool:
         """After a submit the frame MUST change (next round, or closing)."""
@@ -1230,15 +1489,22 @@ class PageSolver:
         # Screenshotting any of those transitional frames feeds the model a
         # blank/stale grid it correctly calls "unsupported" — which used to abort
         # the whole solve on round 2.
+        is_animated = False
         if puzzle_source == "hcaptcha" and "frame=challenge" in src:
             if self._last_submit_frame_hash:
                 self._wait_for_change_since(element, self._last_submit_frame_hash)
                 self._last_submit_frame_hash = None
             self._wait_for_hcaptcha_challenge_images(element)
-            if self._wait_for_element_settled(element) == "animated":
-                raise AnimatedChallengeError(
-                    "the challenge never settles (likely a video/animated puzzle)"
-                )
+            is_animated = self._settle_or_animated(element)
+        elif puzzle_source == "unknown":
+            # Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle
+            # probe was never run for these, so an animated one — GeeTest's svg board
+            # cycles its glyph set — was screenshotted mid-cycle and answered from
+            # whatever single moment we happened to catch. reCAPTCHA is excluded on
+            # purpose: it has its own readiness gate below, its grids are never
+            # animated, and a second probe would only add latency to a path that
+            # already works.
+            is_animated = self._settle_or_animated(element)
 
         # Only the image-challenge frame holds a grid. Running grid detection on
         # the anchor checkbox just burns an 8s timeout before the click.
@@ -1261,14 +1527,24 @@ class PageSolver:
         shot = _tmp_png("captcha")
         performed_action = False
         all_usage: List[Dict[str, Any]] = []
+        keyframe_dir: Optional[str] = None
         try:
-            self._screenshot(element, shot, timeout_ms=self.config.element_screenshot_timeout_ms)
-
-            actions, all_usage = self._solve_frame_freshness_guarded(
-                element,
-                shot,
-                lambda image_path: self._get_solution(image_path, puzzle_source, retry_mode),
-            )
+            if is_animated:
+                # The freshness guard is deliberately SKIPPED here. It re-solves when
+                # the frame changes during inference, and an animated challenge
+                # changes by definition — every attempt would be judged stale and the
+                # whole re-solve budget would burn without ever acting. The frame
+                # number in the answer is the real guard: it names the state to act
+                # in, and `_execute_click` waits for it.
+                keyframes, keyframe_dir = self._record_keyframes(element)
+                actions, all_usage = self._get_keyframe_solution(keyframes)
+            else:
+                self._screenshot(element, shot, timeout_ms=self.config.element_screenshot_timeout_ms)
+                actions, all_usage = self._solve_frame_freshness_guarded(
+                    element,
+                    shot,
+                    lambda image_path: self._get_solution(image_path, puzzle_source, retry_mode),
+                )
 
             element_box = element.bounding_box()
             if not element_box:
@@ -1291,14 +1567,30 @@ class PageSolver:
                     if not bboxes and not action.get("target_coordinates"):
                         _log("click action has no bboxes or coordinates; skipping")
                         continue
+                    # On an animated challenge, hold each click until the widget is
+                    # back in the state the model answered about. Per-click, not once
+                    # per action: these puzzles keep cycling, so by the time click 2
+                    # comes round the state has moved on again.
+                    await_kf = action.get("await_keyframe")
                     if bboxes:
                         for bbox in bboxes:
+                            if await_kf:
+                                self._wait_for_keyframe(element, await_kf, _bbox_center(bbox))
                             self._execute_click(page, {"target_bounding_box": bbox}, element_box)
                             _delay(random.random() * 80 + 80)
                     else:
                         self._execute_click(page, action, element_box)
                     performed_action = True
                 elif kind == "drag":
+                    # Wait on the SOURCE: the piece has to be there to be picked up.
+                    # The destination is not gated — by the time the mouse arrives the
+                    # animation has moved on regardless, and a drop is judged by where
+                    # it lands, not by what the slot looked like on pickup.
+                    await_kf = action.get("await_keyframe")
+                    if await_kf and action.get("source_bounding_box"):
+                        self._wait_for_keyframe(
+                            element, await_kf, _bbox_center(action["source_bounding_box"])
+                        )
                     self._execute_drag(page, action, element_box)
                     performed_action = True
                 elif kind == "wait":
@@ -1328,6 +1620,10 @@ class PageSolver:
                 self._last_submit_frame_hash = self._element_frame_hash(element)
         finally:
             _unlink(shot)
+            # Only now: the wait gate re-reads the keyframe PNG on every poll, so
+            # removing the directory any earlier would break the click it is gating.
+            if keyframe_dir:
+                shutil.rmtree(keyframe_dir, ignore_errors=True)
 
         return performed_action, all_usage
 
@@ -1348,6 +1644,7 @@ class PageSolver:
         self._last_submit_frame_hash = None
         self._deadline_ms = start + self.config.overall_solve_timeout_ms
         self._viewport_cache = None
+        self._cursor_seeded = False
 
         # Mint one session id for the WHOLE solve, exactly as the TS driver does
         # per `solve()`. The planner turns it into `X-CK-Session`, which is what
@@ -1440,9 +1737,17 @@ class PageSolver:
                     unsupported_retries += 1
                     current = self.detect_captcha(page)
                     if current and self._wait_for_element_settled(current) == "animated":
-                        raise AnimatedChallengeError(
-                            "the challenge never settles (likely a video puzzle)"
-                        )
+                        # Used to be terminal. Now it just means the next round is an
+                        # animated puzzle: retry the loop and `_solve_single` takes the
+                        # recording path. `unsupported_retries` still bounds it, so a
+                        # widget that is animated AND unsolvable cannot spin here.
+                        if not cfg.video_solve_enabled:
+                            raise AnimatedChallengeError(
+                                "the challenge never settles and video_solve_enabled is off"
+                            )
+                        _log('"unsupported" mid-solve and the next round is animated; '
+                             "retrying into the recording path.")
+                        continue
                     _log(
                         f'"unsupported" mid-solve; settled and retrying '
                         f"({unsupported_retries}/{cfg.max_unsupported_resolves})."
@@ -1523,6 +1828,14 @@ class PageSolver:
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+
+def _bbox_center(bbox: Sequence[float]) -> Tuple[float, float]:
+    """Centre of an [x1, y1, x2, y2] 0–1 box, as the (x, y) 0–1 point the keyframe
+    wait gate compares around. The solver builds these boxes as a small square
+    around the model's point, so the centre recovers that point exactly."""
+    x1, y1, x2, y2 = (float(v) for v in bbox)
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
 
 def _as_dict(action: Any) -> Dict[str, Any]:

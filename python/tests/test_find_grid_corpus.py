@@ -42,14 +42,16 @@ DATA_DIR = os.environ.get("FIND_GRID_DATA", _DEFAULT_DATA)
 
 # Expected dimensions per grid puzzle type, mirroring _GRID_DIMS_FROM_PT in
 # src/testing/grade.py. (rows, cols) -> expected number of find_grid boxes.
-# All three are uniform-gutter grids handled by the consistent-colour line tracer.
-# (The hCaptcha "card grid" widgets — grocery_list / drag_missing_slot — relied on
-# a separate template detector that has been removed; find_grid is now the line
-# tracer only, so those types are out of scope for this benchmark.)
+# All of these are uniform-gutter grids handled by the consistent-colour line
+# tracer. (The hCaptcha "card grid" widgets — grocery_list / drag_missing_slot —
+# relied on a separate template detector that has been removed; find_grid is now
+# the line tracer only, so those types are out of scope for this benchmark.)
 GRID_TYPES = {
     "recaptcha_grid_3x3": (3, 3),
     "recaptcha_grid_4x4": (4, 4),
     "hcaptcha_grid_3x3_property": (3, 3),
+    "geetest_v4_nine": (3, 3),
+    "prosopo_grid_3x3": (3, 3),
 }
 
 
@@ -206,6 +208,48 @@ def _print_rate(label, stats):
         f"wrong_dim={stats['wrong_dim']:>3}  "
         f"none={stats['none']:>4}  bad_shape={stats['bad_shape']:>3}"
     )
+
+
+# Regression: geetest_v4_nine panels put the 3x3 tile block between a prompt bar
+# and a button footer, so the tracer sees the grid's BOTTOM border as a third
+# horizontal line while the top border falls outside the seed band. The bottom
+# border is short (it stops where the dark corner tile swallows it), which used to
+# kill every 3-column pairing on the full-span gate and leave only half-pitch
+# lattices invented by sub-pitch completion — a 5x4 of quarter-size cells crammed
+# into the lower middle of the panel. Pin the real 3x3 on the two samples that
+# exhibited it. See _axis_candidates: shorter prefixes of an even run are
+# candidates in their own right.
+_GEETEST_NINE_REGRESSIONS = [
+    "geetest_v4_nine_1785265732695_4rn7i.png",
+    "geetest_v4_nine_1785265732727_781l3.png",
+]
+
+
+@pytest.mark.parametrize("name", _GEETEST_NINE_REGRESSIONS)
+def test_geetest_v4_nine_bordered_panel_is_3x3(name):
+    """The grid must be the 9 real tiles, not a half-pitch lattice in a corner."""
+    path = os.path.join(DATA_DIR, "geetest_v4_nine", name)
+    if not os.path.isfile(path):
+        pytest.skip(f"corpus sample not found: {path}")
+
+    boxes = find_grid(path)
+    assert boxes is not None and len(boxes) == 9, (
+        f"expected a 3x3 grid for {name}, got "
+        f"{len(boxes) if boxes else 0} boxes"
+    )
+    assert _boxes_well_formed(boxes)
+
+    # The 9 cells must actually be the tile block: a real 3x3 panel grid fills
+    # most of the frame. The half-pitch mis-detection covered ~60% of the width
+    # and sat well below centre, so a coverage floor pins the failure mode even
+    # if some other lattice ever produces 9 boxes.
+    import cv2
+
+    h, w = cv2.imread(path).shape[:2]
+    x0 = min(b[0] for b in boxes); x1 = max(b[2] for b in boxes)
+    y0 = min(b[1] for b in boxes); y1 = max(b[3] for b in boxes)
+    assert (x1 - x0) >= 0.85 * w, f"grid spans only {x1 - x0}px of {w}px width"
+    assert (y1 - y0) >= 0.6 * h, f"grid spans only {y1 - y0}px of {h}px height"
 
 
 if __name__ == "__main__":
