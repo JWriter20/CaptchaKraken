@@ -500,8 +500,8 @@ class ActionPlanner:
                 out.append(iv)
         return out
 
-    def get_pixel_actions(self, image_path: str) -> List[Dict[str, Any]]:
-        """Solve a non-grid click/drag puzzle.
+    def get_pixel_actions(self, image_path: str, text_mode: bool = False) -> List[Dict[str, Any]]:
+        """Solve a non-grid click/drag/slide/text puzzle.
 
         Sends the trained action prompt + image, parses the model's JSON, and
         returns a list of normalized actions with all coordinates on a 0–1
@@ -509,11 +509,20 @@ class ActionPlanner:
 
           {"kind": "click", "points": [(x, y), ...]}
           {"kind": "drag",  "src": (x, y), "dst": (x, y)}
+          {"kind": "slide", "dst": (x, y)}          — puzzle-piece slider
+          {"kind": "type",  "text": "<the code>"}   — distorted text
+
+        `text_mode` swaps in the distorted-text prompt. It is chosen by the
+        DRIVER, from the widget's DOM (a visible text box in the challenge),
+        because nothing about the picture reliably says "this one is typed" —
+        BotDetect's warped letters and hCaptcha's "click the matching letter"
+        look alike to a pixel classifier, and the two want opposite answers.
 
         Returns [] if the model produced nothing usable. The solver turns these
-        into ClickAction / DragAction bboxes.
+        into ClickAction / DragAction / TypeAction.
         """
-        raw = self._chat_with_image(self.prompts.action_prompt, image_path, max_tokens=512)
+        prompt = self.prompts.text_prompt() if text_mode else self.prompts.action_prompt
+        raw = self._chat_with_image(prompt, image_path, max_tokens=512)
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         self._log(f"pixel actions -> {actions}")
@@ -635,6 +644,23 @@ class ActionPlanner:
         if not isinstance(data, dict):
             return out
 
+        # ---- type (CANONICAL — the schema TEXT_INSTRUCTION asks for on the
+        #      distorted-text captchas: {"action": "type", "text": "<the code>"}).
+        # First, because it is the one answer family with NO coordinate in it:
+        # every branch below keys off a number, so a typed answer that fell
+        # through reached the end and normalized to nothing.
+        # The code is passed through VERBATIM — case and spacing are part of what
+        # the model read off the image, and "tidying" them submits a different
+        # answer than the one it gave.
+        act = data.get("action")
+        if isinstance(act, dict) and act.get("action") == "type":
+            act = act.get("action")  # unwrap {"action": {"action": "type", ...}}
+        if act == "type" or (isinstance(data.get("text"), str) and "drags" not in data):
+            container = data if isinstance(data.get("text"), str) else data.get("action")
+            text = container.get("text") if isinstance(container, dict) else None
+            if isinstance(text, str) and text:
+                return [{"kind": "type", "text": text}]
+
         # ---- drag (CANONICAL — the schema PIXEL_ACTION_PROMPT asks for and the
         #      LoRA is trained on, see instructions.py::ACTION_INSTRUCTION):
         #      {"action":"drag","drags":[{"source","from":[x,y],"destination","to":[x,y]}]}
@@ -652,11 +678,24 @@ class ActionPlanner:
                     continue
                 snums = flat_numbers(d.get("from"))
                 dnums = flat_numbers(d.get("to"))
-                if len(snums) >= 2 and len(dnums) >= 2:
+                if len(dnums) < 2:
+                    continue  # a piece with nowhere to go is not actionable
+                dst = norm_xy(dnums[0], dnums[1])
+                if not dst:
+                    continue
+                if len(snums) >= 2:
                     src = norm_xy(snums[0], snums[1])
-                    dst = norm_xy(dnums[0], dnums[1])
-                    if src and dst:
+                    if src:
                         out.append({"kind": "drag", "src": src, "dst": dst})
+                else:
+                    # SOURCELESS — a puzzle-piece slider. The prompt's "FOR
+                    # PUZZLE PIECE SLIDER PUZZLES" clause tells the model to
+                    # leave the source empty precisely because the piece is not
+                    # what you pick up: the handle is, somewhere else entirely,
+                    # and how far it has to travel is not knowable from the
+                    # picture. Requiring both ends here dropped the one answer
+                    # shape the prompt asks for on every slide puzzle.
+                    out.append({"kind": "slide", "dst": dst})
             if out:
                 return out
 

@@ -47,15 +47,20 @@ class ClickAction(Action):
 
 class DragAction(Action):
     action: Literal["drag"]
-    source_bounding_box: BoundingBox = None  # [x1, y1, x2, y2] in percentages
-    target_bounding_box: BoundingBox = None  # [x1, y1, x2, y2] in percentages
+    # Optional, not merely defaulted: a PUZZLE-PIECE SLIDER is carried as a drag
+    # with source_bounding_box explicitly None, and pydantic validates a value
+    # that is passed even when it equals the default. Declaring these as bare
+    # `BoundingBox = None` made constructing a slide raise ValidationError —
+    # every slide puzzle, at the moment of acting on a correct answer.
+    source_bounding_box: Optional[BoundingBox] = None  # [x1, y1, x2, y2] in percentages
+    target_bounding_box: Optional[BoundingBox] = None  # [x1, y1, x2, y2] in percentages
 
 
 class TypeAction(Action):
     """Type text into an input."""
     action: Literal["type"]
     text: str
-    target_bounding_box: BoundingBox = None  # [x1, y1, x2, y2] in percentages
+    target_bounding_box: Optional[BoundingBox] = None  # [x1, y1, x2, y2] in percentages
 
 
 class WaitAction(Action):

@@ -62,12 +62,13 @@ LATEST_PROMPT_VERSION = "2"
 # going quiet is how prompt drift got shipped last time.
 #
 #   1 — CaptchaKrakenV1_Lora, Sunlight-AWQ-4bit, Twilight-FP8, CaptchaKraken_v1.1.
-#       985-char action prompt. No slider clause. No animated ("video") family:
-#       a v1 model cannot answer a keyframe request, which is why `video` is
-#       null rather than a copy of v2's.
-#   2 — adds the PUZZLE PIECE SLIDER clause and the animated family. Byte-
-#       identical to src/synthetic/reasoning/instructions.py::ACTION_INSTRUCTION
-#       and ::VIDEO_INSTRUCTION_TEMPLATE in the finetune repo at PROMPT_VERSION 2.
+#       985-char action prompt. No slider clause. No animated ("video") family
+#       and no distorted-text ("text") family: a v1 model cannot answer either
+#       request, which is why both are null rather than a copy of v2's.
+#   2 — adds the PUZZLE PIECE SLIDER clause and the animated + text families.
+#       Byte-identical to src/synthetic/reasoning/instructions.py
+#       ::PIXEL_INSTRUCTION_TEMPLATE, ::VIDEO_INSTRUCTION_TEMPLATE and
+#       ::TEXT_INSTRUCTION in the finetune repo at PROMPT_VERSION 2.
 #
 # Do not edit a published generation's text. Ever. Those models are frozen and
 # so are their prompts; a change here is a change to what an already-shipped
@@ -104,6 +105,7 @@ BUILTIN_PROMPTS = {
             "Return JSON Array: [list of cell numbers (1-{total})]"
         ),
         "video": None,
+        "text": None,
     },
     "2": {
         "action_pixel": (
@@ -173,6 +175,17 @@ BUILTIN_PROMPTS = {
             "  // OR \"action\": \"drag\", \"drags\": [ ... ]\n"
             "}}"
         ),
+        "text": (
+            "Your task is to solve the captcha. The image shows a short code drawn in distorted, "
+            "overlapping or warped characters, sometimes over a busy background.\n\n"
+            "Read the code exactly as printed. Preserve letter case when the characters clearly "
+            "show it, and do not add spaces the image does not show. Decoration — strike-through "
+            "lines, dots, blobs, background texture — is not part of the code.\n\n"
+            "Respond ONLY with JSON:\n"
+            "{\n"
+            "  \"action\": \"type\", \"text\": \"<the code>\"\n"
+            "}"
+        ),
     },
 }
 
@@ -234,6 +247,7 @@ class PromptSet:
     action_prompt: str
     grid_template: str
     video_template: Optional[str]
+    text_template: Optional[str]
     grid_by_type: Dict[str, str]
     source: str
 
@@ -267,6 +281,25 @@ class PromptSet:
         listing = ", ".join(f"frame {i}" for i in range(1, n + 1))
         return self.video_template.format(n=n, listing=listing)
 
+    def text_prompt(self) -> str:
+        """The prompt for a DISTORTED-TEXT captcha — one where the answer is a
+        string typed into the widget's box, not a point on the picture.
+
+        Asking for this when the generation has no such family is a hard error
+        rather than a silent fall back to the click/drag prompt: that prompt
+        asks for coordinates the puzzle has no use for, so a v1 model handed a
+        BotDetect image answers with a point, the driver clicks a random spot on
+        the letters, and the box stays empty. Failing loudly here names the
+        actual problem — the model predates the family.
+        """
+        if self.text_template is None:
+            raise ValueError(
+                f"prompt generation {self.version} has no distorted-text prompt — "
+                f"model was trained before the text family existed. Use a model on "
+                f"generation 2 or later for BotDetect/MTCaptcha/Yandex text captchas."
+            )
+        return self.text_template
+
 
 def builtin(version: str) -> Optional[PromptSet]:
     """The built-in PromptSet for a generation, or None if we don't ship it."""
@@ -278,6 +311,7 @@ def builtin(version: str) -> Optional[PromptSet]:
         action_prompt=spec["action_pixel"],
         grid_template=spec["grid"],
         video_template=spec["video"],
+        text_template=spec["text"],
         grid_by_type={},
         source=f"built-in v{version}",
     )
@@ -297,6 +331,7 @@ def _from_doc(doc: Dict[str, Any], source: str) -> PromptSet:
         action_prompt=templates.get("action_pixel") or base.action_prompt,
         grid_template=templates.get("grid") or base.grid_template,
         video_template=templates.get("video") or base.video_template,
+        text_template=templates.get("text") or base.text_template,
         grid_by_type=grid_by_type,
         source=source,
     )

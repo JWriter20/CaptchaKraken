@@ -18,10 +18,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash, randomUUID } from 'crypto';
-import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
+import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, TypeAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 import { parseApiError } from './errors';
 import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
+import { solveSlideGeometry } from './slide-geometry';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -150,6 +151,102 @@ const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: s
   { puzzleSource: 'mtcaptcha', selectors: ['.mtcap'] },
   { puzzleSource: 'botdetect', selectors: ['.BDC_CaptchaDiv'] },
 ];
+
+/**
+ * Where the answer goes, when it is not a click. Mirrors TEXT_INPUT_SELECTORS /
+ * SLIDER_HANDLE_SELECTORS / DRAGGABLE_PIECE_SELECTORS in page_solver.py — keep
+ * both in the same order with the same selectors.
+ *
+ * Ordered VENDOR-FIRST, GENERIC-LAST, and the driver takes the first visible
+ * match. That order is the design: a named vendor selector is unambiguous,
+ * while the generic patterns are guesses that happen to be right most of the
+ * time. Trying the guess first would, on a page hosting a captcha *and* a login
+ * form, type the captcha's answer into the username box.
+ *
+ * The generic tail is not a nicety either — it is what actually fires on most
+ * pages. Vendors rename these classes without notice, and our own Tier 3
+ * fixtures render neither vendor's DOM.
+ */
+const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [
+  // BotDetect — the input is application-defined, so match the id fragment its
+  // own docs and samples use (the three the nightly collector already drives).
+  'input[id*=captchaCode]',
+  'input#captchaCode',
+  'input[id*=validateCaptcha]',
+  '.BDC_CaptchaDiv input[type=text]',
+  // MTCaptcha
+  'input.mtcap-inputtext',
+  '.mtcap input[type=text]',
+  // Yandex SmartCaptcha
+  '.AdvancedCaptcha-Input input',
+  'input.Textinput-Control',
+  'input[name="rep"]',
+  // Generic — an input the page itself labels as the captcha answer.
+  'input[name*="captcha" i]',
+  'input[id*="captcha" i]',
+  'input[aria-label*="captcha" i]',
+  'input[placeholder*="code" i]',
+  'input[autocomplete="off"][type=text]',
+  // Last resort: the only text box in the widget. Scoped to the challenge
+  // frame/container by the caller, never to the whole page — see findControl.
+  'input[type=text]',
+  'input:not([type])',
+  'input[type=tel]',
+  'textarea',
+];
+
+/**
+ * The handle you drag on a puzzle-piece slider. NOT the piece: on every one of
+ * these vendors the piece is inert decoration that the handle carries, so a
+ * drag starting on the piece moves nothing at all.
+ */
+const SLIDER_HANDLE_SELECTORS: ReadonlyArray<string> = [
+  // GeeTest v3 / v4
+  '.geetest_slider_button',
+  '.geetest_btn',
+  '.geetest_slider .geetest_arrow',
+  // Tencent
+  '#tcaptcha_drag_thumb',
+  '.tc-slider-normal',
+  '[id*=slideBlock]',
+  // Yidun (NetEase)
+  '.yidun_slider',
+  '.yidun_jigsaw',
+  // Lemin
+  '.lemin-slider-handle',
+  '#lemin-cropped-captcha .slider',
+  // Generic — an ARIA slider, or a class that says handle/thumb/button on a
+  // track. `[draggable=true]` is deliberately absent: it is the HTML5
+  // drag-and-drop opt-in, which fires dragstart rather than pointermove, and no
+  // slider captcha uses it.
+  '[role="slider"]',
+  '[aria-valuenow]',
+  '[class*="slider"][class*="btn"]',
+  '[class*="slider"][class*="button"]',
+  '[class*="slide"][class*="handle"]',
+  '[class*="drag"][class*="thumb"]',
+];
+
+/**
+ * Fallback for the sliderless members of the family. Lemin's "cropped" puzzle
+ * has no track at all — you drag the piece itself onto the gap — and the model
+ * answers it with the same sourceless drag, because from the picture the two
+ * are indistinguishable. Tried only after SLIDER_HANDLE_SELECTORS finds nothing.
+ */
+const DRAGGABLE_PIECE_SELECTORS: ReadonlyArray<string> = [
+  '.lemin-cropped-puzzle-piece',
+  '#lemin-cropped-captcha canvas + canvas',
+  '[class*="puzzle"][class*="piece"]',
+  '[class*="jigsaw"]',
+];
+
+/**
+ * Puzzle-piece slider tuning. Mirrors the `slide_*` fields of
+ * PageSolverConfig in page_solver.py.
+ */
+const SLIDE_PROBE_OFFSETS_PX = [24, 64];
+const SLIDE_TOLERANCE_PX = 2;
+const SLIDE_MAX_CORRECTIONS = 2;
 
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
@@ -548,6 +645,25 @@ export class CaptchaKrakenSolver {
             ? 'checkbox'
             : 'unknown';
 
+    // Everything the answer might have to be delivered INTO — a text box, a
+    // slider handle — is looked up against this, never against the page. For
+    // the iframed vendors it is the challenge document; for the ones that
+    // render into the host page (GeeTest, Yidun, BotDetect, …) it is the widget
+    // element, whose subtree is the same boundary.
+    const scope: Frame | ElementHandle = (await captchaElement.contentFrame()) ?? captchaElement;
+
+    // Does this puzzle want a STRING rather than a place to click? Only the DOM
+    // can say. The picture cannot: BotDetect's warped code and hCaptcha's
+    // "click the matching character" are the same genre of image and want
+    // opposite answers. Restricted to `unknown` because neither hCaptcha nor
+    // reCAPTCHA has ever served a typed challenge, so a match inside one of
+    // their frames would be a false positive by definition.
+    const textMode = puzzleSource === 'unknown'
+      && (await this.findControl(scope, TEXT_INPUT_SELECTORS)) !== null;
+    if (textMode) {
+      console.log('Widget has a text box; solving as a distorted-text captcha.');
+    }
+
     // hCaptcha swaps the challenge images in asynchronously — the iframe is
     // "visible" the instant the frame opens, but the task tiles paint a beat
     // later, and on multi-round puzzles it REUSES the same iframe: after a
@@ -658,6 +774,7 @@ export class CaptchaKrakenSolver {
     }
 
     let performedAction = false;
+    let slid = false;
     let allTokenUsage: TokenUsage[] = [];
     let burstDir: string | null = null;
 
@@ -676,7 +793,7 @@ export class CaptchaKrakenSolver {
         response = await this.solveFrameFreshnessGuarded(
           captchaElement, screenshotPath,
           (imagePath) => this.withIdleWander(page, captchaElement, () =>
-            this.getSolution(imagePath, puzzleSource, retryMode)),
+            this.getSolution(imagePath, puzzleSource, retryMode, textMode)),
         );
       }
       const actions = response.actions;
@@ -725,6 +842,15 @@ export class CaptchaKrakenSolver {
           }
           performedAction = true;
           await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
+        } else if (action.action === 'drag' && !(action as DragAction).source_bounding_box) {
+          // No source — a puzzle-piece slider. What you grab is not what has to
+          // arrive, so this cannot go through executeDrag: pressing the gap the
+          // model named and dragging from there picks up nothing at all.
+          if (await this.executeSlide(page, captchaElement, scope, action as DragAction, elementBox)) {
+            performedAction = true;
+            slid = true;
+            await this.emitStep(captchaElement, 'drag', 'slid the piece into the slot', puzzleSource, frameRole, attempt, { action });
+          }
         } else if (action.action === 'drag') {
           const d = action as DragAction;
           // Wait on the SOURCE: the piece has to be there to be picked up. The
@@ -737,6 +863,11 @@ export class CaptchaKrakenSolver {
           await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
           await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
+        } else if (action.action === 'type') {
+          if (await this.executeType(page, scope, action as TypeAction)) {
+            performedAction = true;
+            await this.emitStep(captchaElement, 'type', 'typed the code', puzzleSource, frameRole, attempt, { action });
+          }
         } else if (action.action === 'wait') {
           if ((action as any).duration_ms > 0) {
             console.log(`Waiting for ${(action as any).duration_ms}ms as requested by CLI`);
@@ -761,9 +892,14 @@ export class CaptchaKrakenSolver {
       //     after clicking. (3x3 is dynamic and never reaches this path; it's
       //     handled by solveRecaptchaGrid above.)
       //   - Otherwise (no action / 'done'): submit to advance.
-      const shouldClickSubmit = !performedAction
+      //   - A completed slide has ALREADY submitted. Letting go of the handle is
+      //     the gesture these puzzles grade; none of them has a Verify button,
+      //     so anything the generic finder turns up here belongs to the HOST
+      //     page, and pressing it would submit the form the captcha guards
+      //     while the verdict is still in flight.
+      const shouldClickSubmit = !slid && (!performedAction
         || puzzleSource === 'hcaptcha'
-        || isRecaptchaOneShotGrid;
+        || isRecaptchaOneShotGrid);
       if (shouldClickSubmit && frame && verifyButton) {
         console.log(performedAction
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
@@ -2115,7 +2251,7 @@ export class CaptchaKrakenSolver {
     return false;
   }
 
-  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null): Promise<CliResponse> {
+  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
     // v2 ships a single provider: the JobHarvest vLLM server via the bundled
     // CaptchaKraken CLI. The CLI's planner reads VLLM_BASE_URL and the bearer
     // token (CAPTCHA_KRAKEN_API_KEY, falling back to VLLM_API_KEY) from the
@@ -2140,7 +2276,7 @@ export class CaptchaKrakenSolver {
     let cacheKey: string | null = null;
     try {
       const imgHash = createHash('sha1').update(fs.readFileSync(imagePath)).digest('hex');
-      cacheKey = `${imgHash}|${puzzleSource}|${retryMode ?? ''}`;
+      cacheKey = `${imgHash}|${puzzleSource}|${retryMode ?? ''}|${textMode ? 'text' : ''}`;
       const cached = this.solutionCache.get(cacheKey);
       if (cached) {
         console.log('[dedup] identical screenshot already solved this session — skipping vLLM query.');
@@ -2171,6 +2307,12 @@ export class CaptchaKrakenSolver {
     cmdParts.push(`--puzzle-source=${puzzleSource}`);
     if (retryMode) {
       cmdParts.push(`--retry-mode=${retryMode}`);
+    }
+    // The DOM said this puzzle has a text box, so the CLI must send the
+    // distorted-text prompt and skip grid detection. The picture alone cannot
+    // decide this — see the textMode note in solveSingle.
+    if (textMode) {
+      cmdParts.push('--text-mode');
     }
 
     const command = cmdParts.join(' ');
@@ -2706,5 +2848,228 @@ export class CaptchaKrakenSolver {
     await this.performSmoothMove(page, dst.x, dst.y);
     await page.waitForTimeout(Math.random() * 50 + 50);
     await page.mouse.up();
+  }
+
+  // ────────────────────────────────────────────────────────── typing + sliding
+  // Mirrors _find_control / _execute_type / _execute_slide in page_solver.py.
+
+  /**
+   * First VISIBLE match for `selectors`, tried in order.
+   *
+   * `scope` is the challenge frame, or — for the vendors that render into the
+   * host page rather than an iframe — the widget element itself. Never the
+   * page: the generic tail of both selector tables would otherwise happily
+   * match a login form's text box or a carousel's drag handle somewhere else on
+   * the document, and the answer would go there.
+   */
+  private async findControl(
+    scope: Frame | ElementHandle,
+    selectors: ReadonlyArray<string>,
+  ): Promise<ElementHandle | null> {
+    for (const selector of selectors) {
+      try {
+        const el = await scope.$(selector);
+        if (el && await el.isVisible()) return el;
+      } catch {
+        // A selector this adapter can't parse must not end the search.
+      }
+    }
+    return null;
+  }
+
+  /** Put the model's reading of a distorted-text captcha into its box. */
+  private async executeType(
+    page: Page,
+    scope: Frame | ElementHandle,
+    action: TypeAction,
+  ): Promise<boolean> {
+    const text = action.text ?? '';
+    if (!text) return false;
+    const field = await this.findControl(scope, TEXT_INPUT_SELECTORS);
+    if (!field) {
+      console.warn('Type action, but no text box in the widget; skipping.');
+      return false;
+    }
+
+    await this.moveAndClick(page, field);  // travel there, then press to focus
+    // A retry round arrives with the previous attempt still in the box, and
+    // typing would APPEND to it — submitting a string the model never read.
+    try {
+      await page.keyboard.press('Control+A');
+    } catch { /* an adapter without a keyboard shortcut path */ }
+    // Per character rather than one type(text, {delay}) call: a constant
+    // inter-key delay is itself a signal, and these are the vendors that score
+    // typing cadence.
+    for (const ch of text) {
+      try {
+        await page.keyboard.type(ch);
+      } catch (e) {
+        console.warn('Could not type into the captcha field:', e);
+        return false;
+      }
+      await page.waitForTimeout(Math.random() * 90 + 45);
+    }
+    console.log(`Typed ${text.length} character(s) into the captcha field.`);
+    return true;
+  }
+
+  /** `captchakraken track-piece` — box of what moved, handle masked out. */
+  private async trackPiece(
+    element: ElementHandle,
+    beforePath: string,
+    afterPath: string,
+    exclude: [number, number, number, number],
+  ): Promise<[number, number, number, number] | null> {
+    try {
+      await element.screenshot({
+        path: afterPath,
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      });
+      const res = await this.runCvTool(
+        'track-piece',
+        { before: beforePath, after: afterPath, exclude },
+        ['track-piece', beforePath, afterPath, JSON.stringify(exclude)],
+      );
+      return res && res.bbox ? res.bbox : null;
+    } catch (e) {
+      console.warn('track-piece failed:', e);
+      return null;
+    }
+  }
+
+  /**
+   * Drive a puzzle-piece slider until the PIECE reaches the model's slot.
+   *
+   * The model is asked for one thing here — the centre of the gap — because it
+   * is the only thing the picture can tell it. What it cannot know is how far
+   * the handle must travel to put the piece there: the handle is elsewhere on
+   * the widget, and the ratio between the two is a vendor implementation detail
+   * that several of them deliberately vary.
+   *
+   * So this is closed-loop, not a calculation. Press the handle, nudge it twice
+   * by known amounts, and watch the screen: union(before, after) spans the
+   * piece's ORIGINAL left edge to its CURRENT right edge, so its width is
+   * pieceWidth + ratio x nudge. Two nudges, two widths, two unknowns — solve for
+   * both, then steer the remaining distance and re-measure. The mouse is not
+   * released until the piece is home, because on every one of these puzzles
+   * releasing IS the submit; there is no Verify button to reconsider at.
+   *
+   * Returns false if there is nothing here to drag, leaving the caller's normal
+   * no-op handling to deal with it.
+   */
+  private async executeSlide(
+    page: Page,
+    element: ElementHandle,
+    scope: Frame | ElementHandle,
+    action: DragAction,
+    elementBox: { x: number, y: number, width: number, height: number },
+  ): Promise<boolean> {
+    const targetX = ((action.target_bounding_box[0] + action.target_bounding_box[2]) / 2)
+      * elementBox.width;
+
+    const handle = await this.findControl(scope, SLIDER_HANDLE_SELECTORS);
+    if (!handle) {
+      // No track — the sliderless members of the family (Lemin's "cropped")
+      // want the piece dragged directly. Same answer from the model, because
+      // the two look identical; different gesture. Nothing to close a loop on,
+      // since the piece is under the cursor and moves with it one for one.
+      const piece = await this.findControl(scope, DRAGGABLE_PIECE_SELECTORS);
+      const box = piece ? await piece.boundingBox() : null;
+      if (!box) {
+        console.warn('Slide action, but the widget has neither a slider nor a draggable piece.');
+        return false;
+      }
+      console.log('No slider track; dragging the piece to the slot directly.');
+      await this.performSmoothMove(page, box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.waitForTimeout(Math.random() * 50 + 50);
+      await this.performSmoothMove(page, elementBox.x + targetX, box.y + box.height / 2);
+      await page.waitForTimeout(Math.random() * 50 + 50);
+      await page.mouse.up();
+      return true;
+    }
+
+    const hbox = await handle.boundingBox();
+    if (!hbox) return false;
+    const startX = hbox.x + hbox.width / 2;
+    const holdY = hbox.y + hbox.height / 2;
+
+    // Mask the whole horizontal BAND the handle runs in, not just where it is
+    // now: it is about to move across that band, and most vendors fill the
+    // track behind it as it goes. Either would otherwise be the largest moving
+    // thing in frame, and we would track the handle instead of the piece.
+    const pad = Math.max(4, hbox.height * 0.35);
+    const exclude: [number, number, number, number] = [
+      0,
+      hbox.y - elementBox.y - pad,
+      elementBox.width,
+      hbox.y + hbox.height - elementBox.y + pad,
+    ];
+
+    const shots = Array.from({ length: 4 }, (_, i) =>
+      path.join(os.tmpdir(), `slide_${Date.now()}_${i}_${Math.floor(Math.random() * 1e9)}.png`));
+    try {
+      await this.move(page, handle, { paddingPercentage: 30 });
+      await page.mouse.down();
+      await page.waitForTimeout(Math.random() * 60 + 60);
+      await element.screenshot({
+        path: shots[0],
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      });
+
+      const widths: Array<[number, number]> = [];
+      let lastBox: [number, number, number, number] | null = null;
+      for (let i = 0; i < SLIDE_PROBE_OFFSETS_PX.length; i++) {
+        const offset = SLIDE_PROBE_OFFSETS_PX[i];
+        await this.performSmoothMove(page, startX + offset, holdY);
+        await page.waitForTimeout(Math.random() * 40 + 40);
+        const box = await this.trackPiece(element, shots[0], shots[i + 1], exclude);
+        if (box) {
+          widths.push([offset, box[2] - box[0]]);
+          lastBox = box;
+        }
+      }
+
+      const { pieceWidth, ratio } = solveSlideGeometry(widths, elementBox.width);
+      if (!lastBox || pieceWidth === null) {
+        // Never saw the piece — a canvas the screenshot cannot separate, a
+        // widget that redraws wholesale, or a press the handle refused. Fall
+        // back on the geometry every one of these puzzles shares: piece and
+        // handle both start flush left, so the handle's travel is the piece's.
+        console.warn('Slider: piece never resolved on screen; steering by handle travel alone.');
+        await this.performSmoothMove(page, startX + (targetX - (startX - elementBox.x)), holdY);
+      } else {
+        // The offset lastBox was MEASURED at — not the final probe, and not
+        // indexed by how many measurements succeeded. If the first probe failed
+        // to resolve and the second worked, those two disagree, and steering
+        // from a base the reading does not belong to sends the piece somewhere
+        // neither the model nor the screen asked for.
+        let offset = widths[widths.length - 1][0];
+        for (let i = 0; i < SLIDE_MAX_CORRECTIONS; i++) {
+          const pieceCentre = lastBox[2] - pieceWidth / 2;
+          const error = targetX - pieceCentre;
+          if (Math.abs(error) <= SLIDE_TOLERANCE_PX) break;
+          offset += error / ratio;
+          await this.performSmoothMove(page, startX + offset, holdY);
+          await page.waitForTimeout(Math.random() * 40 + 40);
+          const box = await this.trackPiece(element, shots[0], shots[3], exclude);
+          if (!box) break;  // ran out of track; release where we are
+          lastBox = box;
+        }
+      }
+
+      // Settle before letting go. A release in the same tick as the last move
+      // reads as a machine, and some vendors sample the final milliseconds of
+      // the gesture.
+      await page.waitForTimeout(Math.random() * 120 + 90);
+    } finally {
+      try { await page.mouse.up(); } catch { /* the page may have navigated */ }
+      for (const shot of shots) {
+        try { if (fs.existsSync(shot)) fs.unlinkSync(shot); } catch { /* best-effort */ }
+      }
+    }
+    return true;
   }
 }
