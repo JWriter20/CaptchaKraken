@@ -31,7 +31,7 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies.
 | ✅ **hCaptcha 3×3 image grid** | Works end-to-end |
 | ✅ **hCaptcha click / drag puzzles** | Full-puzzle model → pixel click/drag actions |
 | ✅ Cloudflare Turnstile | Works via the checkbox flow |
-| ⛔ Video challenges | Skipped (detected upstream) — [on the roadmap](./roadmap.md) |
+| 🟡 **Animated / video challenges** | Driver support ships: recorded, cut into keyframes, solved as a multi-image prompt, then clicked once the widget returns to the chosen frame. Accuracy depends on the adapter — **Abyss** ([roadmap](./roadmap.md)) |
 
 Non-grid still-image puzzles — **click** ("click each …"), **drag** ("drag the
 piece into place"), path/connect, "choose the card" — route to the full-puzzle

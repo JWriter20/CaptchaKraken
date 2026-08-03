@@ -18,13 +18,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash, randomUUID } from 'crypto';
-import { CaptchaKrakenConfig, SolverResult, ClickAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
+import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 import { parseApiError } from './errors';
 import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+
+/**
+ * Centre of an [x1, y1, x2, y2] 0–1 box, as the (x, y) 0–1 point the animated
+ * wait gate compares around. The solver builds these boxes as a small square
+ * around the model's point, so the centre recovers that point exactly.
+ */
+function bboxCenter(bbox: [number, number, number, number]): [number, number] {
+  return [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+}
 
 function getBundledCliRoot(): string {
   // When installed from npm, this file is in `<pkgRoot>/dist` (compiled) or `<pkgRoot>/src` (dev).
@@ -101,11 +110,15 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 /**
  * Lifecycle state of the challenge the solver is driving. Tracked so behaviours
  * can be gated on it — in particular so we never feed a mid-transition or
- * still-loading frame to the model, and so a frame that never settles is
- * classified as an animated/video challenge rather than an unsupported one.
+ * still-loading frame to the model.
  *
  *   Detecting → Loading → Ready → Solving → Acting → Submitting → Transitioning
- *   → (Loading → …) | Solved,   with Animated as a terminal "it's a video" exit.
+ *   → (Loading → …) | Solved
+ *
+ * `Animated` used to be the terminal "it's a video, give up" exit. It no longer
+ * is: a challenge that never settles gets RECORDED and solved from keyframes, so
+ * the normal path absorbs it. The state now means only that the recording was
+ * impossible, or that `videoSolveEnabled` is off.
  */
 enum CaptchaState {
   Detecting = 'detecting',
@@ -118,6 +131,25 @@ enum CaptchaState {
   Solved = 'solved',
   Animated = 'animated',
 }
+
+/**
+ * Vendors with no checkbox/challenge split — one container, one interactive
+ * surface. Checked in detectCaptcha() after the five hard-coded reCAPTCHA /
+ * hCaptcha / Turnstile checks above, so those keep first refusal. Selectors
+ * lifted from src/captchaCollection/sources.py, which already drives these 8
+ * vendors nightly in the collector. Mirror of PYTHON_VENDOR_WIDGET_LOCATORS in
+ * page_solver.py — keep both in the same order with the same selectors.
+ */
+const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: string[] }> = [
+  { puzzleSource: 'geetest', selectors: ['.geetest_box', '.geetest_panel_box', '.geetest_popup_window', '.geetest_widget'] },
+  { puzzleSource: 'tencent', selectors: ['iframe#tcaptcha_iframe_dy', 'iframe[id*="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]'] },
+  { puzzleSource: 'yidun', selectors: ['.yidun_panel', '.yidun'] },
+  { puzzleSource: 'yandex', selectors: ['.CheckboxCaptcha'] },
+  { puzzleSource: 'lemin', selectors: ['#lemin-cropped-captcha', '.lemin-captcha-popup'] },
+  { puzzleSource: 'prosopo', selectors: ['.prosopo-modalInner', '.procaptcha-checkbox'] },
+  { puzzleSource: 'mtcaptcha', selectors: ['.mtcap'] },
+  { puzzleSource: 'botdetect', selectors: ['.BDC_CaptchaDiv'] },
+];
 
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
@@ -290,14 +322,15 @@ export class CaptchaKrakenSolver {
           page, captchaElement, attempt, retryModeThisLoop,
         ));
       } catch (e: any) {
-        // The settle monitor decided the challenge never stops moving → it's an
-        // animated / video challenge, which we can't solve. Distinct from
-        // "unsupported" (a static puzzle of the wrong type).
+        // `.animated` no longer means "the challenge moves" — moving challenges are
+        // recorded and solved from keyframes. It now means the RECORDING itself was
+        // impossible (the element refused to screenshot), or that the caller turned
+        // the path off with `videoSolveEnabled: false`. Either way there is nothing
+        // left to try.
         if (e?.animated) {
           this.setState(CaptchaState.Animated);
           throw new Error(
-            'Animated/video challenge detected — the puzzle never settles, so it '
-            + 'is almost certainly a video challenge (unsupported).'
+            `Animated challenge could not be solved: ${e.message ?? 'recording failed'}`
           );
         }
         // Stage 2: we screenshotted a settled frame and the CLI says the puzzle
@@ -309,16 +342,27 @@ export class CaptchaKrakenSolver {
           if (hasInteracted && unsupportedRetries < maxUnsupportedRetries) {
             unsupportedRetries++;
             // Almost certainly a not-yet-settled next round. Actively wait for
-            // it to settle before retrying; if it never settles it's a video.
+            // it to settle before retrying; if it never settles it's animated.
             const el = await this.detectCaptcha(page);
             if (el) {
               const s = await this.waitForElementSettled(el);
               if (s === 'animated') {
-                this.setState(CaptchaState.Animated);
-                throw new Error(
-                  'Animated/video challenge detected — the puzzle never settles '
-                  + '(likely a video challenge).'
+                // Used to be terminal. Now it just means the next round is an
+                // animated puzzle: retry the loop and solveSingle takes the
+                // recording path. `unsupportedRetries` still bounds it, so a
+                // widget that is animated AND unsolvable cannot spin here.
+                if (this.config.videoSolveEnabled === false) {
+                  this.setState(CaptchaState.Animated);
+                  throw new Error(
+                    'Animated/video challenge detected — the puzzle never settles '
+                    + 'and videoSolveEnabled is off.'
+                  );
+                }
+                console.log(
+                  '"unsupported" mid-solve and the next round is animated; '
+                  + 'retrying into the recording path.',
                 );
+                continue;
               }
             }
             console.log(
@@ -515,6 +559,7 @@ export class CaptchaKrakenSolver {
     //      transition starting) so we're past the previous round.
     //   2. Wait for the tiles to paint (DOM) AND for the pixels to stop moving
     //      (settle monitor). If it never settles, it's an animated/video puzzle.
+    let isAnimated = false;
     if (puzzleSource === 'hcaptcha' && src && src.includes('frame=challenge')) {
       if (this.lastSubmitFrameHash) {
         this.setState(CaptchaState.Transitioning);
@@ -525,13 +570,32 @@ export class CaptchaKrakenSolver {
       await this.waitForHcaptchaChallengeImages(captchaElement);
       const settle = await this.waitForElementSettled(captchaElement);
       if (settle === 'animated') {
-        const e: any = new Error(
-          'ANIMATED_CHALLENGE: the challenge never settles (likely a video/animated puzzle).',
-        );
-        e.animated = true;
-        throw e;
+        // A challenge that never settles is animated BY DESIGN — hCaptcha's
+        // "select the odd animal" fades its sprites on independent cycles, and
+        // "unique motion pattern" spins identical meshes. This used to end the
+        // solve; it now routes to the recording path below.
+        if (this.config.videoSolveEnabled === false) {
+          const e: any = new Error(
+            'ANIMATED_CHALLENGE: the challenge never settles and videoSolveEnabled is off.',
+          );
+          e.animated = true;
+          throw e;
+        }
+        console.log('[animated] challenge never settles — recording it');
+        isAnimated = true;
       }
       this.setState(CaptchaState.Ready);
+    } else if (puzzleSource === 'unknown' && this.config.videoSolveEnabled !== false) {
+      // Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle probe
+      // was never run for these, so an animated one — GeeTest's svg board cycles its
+      // glyph set — was screenshotted mid-cycle and answered from whatever single
+      // moment we happened to catch. reCAPTCHA is excluded on purpose: it has its own
+      // readiness gate below, its grids are never animated, and a second probe would
+      // only add latency to a path that already works.
+      if (await this.waitForElementSettled(captchaElement) === 'animated') {
+        console.log('[animated] challenge never settles — recording it');
+        isAnimated = true;
+      }
     }
 
     // Only the image-challenge frame (bframe) holds a grid. The anchor checkbox
@@ -595,6 +659,7 @@ export class CaptchaKrakenSolver {
 
     let performedAction = false;
     let allTokenUsage: TokenUsage[] = [];
+    let burstDir: string | null = null;
 
     try {
       // 2. Call CLI — while the model generates (the main idle window), drift
@@ -602,11 +667,18 @@ export class CaptchaKrakenSolver {
       //    instead of freezing it in place. Wrapped in the freshness guard: if
       //    the frame changes mid-inference (a tile fades in), the answer is for
       //    a stale frame, so we re-screenshot and re-solve on the developed one.
-      const response = await this.solveFrameFreshnessGuarded(
-        captchaElement, screenshotPath,
-        (imagePath) => this.withIdleWander(page, captchaElement, () =>
-          this.getSolution(imagePath, puzzleSource, retryMode)),
-      );
+      let response: CliResponse;
+      if (isAnimated) {
+        burstDir = await this.recordKeyframeBurst(captchaElement);
+        response = await this.withIdleWander(page, captchaElement, () =>
+          this.getAnimatedSolution(burstDir as string));
+      } else {
+        response = await this.solveFrameFreshnessGuarded(
+          captchaElement, screenshotPath,
+          (imagePath) => this.withIdleWander(page, captchaElement, () =>
+            this.getSolution(imagePath, puzzleSource, retryMode)),
+        );
+      }
       const actions = response.actions;
       allTokenUsage = response.token_usage;
 
@@ -638,6 +710,13 @@ export class CaptchaKrakenSolver {
           }
           if (bboxes.length) {
             for (const bbox of bboxes) {
+              // On an animated challenge, hold each click until the widget is back
+              // in the state the model answered about. Per-click, not once per
+              // action: these puzzles keep cycling, so by the time click 2 comes
+              // round the state has moved on again.
+              if (c.await_keyframe) {
+                await this.waitForKeyframe(captchaElement, c.await_keyframe, ...bboxCenter(bbox));
+              }
               await this.executeClick(page, captchaElement, { ...c, target_bounding_box: bbox } as ClickAction, elementBox);
               await delay(Math.random() * 80 + 80);
             }
@@ -647,6 +726,14 @@ export class CaptchaKrakenSolver {
           performedAction = true;
           await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
         } else if (action.action === 'drag') {
+          const d = action as DragAction;
+          // Wait on the SOURCE: the piece has to be there to be picked up. The
+          // destination is not gated — by the time the mouse arrives the animation
+          // has moved on regardless, and a drop is judged by where it lands, not by
+          // what the slot looked like on pickup.
+          if (d.await_keyframe && d.source_bounding_box) {
+            await this.waitForKeyframe(captchaElement, d.await_keyframe, ...bboxCenter(d.source_bounding_box));
+          }
           await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
           await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
@@ -693,6 +780,12 @@ export class CaptchaKrakenSolver {
       // Cleanup
       if (fs.existsSync(screenshotPath)) {
         fs.unlinkSync(screenshotPath);
+      }
+      // Only now: the wait gate re-reads the keyframe PNGs (which live inside this
+      // directory) on every poll, so removing it any earlier would break the click
+      // it is gating.
+      if (burstDir) {
+        try { fs.rmSync(burstDir, { recursive: true, force: true }); } catch { /* best-effort */ }
       }
     }
 
@@ -1000,6 +1093,15 @@ export class CaptchaKrakenSolver {
     if (cloudflareContainer && await cloudflareContainer.isVisible()) {
       const hasToken = await this.hasNonEmptyFieldValue(page, '[name="cf-turnstile-response"]');
       if (!hasToken) return cloudflareContainer;
+    }
+
+    // Vendors with one interactive surface (no checkbox/challenge split) —
+    // GeeTest, Tencent, Yidun, Yandex, Lemin, Prosopo, MTCaptcha, BotDetect.
+    for (const { selectors } of VENDOR_WIDGET_LOCATORS) {
+      for (const selector of selectors) {
+        const el = await page.$(selector);
+        if (el && await el.isVisible()) return el;
+      }
     }
 
     return null;
@@ -1841,6 +1943,176 @@ export class CaptchaKrakenSolver {
     }
 
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
+  }
+
+  /**
+   * Record the animated challenge and return the directory holding the burst.
+   *
+   * The driver owns the browser, so it does the recording; the CLI does the
+   * slicing (`solve-animated`). One zero-padded PNG per frame, because the slicer
+   * sorts by name and reads the clip's temporal structure — `frame_9.png` sorting
+   * after `frame_10.png` would shuffle the burst and turn a detectable cycle into
+   * noise.
+   *
+   * Geometry comes from config and defaults to the collector's (4s @ 10fps), so a
+   * challenge recorded here is the same shape of artifact the model trained on.
+   * The caller must remove the directory when the actions are done with — the
+   * keyframes the wait gate re-reads on every poll live inside it.
+   */
+  private async recordKeyframeBurst(captchaElement: ElementHandle): Promise<string> {
+    const fps = Math.max(1, this.config.videoBurstFps ?? 10);
+    const durationMs = this.config.videoBurstDurationMs ?? 4000;
+    const total = Math.max(1, Math.round(durationMs / (1000 / fps)));
+    const intervalMs = 1000 / fps;
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_burst_'));
+    let captured = 0;
+    for (let i = 0; i < total; i++) {
+      const started = Date.now();
+      const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`);
+      try {
+        await captchaElement.screenshot({
+          path: frame,
+          timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+          animations: 'disabled',
+        });
+        captured++;
+      } catch {
+        // A dropped frame costs a sample, not the recording.
+      }
+      // Drift-corrected: a slow screenshot must not stretch the clip, or the
+      // burst covers more wall-clock than the model trained on and a cycle's
+      // period lands differently across the frames.
+      const wait = intervalMs - (Date.now() - started);
+      if (wait > 0 && i < total - 1) await delay(wait);
+    }
+    if (!captured) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      const e: any = new Error(
+        'ANIMATED_CHALLENGE: could not record the animated challenge (no frame screenshotted).',
+      );
+      e.animated = true;
+      throw e;
+    }
+    console.log(`[animated] recorded ${captured} frames at ${fps}fps -> ${dir}`);
+    return dir;
+  }
+
+  /**
+   * Slice a recorded burst into keyframes and solve them in ONE model request.
+   *
+   * Deliberately not routed through `solveFrameFreshnessGuarded`. That guard
+   * re-solves when the frame changes during inference, and an animated challenge
+   * changes by definition — every attempt would be judged stale and the whole
+   * re-solve budget would burn without ever acting. The `frame` in the answer is
+   * the real guard: it names the state to act in, and `waitForKeyframe` enforces it.
+   *
+   * Also not deduped by screenshot hash: there is no single screenshot, and two
+   * recordings of the same widget are never byte-identical anyway.
+   */
+  private async getAnimatedSolution(framesDir: string): Promise<CliResponse> {
+    const {
+      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
+      apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
+    } = this.config;
+    const { cliRoot, py } = this.resolveCli();
+
+    const args = [
+      '-m', 'captchakraken.cli', 'solve-animated',
+      '--frames-dir', framesDir,
+      '--fps', String(this.config.videoBurstFps ?? 10),
+      '--model', model,
+    ];
+    if (apiKey) args.push('--api-key', apiKey);
+
+    try {
+      // execFile (no shell): the temp dir path is ours but still goes through
+      // literally, with no quoting hazard.
+      const { stdout, stderr } = await execFileAsync(py, args, {
+        cwd: cliRoot,
+        env: cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
+      const parsed = JSON.parse(stdout.trim());
+      console.log(
+        `[animated] ${parsed.source_frames} frames -> ${(parsed.keyframes ?? []).length} `
+        + `keyframe(s) (mode=${parsed.keyframe_mode})`,
+      );
+      return { actions: parsed.actions ?? [], token_usage: parsed.token_usage ?? [] };
+    } catch (error: any) {
+      const stderr: string = error.stderr ?? '';
+      if (/"unsupported"\s*:\s*true/.test(stderr)) {
+        const e = new Error('UNSUPPORTED_CAPTCHA: Cannot solve this animated captcha');
+        (e as any).unsupported = true;
+        throw e;
+      }
+      const apiError = parseApiError(stderr);
+      if (apiError) throw apiError;
+      console.error('Error executing CaptchaKraken solve-animated:', error);
+      throw new Error(`Failed to execute the animated captcha solver: ${error.message}`);
+    }
+  }
+
+  /**
+   * Hold until the widget looks like `keyframePath` around the 0–1 point (cx, cy).
+   *
+   * This is the reason an animated answer names a frame. The model picked the
+   * moment its target was visible, and the coordinates are only correct at that
+   * moment; clicking as soon as the answer arrives lands on whatever the sprite
+   * happens to be doing, which for a cross-fade is usually background.
+   *
+   * Only the neighbourhood of the action point is compared, with the same box and
+   * metric the training label's frame was chosen with. Local rather than
+   * whole-frame because everything ELSE in these puzzles is also moving: a
+   * whole-frame match would need every unrelated sprite to align too, and would
+   * essentially never open.
+   *
+   * Never throws. Returns whether the state was reached; on timeout the caller
+   * clicks anyway (see `keyframeWaitTimeoutMs`).
+   */
+  private async waitForKeyframe(
+    captchaElement: ElementHandle,
+    keyframePath: string,
+    cx: number,
+    cy: number,
+  ): Promise<boolean> {
+    const timeout = this.config.keyframeWaitTimeoutMs ?? 6000;
+    const interval = this.config.keyframeWaitPollMs ?? 120;
+    const deadline = Date.now() + timeout;
+    const probe = path.join(os.tmpdir(), `ck_kfwait_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
+    let best = 1;
+    try {
+      while (Date.now() < deadline) {
+        try {
+          await captchaElement.screenshot({
+            path: probe,
+            timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+            animations: 'disabled',
+          });
+          const r = await this.runCvTool(
+            'match-region',
+            { ref: keyframePath, live: probe, cx, cy },
+            ['match-region', keyframePath, probe, String(cx), String(cy)],
+          );
+          if (typeof r?.diff === 'number') best = Math.min(best, r.diff);
+          if (r?.match) {
+            console.log(`[animated] widget matched the chosen keyframe (diff=${r.diff.toFixed(4)})`);
+            return true;
+          }
+        } catch {
+          // A failed probe is one lost poll, not a failed solve.
+        }
+        await delay(interval);
+      }
+    } finally {
+      if (fs.existsSync(probe)) { try { fs.unlinkSync(probe); } catch { /* best-effort */ } }
+    }
+    console.log(
+      `[animated] widget never matched the chosen keyframe within ${timeout}ms `
+      + `(closest diff=${best.toFixed(4)}); clicking on the model's coordinates anyway`,
+    );
+    return false;
   }
 
   private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null): Promise<CliResponse> {

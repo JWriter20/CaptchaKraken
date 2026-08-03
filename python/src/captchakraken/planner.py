@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from . import config, errors
+from . import config, errors, prompts
 from .server_manager import ensure_server
 from .timing import timed
 
@@ -160,45 +160,50 @@ def routing_headers(env=None) -> Dict[str, str]:
     return headers
 
 
-# Matches the training-distribution grid prompts in
-# cleanSamples/test/test_solutions.json -> grade.synthesize_instruction.
-# Drifting from these costs measurable accuracy.
-SELECT_GRID_PROMPT = """Solve the captcha grid by choosing the cell numbers that match the description from the captcha image prompt.
+# ── Prompt constants ────────────────────────────────────────────────────────
+#
+# These are ALIASES for the newest generation's built-ins, kept so that code and
+# tests written against the old module-level constants keep working. They are
+# NOT what a solve sends. The prompt a model gets is resolved per model
+# (`prompts.resolve`), because a model answers in whatever schema its prompt
+# asks for — sending a version-1 model the version-2 prompt does not error, it
+# silently degrades every puzzle. See prompts.py and models.json.
+#
+# The text itself lives in prompts.py and nowhere else. Two copies of a prompt
+# is the drift this module already shipped once (2026-07-18).
+_LATEST = prompts.builtin(prompts.LATEST_PROMPT_VERSION)
 
-Grid: {rows}x{cols} ({total} cells)
-{grid_hint}
-
-If no tiles match the description (e.g., they have all been cleared or none were present), return an empty list for target_ids: [].
-
-Return JSON Array: [list of cell numbers (1-{total})]"""
+SELECT_GRID_PROMPT = _LATEST.grid_template
 
 
-# Non-grid click/drag puzzles. MUST stay byte-identical to
-# src/synthetic/reasoning/instructions.py::ACTION_INSTRUCTION in the finetune
-# repo — that is the exact prompt the LoRA was trained (and graded) on. Drift
-# here silently degrades every click/drag puzzle. Coordinates come back on a
-# 0–1000 scale; the solver converts them to 0–1 bboxes.
-PIXEL_ACTION_PROMPT = (
-    "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
-    "Look at the puzzle and decide what action solves it. All coordinates you return must be on a "
-    "normalized 0–1000 image scale (top-left = (0, 0), bottom-right = (1000, 1000)).\n\n"
-    "Name WHAT each object is with a short 1–2 word label, then give its position. "
-    "Choose ONE response:\n\n"
-    "FOR CLICK PUZZLES:\n"
-    "  Label each thing you click and give its point — subjects[i] names points[i]:\n"
-    "  → \"action\": \"click\", \"subjects\": [\"<label>\", ...], "
-    "\"points\": [[x1, y1], [x2, y2], ...]\n\n"
-    "FOR DRAG PUZZLES:\n"
-    "  Drag ONE item at a time. Label the source (the piece you pick up) and the destination "
-    "(where it belongs), each with a short 1–2 word label, and give both points:\n"
-    "  → \"action\": \"drag\", \"drags\": [{ \"source\": \"<label>\", \"from\": [x, y], "
-    "\"destination\": \"<label>\", \"to\": [x, y] }, ...]\n\n"
-    "Respond ONLY with JSON:\n"
-    "{\n"
-    "  \"action\": \"click\", \"subjects\": [ ... ], \"points\": [ ... ]\n"
-    "  // OR \"action\": \"drag\", \"drags\": [ ... ]\n"
-    "}"
-)
+# Non-grid click/drag puzzles, newest generation. Alias — see the note above.
+PIXEL_ACTION_PROMPT = _LATEST.action_prompt
+
+
+# Animated puzzles: the challenge is recorded, sliced into keyframes
+# (`keyframes.py`) and sent as an ORDINARY MULTI-IMAGE request — one image per
+# keyframe, all in one context so the model can compare them. The answer carries
+# a `frame` naming which keyframe it acted on, and the page driver waits for the
+# live widget to look like that frame before pressing the mouse down.
+#
+# Alias for the newest generation — see the note above. Generation 1 has NO
+# animated prompt (the family did not exist), which is why resolution is per
+# model rather than per client.
+VIDEO_ACTION_PROMPT_TEMPLATE = _LATEST.video_template
+
+
+def video_action_prompt(n_keyframes: int) -> str:
+    """The prompt for a challenge served as `n_keyframes` stills.
+
+    The count is in the text because the model has no other way to know how many
+    images arrived — frame identities live in the prompt, not in the image payload.
+    Mirrors `instructions.video_instruction` in the finetune repo exactly.
+    """
+    n = int(n_keyframes)
+    if n < 1:
+        raise ValueError(f"a keyframe request needs at least one frame, got {n_keyframes}")
+    listing = ", ".join(f"frame {i}" for i in range(1, n + 1))
+    return VIDEO_ACTION_PROMPT_TEMPLATE.format(n=n, listing=listing)
 
 
 class ActionPlanner:
@@ -220,6 +225,18 @@ class ActionPlanner:
         self.model = model or config.lora_name()
         self.base_url = base_url or config.base_url()
         self.api_key = api_key or config.api_key()
+        # Prompts follow the MODEL, not this client's release. Resolve by the
+        # served name first (a hosted endpoint serves `captcha`, not a repo id,
+        # and models.json maps the alias back), falling back to the adapter repo
+        # id for a self-hosted deploy that serves under its own name.
+        #
+        # Doing this ONCE per planner rather than per request: resolution can
+        # touch the Hub, and a per-request lookup would put a network call in
+        # front of every round of every solve.
+        self.prompts = prompts.resolve(
+            self.model if prompts.canonical_model_id(self.model)
+            else config.lora_adapter()
+        )
         # Auto-start a local vLLM server on the first request if one isn't up
         # (no-op for a healthy or remote endpoint). Guarded so we only try once.
         self._server_ensured = False
@@ -231,11 +248,31 @@ class ActionPlanner:
             self.debug_callback(f"[Planner] {message}")
 
     def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512) -> str:
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        mime, _ = guess_type(image_path)
-        if mime is None:
-            mime = "image/png"
+        return self._chat_with_images(prompt, [image_path], max_tokens=max_tokens)
+
+    def _chat_with_images(
+        self, prompt: str, image_paths: List[str], max_tokens: int = 512
+    ) -> str:
+        """One request carrying N images followed by the prompt.
+
+        The images go in ONE message, before the text, in the order given. That
+        ordering is what makes an animated challenge answerable: the model is told
+        "you are given N keyframes, in order: frame 1, frame 2, …" and matches those
+        names to the images positionally. Splitting them across requests, or putting
+        the text first, would break the correspondence between the numbers in the
+        prompt and the pictures — and the frame number is the part the page driver
+        acts on.
+        """
+        if not image_paths:
+            raise ValueError("no images to send")
+
+        parts: List[Dict[str, Any]] = []
+        for p in image_paths:
+            with open(p, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            mime, _ = guess_type(p)
+            parts.append({"type": "image_url",
+                          "image_url": {"url": f"data:{mime or 'image/png'};base64,{b64}"}})
 
         messages = [
             {
@@ -244,10 +281,7 @@ class ActionPlanner:
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                    {"type": "text", "text": prompt},
-                ],
+                "content": [*parts, {"type": "text", "text": prompt}],
             },
         ]
 
@@ -283,7 +317,8 @@ class ActionPlanner:
             self._server_ensured = True
 
         url = f"{self.base_url}/chat/completions"
-        self._log(f"POST {url} model={self.model} max_tokens={max_tokens}")
+        self._log(f"POST {url} model={self.model} max_tokens={max_tokens} "
+                  f"images={len(parts)}")
 
         with timed("planner.chat"):
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
@@ -414,8 +449,8 @@ class ActionPlanner:
         else:
             grid_hint = "Hint: Separate images. Select only clear matches."
 
-        prompt = SELECT_GRID_PROMPT.format(
-            rows=rows, cols=cols, total=total, grid_hint=grid_hint
+        prompt = self.prompts.grid_prompt(
+            rows=rows, cols=cols, grid_hint=grid_hint
         )
         if retry_mode == "missed-tiles":
             prompt = (
@@ -478,11 +513,61 @@ class ActionPlanner:
         Returns [] if the model produced nothing usable. The solver turns these
         into ClickAction / DragAction bboxes.
         """
-        raw = self._chat_with_image(PIXEL_ACTION_PROMPT, image_path, max_tokens=512)
+        raw = self._chat_with_image(self.prompts.action_prompt, image_path, max_tokens=512)
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         self._log(f"pixel actions -> {actions}")
         return actions
+
+    def get_keyframe_actions(self, keyframe_paths: List[str]) -> List[Dict[str, Any]]:
+        """Solve an ANIMATED challenge from its keyframes.
+
+        Same normalized actions as `get_pixel_actions`, each additionally carrying
+        `"frame"`: the 1-based keyframe the model chose to act on, or None if it did
+        not name a usable one.
+
+        The frame is not decoration. On these puzzles the target is only there part
+        of the time, so the coordinates are only correct while the widget looks like
+        the frame they were read off. The page driver holds the mouse until it does.
+        An action with `frame=None` is still returned — the caller decides whether to
+        click blind or give up, and dropping it here would look identical to "the
+        model had nothing to say".
+        """
+        if not keyframe_paths:
+            return []
+        # Per model, not per client: generation 1 has no animated prompt at all,
+        # so this raises a clear error there instead of sending a v1 model a
+        # keyframe request it was never trained to read.
+        prompt = self.prompts.video_prompt(len(keyframe_paths))
+        raw = self._chat_with_images(prompt, list(keyframe_paths), max_tokens=512)
+        data = self._parse_json(raw)
+        actions = self._normalize_pixel(data)
+        frame = self._normalize_frame(data, len(keyframe_paths))
+        for a in actions:
+            a["frame"] = frame
+        self._log(f"keyframe actions (frame={frame}) -> {actions}")
+        return actions
+
+    @staticmethod
+    def _normalize_frame(data: Any, n_keyframes: int) -> Optional[int]:
+        """The keyframe number the model chose, or None.
+
+        Out-of-range is treated as "did not choose" rather than clamped. Clamping a
+        7 to 6 would invent an intent the model never had, and the driver would then
+        wait for a picture the answer was not about — a slow failure that looks like
+        a flaky page. Tolerates the nested shape the model drifts into
+        ({"action": {"frame": n}}), the same way the click/drag parsing does.
+        """
+        if not isinstance(data, dict):
+            return None
+        raw = data.get("frame")
+        if raw is None and isinstance(data.get("action"), dict):
+            raw = data["action"].get("frame")
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return n if 1 <= n <= n_keyframes else None
 
     @staticmethod
     def _normalize_pixel(data: Any) -> List[Dict[str, Any]]:

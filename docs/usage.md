@@ -55,8 +55,10 @@ with sync_playwright() as p:
 Errors are typed, because they mean different things about the page:
 `NoCaptchaFoundError` (reCAPTCHA v3 / invisible — nothing to solve),
 `UnsupportedChallengeError` (a settled frame of a kind we don't handle, e.g. an
-hCaptcha click/drag puzzle), `AnimatedChallengeError` (never settles — a video
-challenge), and `CaptchaSolveError` for everything else.
+hCaptcha click/drag puzzle), `AnimatedChallengeError` (an animated challenge we
+could not RECORD — note this no longer means "the challenge moves"; a moving
+challenge is recorded and solved from keyframes), and `CaptchaSolveError` for
+everything else.
 
 Tune with `PageSolverConfig`; its fields are the snake_cased names of the
 TypeScript `CaptchaKrakenConfig` keys, so a value tuned on one driver is findable

@@ -22,6 +22,22 @@ class BoundingBox(RootModel):
 
 class Action(BaseModel):
     action: str
+    # ANIMATED CHALLENGES ONLY. Path to the keyframe the model chose to act on, and
+    # its 1-based number in the set that was sent.
+    #
+    # Why an action carries a picture: on an animated puzzle the target is only
+    # present part of the time, so these coordinates are correct only while the
+    # widget looks the way it did in that keyframe. The driver therefore holds the
+    # mouse until the live neighbourhood around the click point matches the same
+    # neighbourhood of this file, then clicks. Without it the click fires on
+    # whatever happens to be on screen, which for a fading sprite is usually
+    # background.
+    #
+    # Absent on every still puzzle, where there is no moment to wait for. Both are
+    # set together or not at all — a number with no image cannot be waited on, and
+    # an image with no number cannot be reported.
+    await_keyframe: Optional[str] = None
+    frame: Optional[int] = None
 
 
 class ClickAction(Action):

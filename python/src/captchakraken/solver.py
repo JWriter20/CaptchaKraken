@@ -10,7 +10,15 @@ Flow:
   3. Otherwise (click / drag / other still-image puzzle) → route the image to
      the full-puzzle pixel/action path (planner.get_pixel_actions), which the
      LoRA is trained on. Only raise UnsupportedCaptchaError if the model returns
-     nothing usable. Video challenges are filtered out upstream by the caller.
+     nothing usable.
+
+ANIMATED challenges take a separate entry point, `solve_keyframes`. They used to be
+detected and skipped: the settle monitor called them "never settles" and the solve
+was abandoned. Now the driver records the widget, `keyframes.py` slices the
+recording into the few stills that carry the answer, and those go to the model as
+one multi-image request. The answer comes back with a `frame`, and the driver waits
+for the page to look like that frame before it clicks — because on these puzzles
+the coordinates are only correct while the target is actually on screen.
 
 v1 had a SAM3-backed tool-using planner with detect/segment/drag-refine; it
 lives on the `v1-old-architecture` branch.
@@ -23,7 +31,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 from PIL import Image
 
@@ -178,9 +186,8 @@ class CaptchaSolver:
 
         # Not a grid or checkbox → a click/drag/pixel puzzle. The full-puzzle
         # LoRA is trained on all of these, so route the image to the pixel
-        # action path rather than bailing. (Video challenges are skipped
-        # upstream by the caller before they reach the solver, so anything here
-        # is a still-image puzzle worth attempting.)
+        # action path rather than bailing. (Animated challenges come in through
+        # `solve_keyframes` instead, so anything here is a still worth attempting.)
         actions = self._solve_pixel(cv_image_path)
         if actions:
             return actions
@@ -190,18 +197,78 @@ class CaptchaSolver:
         # instead of clicking nothing.
         raise UnsupportedCaptchaError("Cannot solve this kind of captcha")
 
+    def solve_keyframes(
+        self, keyframe_paths: Sequence[str]
+    ) -> List[Union[ClickAction, DragAction]]:
+        """Solve an ANIMATED challenge from the keyframes of a recording.
+
+        `keyframe_paths` must be in model order (frame 1 first) — the numbers the
+        answer refers to are positional, so a reordered list silently remaps the
+        answer onto the wrong picture. `keyframes.materialize_keyframes` and
+        `read_keyframe_paths` both return them correctly ordered; do not sort them
+        yourself with a plain string sort past nine frames.
+
+        Grid detection is deliberately NOT attempted. An animated challenge is never
+        a tile grid (vendors do not animate those), and `find_grid` false-positives
+        on the header/footer bands of hCaptcha's click puzzles — which is what these
+        are. Every returned action carries `await_keyframe`, the still the driver
+        must see on screen before it acts.
+        """
+        paths = [str(p) for p in keyframe_paths]
+        if not paths:
+            raise UnsupportedCaptchaError("no keyframes to solve from")
+        with Image.open(paths[0]) as im:
+            self._image_size = im.size
+        self.debug.save_image(paths[0], "00_keyframe_01.png")
+        self.debug.log(f"solving animated challenge from {len(paths)} keyframes")
+
+        actions = self._to_actions(
+            self.planner.get_keyframe_actions(paths), keyframe_paths=paths
+        )
+        if actions:
+            return actions
+        raise UnsupportedCaptchaError("Cannot solve this animated captcha")
+
     def _solve_pixel(
         self, image_path: str
     ) -> List[Union[ClickAction, DragAction]]:
         """Turn the model's normalized 0–1 click/drag actions into ClickAction /
         DragAction bboxes. Each point becomes a small box centered on it (the TS
         solver clicks the box center)."""
-        raw_actions = self.planner.get_pixel_actions(image_path)
+        return self._to_actions(self.planner.get_pixel_actions(image_path))
+
+    def _to_actions(
+        self,
+        raw_actions: List[dict],
+        keyframe_paths: Optional[Sequence[str]] = None,
+    ) -> List[Union[ClickAction, DragAction]]:
+        """Shared conversion from the planner's normalized 0–1 actions to typed
+        Click/Drag actions with small boxes around each point.
+
+        When `keyframe_paths` is given, the chosen keyframe is attached so the
+        driver knows which page state to wait for. A model answer with no usable
+        frame is still converted — it just carries no keyframe, and the driver
+        treats that as "act on the current frame". That is the honest fallback:
+        refusing the action outright would turn a good coordinate into a failed
+        solve over a missing integer.
+        """
         R = _PIXEL_BOX_HALF
         clamp = lambda v: min(max(v, 0.0), 1.0)
 
         def box(cx: float, cy: float) -> List[float]:
             return [clamp(cx - R), clamp(cy - R), clamp(cx + R), clamp(cy + R)]
+
+        def wait_for(a: dict) -> dict:
+            if not keyframe_paths:
+                return {}
+            frame = a.get("frame")
+            if not isinstance(frame, int) or not 1 <= frame <= len(keyframe_paths):
+                self.debug.log(
+                    "animated answer named no usable keyframe; acting on the "
+                    "current frame without waiting"
+                )
+                return {}
+            return {"frame": frame, "await_keyframe": str(keyframe_paths[frame - 1])}
 
         out: List[Union[ClickAction, DragAction]] = []
         for a in raw_actions:
@@ -209,7 +276,8 @@ class CaptchaSolver:
                 boxes = [box(x, y) for (x, y) in a.get("points", [])]
                 if boxes:
                     out.append(
-                        ClickAction(action="click", target_bounding_boxes=boxes)
+                        ClickAction(action="click", target_bounding_boxes=boxes,
+                                    **wait_for(a))
                     )
             elif a.get("kind") == "drag":
                 sx, sy = a["src"]
@@ -219,11 +287,15 @@ class CaptchaSolver:
                         action="drag",
                         source_bounding_box=box(sx, sy),
                         target_bounding_box=box(dx, dy),
+                        **wait_for(a),
                     )
                 )
         return out
 
-    # Back-compat alias.
+    # Back-compat alias. Kept pointing at `solve` (a single still), NOT at
+    # `solve_keyframes`: callers of this name pass one media path and expect one
+    # answer, and quietly reinterpreting that as "record and slice" would change
+    # what an old integration does. New code calls `solve_keyframes` explicitly.
     def solveVideo(self, *args, **kwargs):
         return self.solve(*args, **kwargs)
 

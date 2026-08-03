@@ -27,7 +27,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 _PINNED_MODEL_PATH = Path(__file__).with_name("pinned_model.json")
 
@@ -176,24 +176,58 @@ def api_key() -> str:
 
 
 # ── Model identity (all overridable — the CLI itself is model-agnostic) ──────
+#
+# Precedence, for every value below:
+#
+#   1. The environment. An explicit override always wins — this is how you PIN
+#      to a specific model, and pinning is opt-in by design.
+#   2. models.json's `latest` entry. The default moves forward with the
+#      registry, so "the default download" and "the default prompt" advance
+#      together and cannot get out of step: prompts.resolve() reads the SAME
+#      entry to decide which prompt generation to send.
+#   3. pinned_model.json. The record of what this release was validated
+#      against, kept as the fallback so an older checkout or a hand-edited
+#      manifest still resolves.
+#
+# Order 2-before-3 is the behaviour change: `latest` leads. Today both name
+# CaptchaKraken_v1.1, so nothing moves until a newer model is registered — at
+# which point that IS the intent.
+def _registry_default(field: str) -> Optional[str]:
+    """`field` from the registry's `latest` model entry, or None."""
+    try:
+        from . import prompts  # local: prompts imports nothing from config
+
+        entry = prompts.registered_models().get(prompts.latest_model() or "")
+        value = (entry or {}).get(field)
+        return value if isinstance(value, str) else None
+    except Exception:  # noqa: BLE001 — a broken registry falls back, never raises
+        return None
+
+
 def base_model() -> str:
-    return os.getenv("CAPTCHA_BASE_MODEL", pinned()["base_model"])
+    return os.getenv("CAPTCHA_BASE_MODEL") or _registry_default("base_model") \
+        or pinned()["base_model"]
 
 
 def lora_adapter() -> str:
     """HF repo id or local path of the captcha adapter served on top of the base."""
-    return os.getenv("CAPTCHA_LORA_ADAPTER", pinned()["lora_adapter"])
+    from . import prompts
+
+    return (os.getenv("CAPTCHA_LORA_ADAPTER") or prompts.latest_model()
+            or pinned()["lora_adapter"])
 
 
 def lora_revision() -> str:
     """Git revision of the adapter repo to serve — pinning this is what makes
     'the adapter this release was tested against' a reproducible statement."""
-    return os.getenv("CAPTCHA_LORA_REVISION", pinned()["lora_revision"])
+    return os.getenv("CAPTCHA_LORA_REVISION") or _registry_default("lora_revision") \
+        or pinned()["lora_revision"]
 
 
 def lora_name() -> str:
     """The served LoRA name the client sends as the `model` field."""
-    return os.getenv("CAPTCHA_LORA_NAME", pinned()["lora_name"])
+    return os.getenv("CAPTCHA_LORA_NAME") or _registry_default("lora_name") \
+        or pinned()["lora_name"]
 
 
 # ── Local vLLM server knobs ─────────────────────────────────────────────────
