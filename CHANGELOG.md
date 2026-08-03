@@ -6,6 +6,46 @@ semantic versioning; v2 is a major, **breaking** release.
 ## [Unreleased]
 
 ### Added
+- **Distorted-text captchas are typed, and puzzle-piece sliders are dragged.**
+  Two answer families the model was already trained to produce and the driver
+  silently threw away. `ActionPlanner._normalize_pixel` dropped both — a
+  `{"action": "type", "text": …}` answer has no coordinate for any branch to key
+  off, and the drag branch required BOTH ends, so the sourceless drag the
+  "FOR PUZZLE PIECE SLIDER PUZZLES" clause explicitly asks for parsed to
+  nothing. A perfectly correct answer became "unsupported".
+
+  **Text.** The driver decides from the DOM, not the picture: a visible text box
+  in the challenge selects the distorted-text prompt (`--text-mode` on the CLI)
+  and skips grid detection, because BotDetect's boxed glyphs are exactly the
+  lattice `find_grid` looks for. The answer is typed character by character with
+  jittered gaps, after a real pointer move and click — `fill()` would set the
+  value with no keystrokes at all, and these are the vendors that score cadence.
+  A retry clears the box first, so round 2 cannot append to round 1.
+
+  **Sliders.** Closed-loop, not a calculation. The model gives the centre of the
+  gap — all the picture can tell it — but not how far the handle must travel to
+  put the piece there, which is a ratio several vendors deliberately vary. So the
+  driver presses the handle, nudges it twice by known amounts, and watches:
+  `union(before, after)` spans the piece's original left edge to its current
+  right edge, so its width is `piece_width + ratio x nudge`. Two nudges, two
+  unknowns, solved; then it steers the remainder and re-measures. The mouse is
+  not released until the piece is home, because on every one of these puzzles
+  **releasing is the submit** — which is also why a completed slide is never
+  followed by a Verify click.
+
+  New surface: `TypeAction` (JS), a nullable `DragAction.source_bounding_box`
+  (null = slider), `TEXT_INPUT_SELECTORS` / `SLIDER_HANDLE_SELECTORS` /
+  `DRAGGABLE_PIECE_SELECTORS` (vendor-first, generic-last — the generic tail is
+  what fires on most real pages), the `slide_*` knobs on `PageSolverConfig`,
+  `tool_calls/track_piece.py`, and CLI `track-piece` (also a `serve` cmd, since
+  it runs several times per drag with the button held). `prompts.py` gained the
+  generation-2 `text` family, which the client had been missing since the
+  finetune repo defined it.
+
+  **Requires a generation-2 model.** Generation 1 — including the currently
+  served `CaptchaKraken_v1.1` — has no text prompt and no slider clause, so a v1
+  model is never asked for either answer. Text captchas now report
+  `UnsupportedCaptchaError` naming that reason rather than clicking at random.
 - **Animated challenges are solved instead of skipped.** hCaptcha's "select the
   odd animal" (sprites cross-fading on independent cycles) and "unique motion
   pattern" (identical meshes, only the rotation differs) carry none of their

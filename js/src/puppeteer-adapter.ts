@@ -57,6 +57,7 @@ interface PuppeteerElementHandle {
   scrollIntoView(): Promise<void>;
   isVisible(): Promise<boolean>;
   evaluate(pageFunction: (el: any, ...args: any[]) => any, ...args: any[]): Promise<any>;
+  $(selector: string): Promise<PuppeteerElementHandle | null>;
 }
 interface PuppeteerFrame {
   $(selector: string): Promise<PuppeteerElementHandle | null>;
@@ -68,6 +69,12 @@ interface PuppeteerPage {
     move(x: number, y: number, options?: { steps?: number }): Promise<void>;
     down(options?: any): Promise<void>;
     up(options?: any): Promise<void>;
+  };
+  keyboard: {
+    type(text: string, options?: { delay?: number }): Promise<void>;
+    press(key: string, options?: any): Promise<void>;
+    down(key: string, options?: any): Promise<void>;
+    up(key: string): Promise<void>;
   };
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   viewport(): ViewportSize | null;
@@ -99,6 +106,7 @@ function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle |
     getAttribute: (name) => h.evaluate((el: Element, n: string) => el.getAttribute(n), name),
     isVisible: () => h.isVisible(),
     textContent: () => h.evaluate((el: Element) => el.textContent),
+    $: async (selector) => wrapHandle(await h.$(selector)),
   };
 }
 
@@ -124,6 +132,19 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
       move: (x, y, options) => page.mouse.move(x, y, options),
       down: (options) => page.mouse.down(options),
       up: (options) => page.mouse.up(options),
+    },
+    keyboard: {
+      type: (text, options) => page.keyboard.type(text, options),
+      // Puppeteer has no combo syntax: 'Control+A' must be held, pressed,
+      // released. Playwright accepts the combo string directly, which is why
+      // the solver speaks Playwright and this adapter translates.
+      press: async (key) => {
+        const parts = key.split('+');
+        const target = parts.pop() as string;
+        for (const mod of parts) await page.keyboard.down(mod);
+        await page.keyboard.press(target);
+        for (const mod of parts.reverse()) await page.keyboard.up(mod);
+      },
     },
     waitForTimeout: (timeout) => new Promise<void>((resolve) => setTimeout(resolve, timeout)),
     waitForSelector: async (selector, options) =>

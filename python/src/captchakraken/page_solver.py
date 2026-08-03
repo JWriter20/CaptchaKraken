@@ -209,6 +209,20 @@ class PageSolverConfig:
     recaptcha_dynamic_fade_wait_ms: int = 6_000
     recaptcha_tile_hover_enabled: bool = True
 
+    # ── puzzle-piece sliders (see _execute_slide) ──────────────────────────
+    # How far to nudge the handle, in px, to learn the piece's width and how
+    # fast it follows. Two probes because two unknowns; far enough apart that
+    # the difference between the two widths is signal rather than rounding, and
+    # both small enough to stay on the shortest track observed (~250px).
+    slide_probe_offsets_px: Tuple[float, ...] = (24.0, 64.0)
+    # Stop steering once the piece is this close. Tighter than any vendor's
+    # accept window, so the limit on solving is the model's slot estimate.
+    slide_tolerance_px: float = 2.0
+    # Corrections after the probes. Each costs a screenshot with the mouse held
+    # down; two is enough for a linear system, and the third would only be
+    # chasing a measurement that is not going to converge.
+    slide_max_corrections: int = 2
+
 
 # Vendors with no checkbox/challenge split — one container, one interactive
 # surface. Checked in detect_captcha() after the five hard-coded reCAPTCHA /
@@ -225,6 +239,93 @@ VENDOR_WIDGET_LOCATORS = [
     {"puzzle_source": "prosopo", "selectors": [".prosopo-modalInner", ".procaptcha-checkbox"]},
     {"puzzle_source": "mtcaptcha", "selectors": [".mtcap"]},
     {"puzzle_source": "botdetect", "selectors": [".BDC_CaptchaDiv"]},
+]
+
+
+# ── where the answer goes, when it is not a click ───────────────────────────
+#
+# Both tables are ordered VENDOR-FIRST, GENERIC-LAST, and the driver takes the
+# first visible match. That order is the whole design: a named vendor selector
+# is unambiguous, while the generic patterns are guesses that happen to be right
+# most of the time. Trying the guess first would, on a page that hosts a captcha
+# *and* a login form, type the captcha's answer into the username box.
+#
+# The generic tail is not a nicety either — it is what actually fires on most
+# pages. Vendors rename these classes without notice (they are anti-bot
+# surfaces, so churn is the point), and our own Tier 3 fixtures render neither
+# vendor's DOM. Anything that only worked via the vendor list would be a feature
+# that passes review and fails in the field.
+
+# A distorted-text captcha's answer box. The three vendor entries are the three
+# types in instructions.py::TEXT_TYPES.
+TEXT_INPUT_SELECTORS = [
+    # BotDetect — the input is application-defined, so match the id fragment its
+    # own docs and samples use. These three are what the nightly collector
+    # already drives (src/captchaCollection/sources.py).
+    "input[id*=captchaCode]",
+    "input#captchaCode",
+    "input[id*=validateCaptcha]",
+    ".BDC_CaptchaDiv input[type=text]",
+    # MTCaptcha
+    "input.mtcap-inputtext",
+    ".mtcap input[type=text]",
+    # Yandex SmartCaptcha
+    ".AdvancedCaptcha-Input input",
+    "input.Textinput-Control",
+    'input[name="rep"]',
+    # Generic — an input the page itself labels as the captcha answer.
+    'input[name*="captcha" i]',
+    'input[id*="captcha" i]',
+    'input[aria-label*="captcha" i]',
+    'input[placeholder*="code" i]',
+    'input[autocomplete="off"][type=text]',
+    # Last resort: the only text box in the widget. Scoped to the challenge
+    # frame/container by the caller, never to the whole page — see _find_control.
+    "input[type=text]",
+    "input:not([type])",
+    "input[type=tel]",
+    "textarea",
+]
+
+# The handle you drag on a puzzle-piece slider. NOT the piece: on every one of
+# these vendors the piece is inert decoration that the handle carries, so a
+# drag starting on the piece moves nothing at all.
+SLIDER_HANDLE_SELECTORS = [
+    # GeeTest v3 / v4
+    ".geetest_slider_button",
+    ".geetest_btn",
+    ".geetest_slider .geetest_arrow",
+    # Tencent
+    "#tcaptcha_drag_thumb",
+    ".tc-slider-normal",
+    "[id*=slideBlock]",
+    # Yidun (NetEase)
+    ".yidun_slider",
+    ".yidun_jigsaw",
+    # Lemin
+    ".lemin-slider-handle",
+    "#lemin-cropped-captcha .slider",
+    # Generic — an ARIA slider, or a class that says handle/thumb/button on a
+    # track. `[draggable=true]` is deliberately absent: it is the HTML5
+    # drag-and-drop opt-in, which fires dragstart rather than pointermove, and
+    # no slider captcha uses it.
+    '[role="slider"]',
+    "[aria-valuenow]",
+    '[class*="slider"][class*="btn"]',
+    '[class*="slider"][class*="button"]',
+    '[class*="slide"][class*="handle"]',
+    '[class*="drag"][class*="thumb"]',
+]
+
+# Fallback for the sliderless members of the family. Lemin's "cropped" puzzle
+# has no track at all — you drag the piece itself onto the gap — and the model
+# answers it with the same sourceless drag, because from the picture the two are
+# indistinguishable. Tried only after SLIDER_HANDLE_SELECTORS finds nothing.
+DRAGGABLE_PIECE_SELECTORS = [
+    ".lemin-cropped-puzzle-piece",
+    "#lemin-cropped-captcha canvas + canvas",
+    '[class*="puzzle"][class*="piece"]',
+    '[class*="jigsaw"]',
 ]
 
 
@@ -331,7 +432,8 @@ class PageSolver:
             return None
 
     def _get_solution(
-        self, image_path: str, puzzle_source: str, retry_mode: Optional[str]
+        self, image_path: str, puzzle_source: str, retry_mode: Optional[str],
+        text_mode: bool = False,
     ) -> Tuple[List[CaptchaAction], List[Dict[str, Any]]]:
         """
         The model query. In-process where TS spawns the CLI.
@@ -343,7 +445,8 @@ class PageSolver:
         planner = self._solver.planner
         before = len(planner.token_usage)
         actions = self._solver.solve(
-            image_path, puzzle_source=puzzle_source, retry_mode=retry_mode
+            image_path, puzzle_source=puzzle_source, retry_mode=retry_mode,
+            text_mode=text_mode,
         )
         usage = [dict(u) for u in planner.token_usage[before:]]
         if not isinstance(actions, list):
@@ -577,6 +680,247 @@ class PageSolver:
         self._smooth_move(page, *dst)
         _delay(random.random() * 50 + 50)
         page.mouse.up()
+
+    # ------------------------------------------------------------------
+    # Typing and sliding
+    # ------------------------------------------------------------------
+
+    def _find_control(self, scope: Any, selectors: Sequence[str]) -> Optional[Any]:
+        """First VISIBLE match for `selectors`, tried in order.
+
+        `scope` is the challenge frame, or — for the vendors that render into
+        the host page rather than an iframe — the widget element itself. Never
+        the page: the generic tail of both selector tables would otherwise
+        happily match a login form's text box or a carousel's drag handle
+        somewhere else on the document, and the answer would go there.
+        """
+        for selector in selectors:
+            try:
+                element = scope.query_selector(selector)
+            except Exception:
+                continue  # a selector this adapter can't parse must not end the search
+            if self._visible(element):
+                return element
+        return None
+
+    def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any]) -> bool:
+        """Put the model's reading of a distorted-text captcha into its box."""
+        text = str(action.get("text") or "")
+        if not text:
+            return False
+        field = self._find_control(scope, TEXT_INPUT_SELECTORS)
+        if field is None:
+            _log("type action, but no text box in the widget; skipping")
+            return False
+
+        self._move_and_click(page, field)  # travel there, then press to focus
+        # A retry round arrives with the previous attempt still in the box, and
+        # typing would APPEND to it — submitting a string the model never read.
+        try:
+            page.keyboard.press("Control+A")
+        except Exception:
+            pass
+        # Per character rather than one `type(text, delay=…)` call: a constant
+        # inter-key delay is itself a signal, and these are the vendors that
+        # score typing cadence.
+        for ch in text:
+            try:
+                page.keyboard.type(ch)
+            except Exception as exc:
+                _log(f"could not type into the captcha field: {exc}")
+                return False
+            _delay(random.random() * 90 + 45)
+        _log(f"typed {len(text)} character(s) into the captcha field")
+        return True
+
+    def _track_piece(
+        self, element: Any, before: str, after: str, exclude: Sequence[float]
+    ) -> Optional[Sequence[int]]:
+        """`captchakraken track-piece` — box of what moved, handle masked out."""
+        from .tool_calls.track_piece import changed_bbox
+
+        try:
+            self._screenshot(element, after, timeout_ms=self.config.element_screenshot_timeout_ms)
+            return changed_bbox(before, after, exclude)
+        except Exception as exc:
+            _debug(f"track_piece failed: {exc}")
+            return None
+
+    def _execute_slide(
+        self,
+        page: Any,
+        element: Any,
+        scope: Any,
+        action: Dict[str, Any],
+        element_box: Dict[str, float],
+    ) -> bool:
+        """Drive a puzzle-piece slider until the PIECE reaches the model's slot.
+
+        The model is asked for one thing here — the centre of the gap — because
+        it is the only thing the picture can tell it. What it cannot know is how
+        far the handle must travel to put the piece there: the handle is
+        elsewhere on the widget, and the ratio between the two is a vendor
+        implementation detail that several of them deliberately vary.
+
+        So this is closed-loop, not a calculation. Press the handle, nudge it
+        twice by known amounts, and watch the screen:
+
+            union(before, after) spans the piece's ORIGINAL left edge to its
+            CURRENT right edge, so its width is  piece_width + ratio × nudge.
+
+        Two nudges, two widths, two unknowns — solve for both, then steer the
+        remaining distance and re-measure. The mouse is not released until the
+        piece is home, because on every one of these puzzles releasing IS the
+        submit; there is no Verify button to reconsider at.
+
+        Returns False if there is nothing here to drag, leaving the caller's
+        normal no-op handling to deal with it.
+        """
+        target_x = (
+            (float(action["target_bounding_box"][0]) + float(action["target_bounding_box"][2])) / 2
+        ) * element_box["width"]
+
+        handle = self._find_control(scope, SLIDER_HANDLE_SELECTORS)
+        if handle is None:
+            # No track — the sliderless members of the family (Lemin's
+            # "cropped") want the piece dragged directly. Same answer from the
+            # model, because the two look identical; different gesture. Nothing
+            # to close a loop on, since the piece is under the cursor and moves
+            # with it one for one.
+            piece = self._find_control(scope, DRAGGABLE_PIECE_SELECTORS)
+            if piece is None:
+                _log("slide action, but the widget has neither a slider nor a draggable piece")
+                return False
+            box = piece.bounding_box()
+            if not box:
+                return False
+            _log("no slider track; dragging the piece to the slot directly")
+            self._smooth_move(page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.down()
+            _delay(random.random() * 50 + 50)
+            self._smooth_move(page, element_box["x"] + target_x, box["y"] + box["height"] / 2)
+            _delay(random.random() * 50 + 50)
+            page.mouse.up()
+            return True
+
+        hbox = handle.bounding_box()
+        if not hbox:
+            return False
+        start_x = hbox["x"] + hbox["width"] / 2
+        hold_y = hbox["y"] + hbox["height"] / 2
+
+        # Mask the whole horizontal BAND the handle runs in, not just where it
+        # is now: it is about to move across that band, and most vendors fill
+        # the track behind it as it goes. Either would otherwise be the largest
+        # moving thing in frame, and we would track the handle instead of the
+        # piece.
+        pad = max(4.0, hbox["height"] * 0.35)
+        exclude = [
+            0.0,
+            hbox["y"] - element_box["y"] - pad,
+            element_box["width"],
+            hbox["y"] + hbox["height"] - element_box["y"] + pad,
+        ]
+
+        shots = [_tmp_png("slide") for _ in range(4)]
+        try:
+            self._move_to_element(page, handle, padding_percentage=30.0)
+            page.mouse.down()
+            _delay(random.random() * 60 + 60)
+            self._screenshot(element, shots[0],
+                             timeout_ms=self.config.element_screenshot_timeout_ms)
+
+            probes = self.config.slide_probe_offsets_px
+            widths: List[Tuple[float, float]] = []
+            last_box = None
+            for offset, shot in zip(probes, shots[1:]):
+                self._smooth_move(page, start_x + offset, hold_y)
+                _delay(random.random() * 40 + 40)
+                box = self._track_piece(element, shots[0], shot, exclude)
+                if box is not None:
+                    widths.append((float(offset), float(box[2] - box[0])))
+                    last_box = box
+
+            piece_w, ratio = self._solve_slide_geometry(widths, element_box["width"])
+            if last_box is None or piece_w is None:
+                # Never saw the piece — a canvas the screenshot cannot separate,
+                # a widget that redraws wholesale, or a press the handle refused.
+                # Fall back on the geometry every one of these puzzles shares:
+                # piece and handle both start flush left, so the handle's travel
+                # is the piece's travel.
+                _log("slider: piece never resolved on screen; steering by handle travel alone")
+                self._smooth_move(page, start_x + (target_x - (start_x - element_box["x"])), hold_y)
+            else:
+                # The offset `last_box` was MEASURED at — not `probes[-1]`, and
+                # not indexed by how many measurements succeeded. If the first
+                # probe failed to resolve and the second worked, those two
+                # disagree, and steering from a base the reading does not belong
+                # to sends the piece somewhere neither the model nor the screen
+                # asked for.
+                offset = float(widths[-1][0])
+                for _ in range(self.config.slide_max_corrections):
+                    piece_center = (last_box[2] - piece_w / 2.0)
+                    error = target_x - piece_center
+                    if abs(error) <= self.config.slide_tolerance_px:
+                        break
+                    offset += error / ratio
+                    self._smooth_move(page, start_x + offset, hold_y)
+                    _delay(random.random() * 40 + 40)
+                    box = self._track_piece(element, shots[0], shots[3], exclude)
+                    if box is None:
+                        break  # ran out of track; release where we are
+                    last_box = box
+                _debug(f"slider: piece_w={piece_w:.1f} ratio={ratio:.3f} "
+                       f"final_center={last_box[2] - piece_w / 2.0:.1f} target={target_x:.1f}")
+
+            # Settle before letting go. A release in the same tick as the last
+            # move reads as a machine, and some vendors sample the final
+            # milliseconds of the gesture.
+            _delay(random.random() * 120 + 90)
+        finally:
+            try:
+                page.mouse.up()
+            except Exception:
+                pass
+            for shot in shots:
+                _unlink(shot)
+        return True
+
+    @staticmethod
+    def _solve_slide_geometry(
+        widths: Sequence[Tuple[float, float]], widget_width: float
+    ) -> Tuple[Optional[float], float]:
+        """Piece width and handle-to-piece travel ratio, from probe measurements.
+
+        Each measurement is (handle offset, width of what changed), and
+        width = piece_width + ratio × offset. Two of them determine both.
+
+        With only one usable measurement the system is underdetermined, so ratio
+        is ASSUMED to be 1 — true of every vendor observed, and the assumption
+        is stated here rather than buried as a default. A ratio solved from
+        implausible measurements (a redraw, a piece that hit the wall between
+        probes) is rejected the same way: better a 1:1 guess that overshoots and
+        gets corrected than a ratio of 0.02 that sends the handle off the track.
+        """
+        if not widths:
+            return None, 1.0
+        piece_w: Optional[float] = None
+        ratio = 1.0
+        if len(widths) >= 2:
+            (o1, w1), (o2, w2) = widths[0], widths[-1]
+            if o2 != o1:
+                candidate = (w2 - w1) / (o2 - o1)
+                if 0.2 <= candidate <= 3.0:
+                    ratio = candidate
+                    piece_w = w1 - ratio * o1
+        if piece_w is None:
+            o, w = widths[-1]
+            piece_w = w - ratio * o
+        # A piece narrower than a few pixels, or wider than half the widget, is
+        # a measurement of something else.
+        if not 3.0 <= piece_w <= widget_width * 0.6:
+            return None, ratio
+        return piece_w, ratio
 
     # ------------------------------------------------------------------
     # Detection
@@ -1484,6 +1828,25 @@ class PageSolver:
         else:
             puzzle_source = "unknown"
 
+        # Everything the answer might have to be delivered INTO — a text box, a
+        # slider handle — is looked up against this, never against the page.
+        # For the iframed vendors it is the challenge document; for the ones
+        # that render into the host page (GeeTest, Yidun, BotDetect, …) it is
+        # the widget element, whose subtree is the same boundary.
+        scope = element.content_frame() or element
+
+        # Does this puzzle want a STRING rather than a place to click? Only the
+        # DOM can say. The picture cannot: BotDetect's warped code and
+        # hCaptcha's "click the matching character" are the same genre of image
+        # and want opposite answers. Restricted to `unknown` because neither
+        # hCaptcha nor reCAPTCHA has ever served a typed challenge, so a match
+        # inside one of their frames would be a false positive by definition.
+        text_mode = puzzle_source == "unknown" and self._find_control(
+            scope, TEXT_INPUT_SELECTORS
+        ) is not None
+        if text_mode:
+            _log("widget has a text box; solving as a distorted-text captcha")
+
         # hCaptcha REUSES the challenge iframe across rounds: after a submit it
         # briefly shows the previous round, then a spinner, then the next one.
         # Screenshotting any of those transitional frames feeds the model a
@@ -1526,6 +1889,7 @@ class PageSolver:
 
         shot = _tmp_png("captcha")
         performed_action = False
+        slid = False
         all_usage: List[Dict[str, Any]] = []
         keyframe_dir: Optional[str] = None
         try:
@@ -1543,7 +1907,9 @@ class PageSolver:
                 actions, all_usage = self._solve_frame_freshness_guarded(
                     element,
                     shot,
-                    lambda image_path: self._get_solution(image_path, puzzle_source, retry_mode),
+                    lambda image_path: self._get_solution(
+                        image_path, puzzle_source, retry_mode, text_mode=text_mode
+                    ),
                 )
 
             element_box = element.bounding_box()
@@ -1581,6 +1947,14 @@ class PageSolver:
                     else:
                         self._execute_click(page, action, element_box)
                     performed_action = True
+                elif kind == "drag" and not action.get("source_bounding_box"):
+                    # No source — a puzzle-piece slider. What you grab is not
+                    # what has to arrive, so this cannot go through
+                    # _execute_drag: pressing the gap the model named and
+                    # dragging from there picks up nothing at all.
+                    if self._execute_slide(page, element, scope, action, element_box):
+                        performed_action = True
+                        slid = True
                 elif kind == "drag":
                     # Wait on the SOURCE: the piece has to be there to be picked up.
                     # The destination is not gated — by the time the mouse arrives the
@@ -1593,6 +1967,9 @@ class PageSolver:
                         )
                     self._execute_drag(page, action, element_box)
                     performed_action = True
+                elif kind == "type":
+                    if self._execute_type(page, scope, action):
+                        performed_action = True
                 elif kind == "wait":
                     duration = int(action.get("duration_ms") or 0)
                     if duration > 0:
@@ -1608,8 +1985,13 @@ class PageSolver:
             #   hCaptcha        — every puzzle is one-shot; Verify submits it.
             #   reCAPTCHA 4x4   — one-shot too (never fades), so submit now.
             #   no action/done  — submit to advance.
+            #   a completed slide — ALREADY submitted. Letting go of the handle
+            #     is the gesture these puzzles grade; none of them has a Verify
+            #     button, so anything the generic finder turns up here belongs to
+            #     the host page, and pressing it would submit the form the
+            #     captcha guards while the verdict is still in flight.
             # (reCAPTCHA 3x3 never reaches here; it returned above.)
-            should_submit = (
+            should_submit = not slid and (
                 not performed_action or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
             )
             if should_submit and frame and verify_button:

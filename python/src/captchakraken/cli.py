@@ -395,6 +395,8 @@ def _handle_serve() -> bool:
       grid-cell-states        {a, b}                        -> states | {grid: null}
       grid-cell-states-fixed  {a, b, grid_boxes}            -> states
       check-movement          {a, b, threshold?}            -> {has_movement: bool}
+      match-region            {ref, live, cx, cy, ...}      -> {match, diff, ...}
+      track-piece             {before, after, exclude?}     -> {bbox, moved}
 
     Unknown cmd / malformed line -> an {ok:false} response (the process keeps
     running). EOF on stdin ends the loop cleanly. All heavy detection delegates
@@ -435,6 +437,11 @@ def _handle_serve() -> bool:
             return _match_region(req["ref"], req["live"],
                                  float(req["cx"]), float(req["cy"]),
                                  req.get("tolerance"))
+        if cmd == "track-piece":
+            # Slider closed loop: where has the piece got to? Called several
+            # times per drag WITH THE MOUSE HELD DOWN, so a process spawn per
+            # reading would stretch the drag into something no human hand does.
+            return _track_piece(req["before"], req["after"], req.get("exclude"))
         raise ValueError(f"unknown cmd: {cmd!r}")
 
     # Signal readiness so the JS side knows imports are done before it polls.
@@ -571,6 +578,36 @@ def _match_region(ref: str, live: str, cx: float, cy: float,
     box = region_box(a.shape[1::-1], (cx, cy))
     d = region_diff_ratio(a, b, box)
     return {"match": bool(d <= tol), "diff": float(d), "tolerance": tol}
+
+
+def _track_piece(before: str, after: str, exclude=None) -> dict:
+    """Where did the puzzle piece get to? See tool_calls/track_piece.py."""
+    from .tool_calls.track_piece import changed_bbox
+
+    bbox = changed_bbox(before, after, exclude)
+    return {"bbox": bbox, "moved": bbox is not None}
+
+
+def _handle_track_piece() -> bool:
+    """`captchakraken track-piece before.png after.png [exclude_json]`
+
+    `exclude_json` is `[x1, y1, x2, y2]` in pixels — the slider handle, which is
+    moving too and would otherwise be measured instead of the piece.
+
+    Also available over the persistent worker as cmd `track-piece`, which is
+    what the driver should use: this runs mid-drag, several times, with the
+    mouse button held.
+    """
+    if len(sys.argv) <= 1 or sys.argv[1] != "track-piece":
+        return False
+    if len(sys.argv) < 4:
+        print(json.dumps({
+            "error": "Usage: captchakraken track-piece before.png after.png [exclude_json]"
+        }), file=sys.stderr)
+        sys.exit(1)
+    exclude = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
+    print(json.dumps(_track_piece(sys.argv[2], sys.argv[3], exclude)))
+    return True
 
 
 def _handle_match_region() -> bool:
@@ -802,6 +839,8 @@ def main():
         return
     if _handle_match_region():
         return
+    if _handle_track_piece():
+        return
 
     parser = argparse.ArgumentParser(description="CaptchaKraken v2 (vLLM)")
     parser.add_argument("image_path", help="Path to the captcha image or video")
@@ -840,6 +879,15 @@ def main():
         "images'). Switches the grid prompt to a more aggressive variant that "
         "instructs the LoRA to look at the full grid for tiles it missed.",
     )
+    parser.add_argument(
+        "--text-mode",
+        action="store_true",
+        help="The widget has a text box, so the answer is a string to type rather "
+        "than a place to click. Sends the distorted-text prompt and skips grid "
+        "detection. Set by the Playwright wrapper from the DOM — the picture "
+        "alone does not distinguish a BotDetect code from an hCaptcha "
+        "'click the matching letter'.",
+    )
 
     args = parser.parse_args()
 
@@ -854,6 +902,7 @@ def main():
                 args.image_path,
                 puzzle_source=args.puzzle_source,
                 retry_mode=args.retry_mode,
+                text_mode=args.text_mode,
             )
 
         if isinstance(result, list):

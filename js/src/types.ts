@@ -12,12 +12,13 @@ export interface SolveStepEvent {
    * Coarse stage kind:
    *  - `initial`  : screenshot taken before any action (baseline)
    *  - `click`    : after a click (or batch of clicks) was executed
-   *  - `drag`     : after a drag was executed
+   *  - `drag`     : after a drag was executed (a slider counts as one)
+   *  - `type`     : after a distorted-text answer was typed into its box
    *  - `wait`     : after a CLI-requested wait elapsed
    *  - `submit`   : after the Verify/Next/Submit button was clicked
    *  - `round`    : a dynamic reCAPTCHA 3x3 round boundary (pre-solve snapshot)
    */
-  stage: 'initial' | 'click' | 'drag' | 'wait' | 'submit' | 'round';
+  stage: 'initial' | 'click' | 'drag' | 'type' | 'wait' | 'submit' | 'round';
   /** Short human label, e.g. "round-2:clicked 3 tile(s)". */
   label: string;
   /**
@@ -411,8 +412,21 @@ export interface ClickAction extends AnimatedActionFields {
 
 export interface DragAction extends AnimatedActionFields {
   action: 'drag';
-  source_bounding_box: [number, number, number, number];
+  /**
+   * Null on a PUZZLE-PIECE SLIDER. Not a missing field — the shape of the
+   * answer: what you grab (a handle, elsewhere on the widget) is not what has
+   * to arrive (the piece), and how far one moves the other is a vendor detail
+   * no picture reveals. The driver reads a null source as "find the slider and
+   * close the loop on the piece" (see executeSlide).
+   */
+  source_bounding_box: [number, number, number, number] | null;
   target_bounding_box: [number, number, number, number];
+}
+
+/** Distorted-text captchas: the answer is a string, not a place. */
+export interface TypeAction {
+  action: 'type';
+  text: string;
 }
 
 export interface DoneAction {
@@ -424,7 +438,7 @@ export interface WaitAction {
   duration_ms: number;
 }
 
-export type CaptchaAction = ClickAction | WaitAction | DragAction | DoneAction;
+export type CaptchaAction = ClickAction | WaitAction | DragAction | TypeAction | DoneAction;
 
 export type SolverResult = CaptchaAction | CaptchaAction[];
 
