@@ -108,6 +108,12 @@ BUILTIN_PROMPTS = {
         "text": None,
     },
     "2": {
+        # UNPUBLISHED as of 2026-08-03: no entry in models.json names generation
+        # 2, `latest` is a generation-1 model, and no training run has produced
+        # a deployable one. That is the ONLY reason its text may still move —
+        # the freeze protects models that exist, and none exists here. The
+        # moment a model registers against "2", this text is frozen with it and
+        # a change means generation 3.
         "action_pixel": (
             "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
             "Look at the puzzle and decide what action solves it. All coordinates you return must be on a "
@@ -138,8 +144,12 @@ BUILTIN_PROMPTS = {
         "grid": (
             "Solve the captcha grid by choosing the cell numbers that match the description "
             "from the captcha image prompt.\n\nGrid: {rows}x{cols} ({total} cells)\n{grid_hint}\n\n"
-            "If no tiles match the description (e.g., they have all been cleared or none were "
-            "present), return an empty list for target_ids: [].\n\n"
+            "A cell that is already selected — small checkmark badge, border or highlight — "
+            "still counts. Include it if it matches.\n\n"
+            "A cell being REPLACED does not: a large checkmark over the middle of the picture, "
+            "a picture fading to white, or a new picture fading in. That cell is on its way to "
+            "showing something else, so leave it out however well it matches.\n\n"
+            "If no cells match the description, return an empty list for target_ids: [].\n\n"
             "Return JSON Array: [list of cell numbers (1-{total})]"
         ),
         "video": (
