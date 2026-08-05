@@ -974,3 +974,137 @@ class TestSlideProbeBookkeeping:
         # whichever probe happened to be the one that resolved.
         assert abs((released_at - start_x) - 120.0) <= solver.config.slide_tolerance_px
         assert probes[0] != probes[-1], "the probes must differ or this proves nothing"
+
+
+class TestTypedAnswerIsSubmitted:
+    """A code the model read has to be SENT, not just typed.
+
+    The submit policy was:
+
+        should_submit = not slid and (
+            not performed_action or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
+        )
+
+    A distorted-text captcha is `puzzle_source == "unknown"` — that is precisely
+    how `text_mode` is detected, since neither hCaptcha nor reCAPTCHA has ever
+    served a typed challenge — and typing sets `performed_action = True`. So
+    every clause was False and Verify was never pressed. The driver read the
+    code correctly, typed it into the box, left it sitting there, and looped
+    until the overall deadline reported "captcha still detected".
+
+    BotDetect, MTCaptcha and Yandex all ship a submit button, so this affected
+    the whole family in production, not only the Tier 3 fixtures where it was
+    found.
+    """
+
+    def _run(self, actions):
+        solver = _solver()
+        page = _typing_page()
+        field = FakeElement(box={"x": 120.0, "y": 300.0, "width": 200.0, "height": 30.0})
+        verify = FakeElement(box={"x": 300.0, "y": 500.0, "width": 80.0, "height": 30.0})
+        scope = _Scope({"input[type=text]": field, ".button-submit": verify})
+        element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
+        element._frame = scope
+
+        solver._settle_or_animated = lambda _e: False            # type: ignore[method-assign]
+        solver._solve_frame_freshness_guarded = (                 # type: ignore[method-assign]
+            lambda _el, shot, fn: fn(shot))
+        solver._get_solution = lambda *_a, **_k: (actions, [])    # type: ignore[method-assign]
+
+        performed, _ = solver._solve_single(page, element, None)
+        return performed, [k for k, _, _ in page.mouse.log], page
+
+    def test_typing_is_followed_by_a_verify_click(self):
+        from captchakraken.action_types import TypeAction
+
+        performed, kinds, _ = self._run([TypeAction(action="type", text="5T63")])
+        assert performed is True
+        # One press to focus the field, one to submit it.
+        assert kinds.count("down") == 2, (
+            "the typed code was never submitted — only the field was clicked"
+        )
+
+    def test_a_click_answer_is_still_not_auto_submitted(self):
+        """The over-correction guard. Only a TYPED answer gains a submit here;
+        an ordinary click puzzle on an unknown vendor keeps its previous
+        behaviour, because those widgets fade and re-round rather than being
+        one-shot."""
+        from captchakraken.action_types import ClickAction
+
+        performed, kinds, _ = self._run(
+            [ClickAction(action="click", target_bounding_boxes=[[0.4, 0.4, 0.5, 0.5]])])
+        assert performed is True
+        assert kinds.count("down") == 1, "a click answer must not gain a Verify press"
+
+    def test_button_discovery_is_not_widened_for_every_non_iframe_puzzle(self):
+        """The scoped lookup is gated on `typed`.
+
+        Searching `scope` unconditionally would turn up the submit of the FORM a
+        host-page captcha guards and press it mid-solve — the same hazard the
+        `not slid` clause exists to avoid. A typed code is the one case where the
+        press is certainly ours to make.
+        """
+        from captchakraken.action_types import ClickAction
+
+        solver = _solver()
+        page = _typing_page()
+        verify = FakeElement(box={"x": 300.0, "y": 500.0, "width": 80.0, "height": 30.0},
+                             text="Submit")
+        element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
+        element._frame = None
+        # A host-page "Submit" sitting inside the detected container.
+        element.query_selector = lambda sel: (                  # type: ignore[method-assign]
+            verify if "button" in sel else None)
+
+        solver._settle_or_animated = lambda _e: False            # type: ignore[method-assign]
+        solver._solve_frame_freshness_guarded = (                 # type: ignore[method-assign]
+            lambda _el, shot, fn: fn(shot))
+        solver._get_solution = lambda *_a, **_k: (                # type: ignore[method-assign]
+            [ClickAction(action="click", target_bounding_boxes=[[0.4, 0.4, 0.5, 0.5]])], [])
+
+        solver._solve_single(page, element, None)
+        kinds = [k for k, _, _ in page.mouse.log]
+        assert kinds.count("down") == 1, (
+            "a click puzzle pressed a host-page Submit it had no business touching"
+        )
+
+    def test_a_widget_that_is_not_an_iframe_still_gets_its_verify_pressed(self):
+        """The Verify button was looked up ONLY inside `element.content_frame()`.
+
+        A BotDetect/MTCaptcha/Yandex widget is markup on the host page, not a
+        vendor iframe, so `content_frame()` is None, `verify_button` was never
+        even queried, and the typed code went nowhere — while `scope`
+        (`content_frame() or element`) had already found the text box one line
+        earlier. Two different containers for two halves of the same
+        interaction.
+
+        Searching `scope` rather than `page`: it is the captcha container, so a
+        stray "Submit" belonging to the form the captcha guards stays out of
+        reach.
+        """
+        from captchakraken.action_types import TypeAction
+
+        solver = _solver()
+        page = _typing_page()
+        field = FakeElement(box={"x": 120.0, "y": 300.0, "width": 200.0, "height": 30.0})
+        verify = FakeElement(box={"x": 300.0, "y": 500.0, "width": 80.0, "height": 30.0},
+                             text="Verify")
+        element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
+        # No content_frame: the widget is on the host page.
+        element._frame = None
+        element._children = {"input[type=text]": field}
+        element.query_selector = lambda sel: (                  # type: ignore[method-assign]
+            field if "input" in sel else (verify if "button" in sel else None))
+
+        solver._settle_or_animated = lambda _e: False            # type: ignore[method-assign]
+        solver._solve_frame_freshness_guarded = (                 # type: ignore[method-assign]
+            lambda _el, shot, fn: fn(shot))
+        solver._get_solution = lambda *_a, **_k: (                # type: ignore[method-assign]
+            [TypeAction(action="type", text="5T63")], [])
+
+        performed, _ = solver._solve_single(page, element, None)
+        kinds = [k for k, _, _ in page.mouse.log]
+        assert performed is True
+        assert kinds.count("down") == 2, (
+            "no Verify press on a non-iframe widget — the typed code was never sent"
+        )

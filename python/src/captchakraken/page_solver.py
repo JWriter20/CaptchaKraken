@@ -1130,13 +1130,20 @@ class PageSolver:
         return False
 
     def _get_verify_button(self, frame: Any) -> Optional[Any]:
+        # `.//` — RELATIVE. `scope` is an ElementHandle whenever the widget is
+        # markup on the host page rather than a vendor iframe (every
+        # distorted-text captcha), and a document-rooted `//button` does not
+        # resolve against an element handle: the query returned None even with
+        # the button sitting inside that very element, so a typed code was never
+        # submitted. On a Frame the context node is the document, where `.//` and
+        # `//` mean the same thing, so the vendor paths are unaffected.
         for text in ("Verify", "Next", "Submit", "Skip"):
             lowered = text.lower()
             try:
                 button = frame.query_selector(
-                    f"xpath=//button[contains(translate(., "
+                    f"xpath=.//button[contains(translate(., "
                     f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{lowered}')]"
-                    f" | //div[@role='button' and contains(translate(., "
+                    f" | .//div[@role='button' and contains(translate(., "
                     f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{lowered}')]"
                 )
                 if self._visible(button):
@@ -1890,6 +1897,7 @@ class PageSolver:
         shot = _tmp_png("captcha")
         performed_action = False
         slid = False
+        typed = False
         all_usage: List[Dict[str, Any]] = []
         keyframe_dir: Optional[str] = None
         try:
@@ -1970,6 +1978,7 @@ class PageSolver:
                 elif kind == "type":
                     if self._execute_type(page, scope, action):
                         performed_action = True
+                        typed = True
                 elif kind == "wait":
                     duration = int(action.get("duration_ms") or 0)
                     if duration > 0:
@@ -1980,10 +1989,33 @@ class PageSolver:
                     verify_button = self._get_verify_button(frame)
                     if verify_button:
                         self._move_to_element(page, verify_button)
+                elif typed:
+                    # A distorted-text widget is markup on the HOST PAGE, not a
+                    # vendor iframe, so `content_frame()` is None and the button
+                    # was never queried — while the text box it belongs to was
+                    # found through `scope` a few lines above. Two containers for
+                    # two halves of one interaction.
+                    #
+                    # Gated on `typed` rather than replacing the `frame` lookup
+                    # outright: widening button discovery for every non-iframe
+                    # puzzle could turn up the submit of the FORM the captcha
+                    # guards and press it mid-solve — the hazard the `not slid`
+                    # clause below already exists to avoid. A typed code is the
+                    # one case where the press is certainly ours to make, and the
+                    # one that is otherwise a dead end.
+                    verify_button = self._get_verify_button(scope)
+                    if verify_button:
+                        self._move_to_element(page, verify_button)
 
             # Submit policy:
             #   hCaptcha        — every puzzle is one-shot; Verify submits it.
             #   reCAPTCHA 4x4   — one-shot too (never fades), so submit now.
+            #   a TYPED code    — one-shot by nature: you type it and press the
+            #     button. Text captchas are `puzzle_source == "unknown"` (that is
+            #     how text_mode is detected — no vendor frame serves a typed
+            #     challenge), so without naming them here every clause below was
+            #     False and the code sat in the box unsent, round after round,
+            #     until the deadline reported "captcha still detected".
             #   no action/done  — submit to advance.
             #   a completed slide — ALREADY submitted. Letting go of the handle
             #     is the gesture these puzzles grade; none of them has a Verify
@@ -1992,9 +2024,10 @@ class PageSolver:
             #     captcha guards while the verdict is still in flight.
             # (reCAPTCHA 3x3 never reaches here; it returned above.)
             should_submit = not slid and (
-                not performed_action or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
+                not performed_action or typed
+                or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
             )
-            if should_submit and frame and verify_button:
+            if should_submit and verify_button:
                 _log(f"clicking Verify to submit ({puzzle_source}).")
                 self._move_and_click(page, verify_button)
                 # Snapshot at submit time so the NEXT attempt waits for the real
