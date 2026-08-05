@@ -543,5 +543,27 @@ class CaptchaSolver:
         return ClickAction(action="click", target_bounding_boxes=bboxes)
 
 
-def solve_captcha(media_path: str, instruction: str = "", **kwargs) -> Any:
-    return CaptchaSolver(**kwargs).solve(media_path, instruction)
+def solve_captcha(
+    media_path: str,
+    instruction: str = "",
+    *,
+    puzzle_source: str = "unknown",
+    retry_mode: Optional[str] = None,
+    text_mode: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Solve one captcha image. `kwargs` configure the solver; the arguments
+    named above are forwarded to `CaptchaSolver.solve`.
+
+    They are spelled out rather than left in `**kwargs` because everything in
+    `kwargs` goes to the CONSTRUCTOR. A caller passing `text_mode=True` — the
+    only way this one-shot API can say "the answer is a typed string, not a
+    place on the picture" — got `TypeError: __init__() got an unexpected keyword
+    argument`, so a static distorted-text image was unsolvable through the
+    public entry point. Only the `PageSolver` path could reach the text prompt,
+    and it decides `text_mode` from the DOM, which a bare image does not have.
+    """
+    return CaptchaSolver(**kwargs).solve(
+        media_path, instruction,
+        puzzle_source=puzzle_source, retry_mode=retry_mode, text_mode=text_mode,
+    )
