@@ -794,11 +794,20 @@ class PageSolver:
             box = piece.bounding_box()
             if not box:
                 return False
+            # BOTH axes. The rail members travel horizontally and nothing else,
+            # so the handle's own y is the only y there is — but a free drag
+            # carries the piece across the card, and holding the piece's row
+            # here slid it along the TRAY and released it there, 250 px below
+            # the slot, on every attempt.
+            target_y = (
+                (float(action["target_bounding_box"][1])
+                 + float(action["target_bounding_box"][3])) / 2
+            ) * element_box["height"]
             _log("no slider track; dragging the piece to the slot directly")
             self._smooth_move(page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
             page.mouse.down()
             _delay(random.random() * 50 + 50)
-            self._smooth_move(page, element_box["x"] + target_x, box["y"] + box["height"] / 2)
+            self._smooth_move(page, element_box["x"] + target_x, element_box["y"] + target_y)
             _delay(random.random() * 50 + 50)
             page.mouse.up()
             return True

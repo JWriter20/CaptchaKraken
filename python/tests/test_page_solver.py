@@ -1114,6 +1114,48 @@ class TestTypedAnswerIsSubmitted:
         )
 
 
+class TestSliderlessFreeDrag:
+    """Lemin's "cropped": a jigsaw with no rail, where the piece itself is
+    carried onto the photo.
+
+    The slide path handles it by dragging the draggable piece straight to the
+    model's slot — but it moved to the target's X while HOLDING THE PIECE'S OWN
+    Y, which is the tray. On a rail that is right and not even a choice: the
+    handle only travels horizontally. Here the slot is 250 px up the card, so
+    the piece slid along the tray and stopped, and every attempt submitted a
+    piece that had never left it.
+
+    Only reachable from a SOURCELESS drag, which `lemin_cropped` no longer
+    emits — but every model published before that data change still does, and
+    the shipped client has to keep working with them.
+    """
+
+    def _run(self, target_bbox):
+        piece = FakeElement(box={"x": 130.0, "y": 620.0, "width": 60.0, "height": 60.0})
+        scope = _Scope({".lemin-cropped-puzzle-piece": piece})
+        element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 600.0})
+        element._frame = scope
+
+        solver = _solver()
+        page = _typing_page()
+        ok = solver._execute_slide(
+            page, element, scope,
+            {"target_bounding_box": target_bbox, "source_bounding_box": None},
+            element.bounding_box())
+        return ok, page.mouse.log
+
+    def test_the_piece_is_carried_to_the_slot_not_along_the_tray(self):
+        # Slot at 40% across, 30% down a 400x600 widget pinned at (100, 100):
+        # x = 100 + 160 = 260, y = 100 + 180 = 280.
+        ok, log = self._run([0.375, 0.283, 0.425, 0.317])
+        assert ok is True
+        release_y = [y for kind, _, y in log if kind == "move"][-1]
+        assert abs(release_y - 280.0) < 2.0, (
+            f"released at y={release_y}: the piece was dragged along the tray "
+            f"(y≈650) instead of up to the slot (y≈280)"
+        )
+
+
 class TestInlineWidgetSubmit:
     """The answer goes into an inline widget and is never sent.
 
