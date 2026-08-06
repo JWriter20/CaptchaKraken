@@ -412,6 +412,42 @@ class CaptchaSolver:
                 f"_is_real_grid: per-cell stddev = {[round(s, 1) for s in stds]}"
             )
 
+            # A SPRITE BOARD is not a tile grid, however grid-shaped it is.
+            #
+            # GeeTest's iconcrush and gobang are lattices of sprites drawn on
+            # ONE flat board, so find_grid finds them and every cell is
+            # colourful enough (mean stddev ~52) to clear every check below.
+            # iconcrush was routed to `_solve_grid` on every capture, which
+            # asks the model to "choose the cell numbers that match the
+            # description" — the wrong question for a board you answer by
+            # tapping two tiles to swap them. Nothing errors: the reply comes
+            # back as `[3, 6, 9]`, is re-encoded as clicks on those cell
+            # centres, and is graded against a two-click gold. The type scored
+            # 0.089 that way and read as the model's weakest.
+            #
+            # The discriminator is the BACKGROUND, not the content. A real
+            # captcha grid is independent photographs, so each tile's median
+            # colour is its own; a sprite board shares one board colour behind
+            # every cell, so the medians collapse onto a single value.
+            # Measured over the real captures: iconcrush and gobang 0.0-0.8,
+            # against 14.9 (recaptcha_grid_4x4) up to 93.0 (geetest_v4_nine)
+            # for the five true grid families. The threshold sits in an 18x
+            # gap, which is why it is a fixed number rather than a tuned one.
+            medians = []
+            for (x1, y1, x2, y2) in grid_boxes:
+                roi = img[y1:y2, x1:x2]
+                if roi.size:
+                    medians.append(np.median(roi.reshape(-1, 3), axis=0))
+            if len(medians) >= 4:
+                spread = float(np.mean(np.std(np.array(medians), axis=0)))
+                self.debug.log(f"_is_real_grid: median-colour spread = {spread:.1f}")
+                if spread < 6.0:
+                    self.debug.log(
+                        f"_is_real_grid: every cell shares one background colour "
+                        f"({spread:.1f} < 6.0) → reject (sprite board, not tiles)."
+                    )
+                    return False
+
             # If the *whole* image is mostly flat (e.g. screenshotting the
             # tiny hCaptcha anchor iframe with just the "I'm not a robot"
             # text), find_grid hallucinates a 9-cell grid. Reject early.
