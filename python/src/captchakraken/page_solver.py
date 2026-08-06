@@ -2174,7 +2174,7 @@ class PageSolver:
                 did_interact, usage = self._solve_single(page, element, retry_mode_this_loop)
             except AnimatedChallengeError:
                 raise
-            except UnsupportedCaptchaError:
+            except UnsupportedCaptchaError as unsupported:
                 # A settled frame the model cannot solve is normally definitive.
                 # BUT mid-solve, a transitional blank frame produces the same
                 # verdict — that was the "solves round 1, dies on round 2" bug.
@@ -2198,10 +2198,17 @@ class PageSolver:
                         f"({unsupported_retries}/{cfg.max_unsupported_resolves})."
                     )
                     continue
+                # The solver's OWN message, not a guess about what it saw.
+                # This used to substitute "likely an hCaptcha click/drag
+                # puzzle" for every unsupported verdict, including the ones
+                # that already said exactly what was wrong — "prompt
+                # generation 1 has no distorted-text prompt", say, which names
+                # both the cause and the fix. Reporting a wrong guess in place
+                # of a right answer costs whoever reads the gate an
+                # investigation, every time.
                 raise UnsupportedChallengeError(
-                    "cannot solve this kind of captcha — the rendered puzzle is not a "
-                    "supported grid or checkbox (likely an hCaptcha click/drag puzzle)"
-                )
+                    f"cannot solve this kind of captcha — {unsupported}"
+                ) from unsupported
             except Exception as exc:
                 # A stale/detached handle after a submit is a TRANSITION, not a
                 # dead puzzle: hCaptcha swapped in the next round while we held

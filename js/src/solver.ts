@@ -468,10 +468,13 @@ export class CaptchaKrakenSolver {
             );
             continue;
           }
-          throw new Error(
-            'Cannot solve this kind of captcha — the rendered puzzle is not a '
-            + 'supported grid or checkbox (likely an hCaptcha click/drag puzzle).'
-          );
+          // The solver's OWN message, not a guess about what it saw. This
+          // used to substitute "likely an hCaptcha click/drag puzzle" for
+          // every unsupported verdict, including the ones that already said
+          // exactly what was wrong and how to fix it. A wrong guess reported
+          // in place of a right answer costs whoever reads the gate an
+          // investigation, every time.
+          throw new Error(`Cannot solve this kind of captcha — ${e?.message ?? e}`);
         }
         // Stale/detached challenge handle: hCaptcha swapped in the next round
         // while we held the old iframe, so a screenshot on it fails "not
