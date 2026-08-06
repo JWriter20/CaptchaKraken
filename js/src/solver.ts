@@ -776,6 +776,7 @@ export class CaptchaKrakenSolver {
     let performedAction = false;
     let slid = false;
     let placed = false;
+    let clicked = false;
     let typed = false;
     let allTokenUsage: TokenUsage[] = [];
     let burstDir: string | null = null;
@@ -843,6 +844,7 @@ export class CaptchaKrakenSolver {
             await this.executeClick(page, captchaElement, c, elementBox);
           }
           performedAction = true;
+          clicked = true;
           await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
         } else if (action.action === 'drag' && !(action as DragAction).source_bounding_box) {
           // No source — a puzzle-piece slider. What you grab is not what has to
@@ -901,34 +903,32 @@ export class CaptchaKrakenSolver {
         // 'done' actions intentionally fall through to the Verify-button block below.
       }
 
-      // Submit policy:
-      //   - hCaptcha: every puzzle is one-shot. Tiles don't refresh in place;
-      //     we must click Verify after our selection to submit and advance.
-      //   - reCAPTCHA 4x4: one-shot too — never blanks/fades — so submit right
-      //     after clicking. (3x3 is dynamic and never reaches this path; it's
-      //     handled by solveRecaptchaGrid above.)
-      //   - Otherwise (no action / 'done'): submit to advance.
-      //   - A TYPED code: one-shot by nature — you type it and press the
-      //     button. Text captchas are `puzzleSource === 'unknown'`, so without
-      //     naming them every clause here was false and the code sat in the box
-      //     unsent, round after round, until the deadline.
-      //   - A PLACED PIECE: one-shot too. A drag with a SOURCE drops a piece
-      //     into a hole; there is no count to reach that could auto-submit it
-      //     and no release being graded, and unlike a click round it is never
-      //     followed by a `done` — with the board unanswered the model keeps
-      //     re-answering it, nudging the piece a pixel a round until the loop
-      //     cap. That is `lemin_cropped`.
-      //   - A completed slide has ALREADY submitted. Letting go of the handle is
-      //     the gesture these puzzles grade; none of them has a Verify button,
-      //     so anything the generic finder turns up here belongs to the HOST
-      //     page, and pressing it would submit the form the captcha guards
-      //     while the verdict is still in flight.
-      //   - A CLICK round is deliberately absent: those boards re-round, and
-      //     submitting a half-made selection spends the attempt. They get their
-      //     press on the round the model answers `done`.
-      const shouldClickSubmit = !slid && (!performedAction || typed || placed
-        || puzzleSource === 'hcaptcha'
-        || isRecaptchaOneShotGrid);
+      // Submit policy: press the widget's own submit control whenever we have
+      // put an ANSWER into it — a selection, a placed piece, a typed code — or
+      // when we had nothing to do and want the round to advance.
+      //
+      // Two exclusions, and they are the whole rule:
+      //
+      //   a completed SLIDE has already submitted. Letting go of the handle is
+      //     the gesture these puzzles grade; none of them ships a Verify
+      //     button, so anything the generic finder turns up afterwards belongs
+      //     to the HOST page, and pressing it would submit the form the captcha
+      //     guards while the verdict is still in flight.
+      //   a round that only WAITED has answered nothing.
+      //
+      // hCaptcha and the reCAPTCHA 4x4 used to be named here as one-shot
+      // special cases; they are ordinary click rounds and this covers them.
+      // (reCAPTCHA 3x3 never reaches here — solveRecaptchaGrid owns its
+      // fade-and-re-round rounds.)
+      //
+      // A click round used to be excluded, on the reasoning that these boards
+      // re-round and a half-made selection spends the attempt. They do not: the
+      // ones that grade themselves mid-selection draw no submit control, so
+      // verifyButton is null and nothing is pressed either way. What the
+      // exclusion bought was an extra model call per puzzle, asking a board we
+      // had already answered correctly whether it was `done`.
+      const answered = clicked || placed || typed;
+      const shouldClickSubmit = !slid && (answered || !performedAction);
       if (shouldClickSubmit && verifyButton) {
         console.log(performedAction
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
