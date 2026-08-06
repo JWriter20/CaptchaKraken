@@ -919,8 +919,12 @@ class TestSlideSubmitPolicy:
         from captchakraken.action_types import DoneAction
 
         performed, kinds = self._run([DoneAction(action="done")])
-        assert performed is False
         assert kinds.count("down") == 1, "the Verify click"
+        # Reported as an interaction, though `done` performed no action of its
+        # own: the caller aborts any round that reports none, so returning
+        # False here would submit the puzzle and then give up on it a line
+        # later. See TestInlineWidgetSubmit.
+        assert performed is True
 
     def test_a_slide_action_constructs_at_all(self):
         """`DragAction(source_bounding_box=None)` used to raise ValidationError:
@@ -1108,3 +1112,85 @@ class TestTypedAnswerIsSubmitted:
         assert kinds.count("down") == 2, (
             "no Verify press on a non-iframe widget — the typed code was never sent"
         )
+
+
+class TestInlineWidgetSubmit:
+    """The answer goes into an inline widget and is never sent.
+
+    Eight vendors render into the HOST PAGE rather than a vendor iframe
+    (GeeTest, Yidun, Tencent, Yandex, Lemin, Prosopo, MTCaptcha, BotDetect), so
+    `element.content_frame()` is None for all of them. The Verify button was
+    looked up ONLY inside that frame, so on those widgets it was never even
+    SEARCHED FOR — the solver clicked the right tiles, or dropped the piece in
+    the right hole, and then sat there re-solving a puzzle it had already
+    answered until the loop cap or the deadline.
+
+    Measured on the Tier 3 fixtures (run 20260805-235956), it is the single
+    biggest failure class: `lemin_cropped` and `prosopo_grid_3x3` abort with
+    "performed no interactions", and eleven more types burn all ten solve
+    loops. Every one of them is an inline vendor.
+    """
+
+    def _run(self, actions, *, verify_named="Verify"):
+        """One `_solve_single` against an inline widget that draws a Verify."""
+        verify = FakeElement(box={"x": 300.0, "y": 500.0, "width": 80.0, "height": 30.0},
+                             text=verify_named)
+        element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
+        element._frame = None  # inline: markup on the host page, no iframe
+        # The widget's own button, and nothing else — `scope` is the container,
+        # so a host-page Submit is out of reach by construction.
+        element.query_selector = lambda sel: (              # type: ignore[method-assign]
+            verify if "button" in sel else None)
+
+        solver = _solver()
+        page = _typing_page()
+        solver._settle_or_animated = lambda _e: False        # type: ignore[method-assign]
+        solver._solve_frame_freshness_guarded = (             # type: ignore[method-assign]
+            lambda _el, shot, fn: fn(shot))
+        solver._get_solution = lambda *_a, **_k: (actions, [])  # type: ignore[method-assign]
+
+        performed, _ = solver._solve_single(page, element, None)
+        return performed, [k for k, _, _ in page.mouse.log]
+
+    def test_done_on_an_inline_widget_presses_verify(self):
+        """`prosopo_grid_3x3`, exactly as traced: round 1 clicks four tiles,
+        round 2 the model answers `done` because everything matching is already
+        selected — and `done` performs no action, so the outer loop's
+        "performed no interactions" guard fired and aborted a puzzle whose only
+        remaining step was to press the button."""
+        from captchakraken.action_types import DoneAction
+
+        performed, kinds = self._run([DoneAction(action="done")])
+        assert kinds.count("down") == 1, (
+            "the tiles were selected and the widget was never submitted"
+        )
+        # The press IS the interaction. Reporting False here re-arms the very
+        # guard this fixes, one loop later.
+        assert performed is True
+
+    def test_a_placed_piece_is_submitted(self):
+        """`lemin_cropped`, exactly as traced: the model drags the piece into
+        the gap and then, round after round, nudges it by a pixel — because
+        nothing ever tells the widget to grade it. A piece placement has no
+        count to reach and no release to be judged on, so unlike a click round
+        it will never be followed by a `done`."""
+        from captchakraken.action_types import DragAction
+
+        performed, kinds = self._run([DragAction(
+            action="drag",
+            source_bounding_box=[0.20, 0.83, 0.23, 0.86],
+            target_bounding_box=[0.70, 0.64, 0.73, 0.67])])
+        assert performed is True
+        # One press-drag-release for the piece, one press for Verify.
+        assert kinds.count("down") == 2, "the piece was placed and never submitted"
+
+    def test_a_click_round_is_still_not_auto_submitted(self):
+        """The counterpart guard. A click answer keeps its behaviour: these
+        boards re-round, and submitting a half-made selection spends the
+        attempt. They get their press on the `done` round above."""
+        from captchakraken.action_types import ClickAction
+
+        performed, kinds = self._run(
+            [ClickAction(action="click", target_bounding_boxes=[[0.4, 0.4, 0.5, 0.5]])])
+        assert performed is True
+        assert kinds.count("down") == 1, "a click round must not gain a Verify press"

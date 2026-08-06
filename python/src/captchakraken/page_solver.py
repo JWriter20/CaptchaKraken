@@ -1897,6 +1897,7 @@ class PageSolver:
         shot = _tmp_png("captcha")
         performed_action = False
         slid = False
+        placed = False
         typed = False
         all_usage: List[Dict[str, Any]] = []
         keyframe_dir: Optional[str] = None
@@ -1975,6 +1976,7 @@ class PageSolver:
                         )
                     self._execute_drag(page, action, element_box)
                     performed_action = True
+                    placed = True
                 elif kind == "type":
                     if self._execute_type(page, scope, action):
                         performed_action = True
@@ -1985,25 +1987,26 @@ class PageSolver:
                         _delay(duration)
                         performed_action = True
 
-                if frame:
-                    verify_button = self._get_verify_button(frame)
-                    if verify_button:
-                        self._move_to_element(page, verify_button)
-                elif typed:
-                    # A distorted-text widget is markup on the HOST PAGE, not a
-                    # vendor iframe, so `content_frame()` is None and the button
-                    # was never queried — while the text box it belongs to was
-                    # found through `scope` a few lines above. Two containers for
-                    # two halves of one interaction.
-                    #
-                    # Gated on `typed` rather than replacing the `frame` lookup
-                    # outright: widening button discovery for every non-iframe
-                    # puzzle could turn up the submit of the FORM the captcha
-                    # guards and press it mid-solve — the hazard the `not slid`
-                    # clause below already exists to avoid. A typed code is the
-                    # one case where the press is certainly ours to make, and the
-                    # one that is otherwise a dead end.
-                    verify_button = self._get_verify_button(scope)
+                # `scope` when there is no vendor iframe. Eight vendors render
+                # into the HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin,
+                # Prosopo, MTCaptcha, BotDetect — so `content_frame()` is None
+                # for all of them and the button was never even SEARCHED FOR,
+                # while the text box and the slider handle it sits beside were
+                # both found through `scope` a few lines above. Two containers
+                # for two halves of one interaction.
+                #
+                # This used to be gated on `typed`, for fear of turning up the
+                # submit of the FORM the captcha guards. `scope` is the widget
+                # container and the xpaths are RELATIVE, so that button is out
+                # of reach by construction; what the gate actually did was make
+                # every non-typed inline puzzle unsubmittable. Measured on the
+                # Tier 3 fixtures: 4 pairs aborting outright and 11 more types
+                # burning all ten solve loops on a puzzle they had answered on
+                # the first one. The press itself is still bounded by
+                # `should_submit` below, which is where the hazard belongs.
+                lookup = frame or (scope if not slid else None)
+                if lookup is not None:
+                    verify_button = self._get_verify_button(lookup)
                     if verify_button:
                         self._move_to_element(page, verify_button)
 
@@ -2017,19 +2020,37 @@ class PageSolver:
             #     False and the code sat in the box unsent, round after round,
             #     until the deadline reported "captcha still detected".
             #   no action/done  — submit to advance.
+            #   a PLACED PIECE  — one-shot by nature, like a typed code. A drag
+            #     with a SOURCE drops a piece into a hole: there is no count to
+            #     reach that could auto-submit it and no release being graded,
+            #     so nothing further will happen on its own. Nor is it ever
+            #     followed by a `done` the way a click round is — with the board
+            #     still unanswered the model keeps re-answering it, nudging the
+            #     piece a pixel a round until the loop cap. That is
+            #     `lemin_cropped`: ten loops, 95 s, and a correct placement made
+            #     on the first one.
             #   a completed slide — ALREADY submitted. Letting go of the handle
             #     is the gesture these puzzles grade; none of them has a Verify
             #     button, so anything the generic finder turns up here belongs to
             #     the host page, and pressing it would submit the form the
             #     captcha guards while the verdict is still in flight.
+            #   a CLICK round   — deliberately absent. These boards re-round,
+            #     and submitting a half-made selection spends the attempt; they
+            #     get their press on the round the model answers `done`.
             # (reCAPTCHA 3x3 never reaches here; it returned above.)
             should_submit = not slid and (
-                not performed_action or typed
+                not performed_action or typed or placed
                 or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
             )
             if should_submit and verify_button:
                 _log(f"clicking Verify to submit ({puzzle_source}).")
                 self._move_and_click(page, verify_button)
+                # The press IS an interaction, and saying so is load-bearing:
+                # the caller aborts a round that reports none, so submitting a
+                # `done` answer and then returning False re-arms the very guard
+                # this satisfies — the puzzle is sent and the solve gives up on
+                # it one line later, which is what `prosopo_grid_3x3` did.
+                performed_action = True
                 # Snapshot at submit time so the NEXT attempt waits for the real
                 # transition before treating whatever is on screen as fresh.
                 self._last_submit_frame_hash = self._element_frame_hash(element)
@@ -2204,10 +2225,31 @@ class PageSolver:
                 # definitive signal, so it cannot loop.
                 deadline = time.monotonic() * 1000.0 + cfg.post_solve_outcome_timeout_ms
                 solved = False
+                widget_gone = 0
                 while time.monotonic() * 1000.0 < deadline:
                     if self.is_captcha_solved(page):
                         solved = True
                         break
+                    # The eight inline vendors have no response token, so
+                    # `is_captcha_solved` — which reads only the hCaptcha and
+                    # reCAPTCHA anchors — can never fire for them and this loop
+                    # ran out its whole 2.5s budget on EVERY round, waiting for
+                    # a signal that cannot arrive. Measured on geetest_v4_slide:
+                    # 5.2s of a 12.3s solve, spent after the puzzle was already
+                    # answered, with the widget sitting there visibly solved.
+                    #
+                    # "The widget is gone" is the completion signal for those
+                    # vendors and is already the authority immediately after
+                    # this loop, so this only reaches the same verdict sooner —
+                    # confirmed over two polls so a frame caught mid-swap
+                    # between rounds cannot read as a solve.
+                    if self.detect_captcha(page) is None:
+                        widget_gone += 1
+                        if widget_gone >= 2:
+                            solved = True
+                            break
+                    else:
+                        widget_gone = 0
                     if self._is_challenge_freshly_rendered(page):
                         break  # next round is up; go solve it now
                     _delay(200)
