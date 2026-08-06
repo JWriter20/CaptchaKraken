@@ -11,7 +11,7 @@ import {
   PlaywrightElementHandle as ElementHandle,
   PlaywrightFrame as Frame,
 } from './playwright-types';
-import { generate_trajectory, } from 'cursory-ts';
+import { generate_trajectory } from './trajectory.js';
 import { exec, execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -775,6 +775,8 @@ export class CaptchaKrakenSolver {
 
     let performedAction = false;
     let slid = false;
+    let placed = false;
+    let typed = false;
     let allTokenUsage: TokenUsage[] = [];
     let burstDir: string | null = null;
 
@@ -862,10 +864,12 @@ export class CaptchaKrakenSolver {
           }
           await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
+          placed = true;
           await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
         } else if (action.action === 'type') {
           if (await this.executeType(page, scope, action as TypeAction)) {
             performedAction = true;
+            typed = true;
             await this.emitStep(captchaElement, 'type', 'typed the code', puzzleSource, frameRole, attempt, { action });
           }
         } else if (action.action === 'wait') {
@@ -876,8 +880,20 @@ export class CaptchaKrakenSolver {
             await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, frameRole, attempt, { action });
           }
         }
-        if (frame) {
-          verifyButton = await this.getVerifyButton(frame);
+        // `scope` when there is no vendor iframe. Eight vendors render into the
+        // HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin, Prosopo,
+        // MTCaptcha, BotDetect — so `contentFrame()` is null for all of them
+        // and the button was never even SEARCHED FOR, while the text box and
+        // the slider handle it sits beside were both found through `scope`
+        // above. Two containers for two halves of one interaction.
+        //
+        // `scope` is the widget container and getVerifyButton's xpaths are
+        // RELATIVE, so the submit of the FORM the captcha guards is out of
+        // reach by construction. The press itself is bounded by
+        // `shouldClickSubmit` below, which is where that hazard belongs.
+        const lookup = frame ?? (slid ? null : scope);
+        if (lookup) {
+          verifyButton = await this.getVerifyButton(lookup);
           if (verifyButton) {
             await this.move(page, verifyButton);
           }
@@ -892,19 +908,38 @@ export class CaptchaKrakenSolver {
       //     after clicking. (3x3 is dynamic and never reaches this path; it's
       //     handled by solveRecaptchaGrid above.)
       //   - Otherwise (no action / 'done'): submit to advance.
+      //   - A TYPED code: one-shot by nature — you type it and press the
+      //     button. Text captchas are `puzzleSource === 'unknown'`, so without
+      //     naming them every clause here was false and the code sat in the box
+      //     unsent, round after round, until the deadline.
+      //   - A PLACED PIECE: one-shot too. A drag with a SOURCE drops a piece
+      //     into a hole; there is no count to reach that could auto-submit it
+      //     and no release being graded, and unlike a click round it is never
+      //     followed by a `done` — with the board unanswered the model keeps
+      //     re-answering it, nudging the piece a pixel a round until the loop
+      //     cap. That is `lemin_cropped`.
       //   - A completed slide has ALREADY submitted. Letting go of the handle is
       //     the gesture these puzzles grade; none of them has a Verify button,
       //     so anything the generic finder turns up here belongs to the HOST
       //     page, and pressing it would submit the form the captcha guards
       //     while the verdict is still in flight.
-      const shouldClickSubmit = !slid && (!performedAction
+      //   - A CLICK round is deliberately absent: those boards re-round, and
+      //     submitting a half-made selection spends the attempt. They get their
+      //     press on the round the model answers `done`.
+      const shouldClickSubmit = !slid && (!performedAction || typed || placed
         || puzzleSource === 'hcaptcha'
         || isRecaptchaOneShotGrid);
-      if (shouldClickSubmit && frame && verifyButton) {
+      if (shouldClickSubmit && verifyButton) {
         console.log(performedAction
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
           : 'No active actions performed (empty or done). Checking for Verify/Next button...');
         await this.moveAndClick(page, verifyButton);
+        // The press IS an interaction, and saying so is load-bearing: the
+        // caller aborts a round that reports none, so submitting a `done`
+        // answer and then reporting false re-arms the very guard this
+        // satisfies — the puzzle is sent and the solve gives up on it one line
+        // later, which is what `prosopo_grid_3x3` did.
+        performedAction = true;
         await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
         // Snapshot the frame at submit time so the NEXT attempt waits for the
         // real transition (next round loading / frame closing) before treating
@@ -928,16 +963,25 @@ export class CaptchaKrakenSolver {
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
   }
 
-  private async getVerifyButton(frame: Frame): Promise<ElementHandle | null> {
+  private async getVerifyButton(frame: Frame | ElementHandle): Promise<ElementHandle | null> {
     let submitted = false;
 
     // 1. Try generic button selectors by text
+    //
+    // `.//` — RELATIVE. `frame` is an ElementHandle whenever the widget is
+    // markup on the host page rather than a vendor iframe (all eight inline
+    // vendors), and a document-rooted `//button` does not resolve against an
+    // element handle: the query returns nothing even with the button sitting
+    // inside that very element. On a Frame the context node is the document,
+    // where `.//` and `//` mean the same thing, so the vendor paths are
+    // unaffected — and scoping is the point on an element, since a
+    // document-rooted match would reach the host page's own form submit.
     const buttonTexts = ['Verify', 'Next', 'Submit', 'Skip'];
     for (const text of buttonTexts) {
       try {
         // Case-insensitive contains for text
         const btn = await frame.$(
-          `xpath=//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')] | //div[@role="button" and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`
+          `xpath=.//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')] | .//div[@role="button" and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`
         );
         if (btn && await btn.isVisible()) {
           return btn;
@@ -1179,6 +1223,24 @@ export class CaptchaKrakenSolver {
     // hCaptcha checkbox or challenge frame present (visible or not yet).
     if (await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]')) return true;
     if (await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]')) return true;
+
+    // The eight inline vendors, same table detectCaptcha uses. Without them
+    // this answered "no widget" for every GeeTest / Yidun / Yandex / Lemin /
+    // Prosopo / MTCaptcha / BotDetect / Tencent page whose puzzle had not
+    // painted yet — and the caller reads that as "reCAPTCHA v3 / invisible"
+    // and throws "No interactive captcha widget detected. Failing fast." in
+    // under a second, instead of granting the render wait this method exists
+    // to grant. The Python port has no such fail-fast, so the two ports
+    // disagreed on every inline vendor (CLAUDE.md 1c) and Tier 3 scored it as
+    // an unsolvable puzzle on the JS side only.
+    //
+    // Presence, not visibility — "in the DOM but not finished rendering" is
+    // the entire question here; detectCaptcha still does the visibility check.
+    for (const { selectors } of VENDOR_WIDGET_LOCATORS) {
+      for (const selector of selectors) {
+        if (await page.$(selector)) return true;
+      }
+    }
 
     return false;
   }
@@ -2624,7 +2686,7 @@ export class CaptchaKrakenSolver {
   /**
    * Run `fn` (typically the model query) while idly drifting the cursor over
    * the captcha, so the mouse behaves like a human weighing the options instead
-   * of freezing during inference. Uses the same cursory-ts trajectories as real
+   * of freezing during inference. Uses the same generate_trajectory paths as real
    * clicks; cancelled the instant `fn` resolves. Best-effort — any wander error
    * is swallowed and never fails the solve. Disable via config.idleMouseWander.
    */
@@ -2709,7 +2771,7 @@ export class CaptchaKrakenSolver {
   }
 
   private async performSmoothMove(page: Page, x: number, y: number) {
-    // Generate trajectory using cursory-ts with 60Hz frequency for better control
+    // 60Hz sampling; see src/trajectory.ts (first-party, replaced cursory-ts)
     const [points, timings] = generate_trajectory(
       [this.lastMousePosition.x, this.lastMousePosition.y],
       [x, y],
