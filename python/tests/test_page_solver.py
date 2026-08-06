@@ -1028,37 +1028,45 @@ class TestTypedAnswerIsSubmitted:
             "the typed code was never submitted — only the field was clicked"
         )
 
-    def test_a_click_answer_is_still_not_auto_submitted(self):
-        """The over-correction guard. Only a TYPED answer gains a submit here;
-        an ordinary click puzzle on an unknown vendor keeps its previous
-        behaviour, because those widgets fade and re-round rather than being
-        one-shot."""
+    def test_a_click_answer_is_submitted_too(self):
+        """A selection is an answer, and the widget drew a button to send it
+        with.
+
+        This used to assert the opposite, on the reasoning that these boards
+        fade and re-round rather than being one-shot. They do not — the ones
+        that grade themselves mid-selection draw no submit control at all, so
+        `verify_button` is None and nothing is pressed either way. What the
+        exclusion cost was a whole extra model call per puzzle, spent asking a
+        board we had already answered correctly whether it was `done`."""
         from captchakraken.action_types import ClickAction
 
         performed, kinds, _ = self._run(
             [ClickAction(action="click", target_bounding_boxes=[[0.4, 0.4, 0.5, 0.5]])])
         assert performed is True
-        assert kinds.count("down") == 1, "a click answer must not gain a Verify press"
+        # One press for the tile, one for Verify.
+        assert kinds.count("down") == 2, "the selection was never submitted"
 
-    def test_button_discovery_is_not_widened_for_every_non_iframe_puzzle(self):
-        """The scoped lookup is gated on `typed`.
+    def test_button_discovery_never_escapes_the_widget(self):
+        """What keeps the press ours to make.
 
-        Searching `scope` unconditionally would turn up the submit of the FORM a
-        host-page captcha guards and press it mid-solve — the same hazard the
-        `not slid` clause exists to avoid. A typed code is the one case where the
-        press is certainly ours to make.
+        The submit of the FORM a captcha guards sits on the host page, and
+        pressing it mid-solve would send that form while the verdict is still in
+        flight. Nothing about the ANSWER can rule that out — the protection is
+        that discovery is relative to `scope`, the vendor's own widget
+        container, so a button outside it is unreachable by construction. That
+        is the invariant, and it is why a click answer can now be submitted
+        without a `typed` gate in front of it.
         """
         from captchakraken.action_types import ClickAction
 
         solver = _solver()
         page = _typing_page()
-        verify = FakeElement(box={"x": 300.0, "y": 500.0, "width": 80.0, "height": 30.0},
-                             text="Submit")
+        # A host-page "Submit", on the PAGE and outside the widget.
+        page._elements["button"] = FakeElement(
+            box={"x": 600.0, "y": 700.0, "width": 80.0, "height": 30.0}, text="Submit")
         element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
         element._frame = None
-        # A host-page "Submit" sitting inside the detected container.
-        element.query_selector = lambda sel: (                  # type: ignore[method-assign]
-            verify if "button" in sel else None)
+        element.query_selector = lambda _sel: None   # type: ignore[method-assign]
 
         solver._settle_or_animated = lambda _e: False            # type: ignore[method-assign]
         solver._solve_frame_freshness_guarded = (                 # type: ignore[method-assign]
@@ -1069,7 +1077,7 @@ class TestTypedAnswerIsSubmitted:
         solver._solve_single(page, element, None)
         kinds = [k for k, _, _ in page.mouse.log]
         assert kinds.count("down") == 1, (
-            "a click puzzle pressed a host-page Submit it had no business touching"
+            "pressed a Submit that belongs to the page, not to the captcha"
         )
 
     def test_a_widget_that_is_not_an_iframe_still_gets_its_verify_pressed(self):
@@ -1226,13 +1234,15 @@ class TestInlineWidgetSubmit:
         # One press-drag-release for the piece, one press for Verify.
         assert kinds.count("down") == 2, "the piece was placed and never submitted"
 
-    def test_a_click_round_is_still_not_auto_submitted(self):
-        """The counterpart guard. A click answer keeps its behaviour: these
-        boards re-round, and submitting a half-made selection spends the
-        attempt. They get their press on the `done` round above."""
+    def test_a_click_round_is_submitted_without_waiting_for_done(self):
+        """The round that used to cost a model call.
+
+        `prosopo_grid_3x3` answered all four tiles correctly on its first call,
+        then spent 6.2 s of a 13.8 s solve on a second call whose entire content
+        was `done`, purely so the press had a round to happen on."""
         from captchakraken.action_types import ClickAction
 
         performed, kinds = self._run(
             [ClickAction(action="click", target_bounding_boxes=[[0.4, 0.4, 0.5, 0.5]])])
         assert performed is True
-        assert kinds.count("down") == 1, "a click round must not gain a Verify press"
+        assert kinds.count("down") == 2, "the selection waited for a `done` round"

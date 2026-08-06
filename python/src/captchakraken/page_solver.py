@@ -1907,6 +1907,7 @@ class PageSolver:
         performed_action = False
         slid = False
         placed = False
+        clicked = False
         typed = False
         all_usage: List[Dict[str, Any]] = []
         keyframe_dir: Optional[str] = None
@@ -1965,6 +1966,7 @@ class PageSolver:
                     else:
                         self._execute_click(page, action, element_box)
                     performed_action = True
+                    clicked = True
                 elif kind == "drag" and not action.get("source_bounding_box"):
                     # No source — a puzzle-piece slider. What you grab is not
                     # what has to arrive, so this cannot go through
@@ -2019,38 +2021,36 @@ class PageSolver:
                     if verify_button:
                         self._move_to_element(page, verify_button)
 
-            # Submit policy:
-            #   hCaptcha        — every puzzle is one-shot; Verify submits it.
-            #   reCAPTCHA 4x4   — one-shot too (never fades), so submit now.
-            #   a TYPED code    — one-shot by nature: you type it and press the
-            #     button. Text captchas are `puzzle_source == "unknown"` (that is
-            #     how text_mode is detected — no vendor frame serves a typed
-            #     challenge), so without naming them here every clause below was
-            #     False and the code sat in the box unsent, round after round,
-            #     until the deadline reported "captcha still detected".
-            #   no action/done  — submit to advance.
-            #   a PLACED PIECE  — one-shot by nature, like a typed code. A drag
-            #     with a SOURCE drops a piece into a hole: there is no count to
-            #     reach that could auto-submit it and no release being graded,
-            #     so nothing further will happen on its own. Nor is it ever
-            #     followed by a `done` the way a click round is — with the board
-            #     still unanswered the model keeps re-answering it, nudging the
-            #     piece a pixel a round until the loop cap. That is
-            #     `lemin_cropped`: ten loops, 95 s, and a correct placement made
-            #     on the first one.
-            #   a completed slide — ALREADY submitted. Letting go of the handle
-            #     is the gesture these puzzles grade; none of them has a Verify
-            #     button, so anything the generic finder turns up here belongs to
-            #     the host page, and pressing it would submit the form the
-            #     captcha guards while the verdict is still in flight.
-            #   a CLICK round   — deliberately absent. These boards re-round,
-            #     and submitting a half-made selection spends the attempt; they
-            #     get their press on the round the model answers `done`.
-            # (reCAPTCHA 3x3 never reaches here; it returned above.)
-            should_submit = not slid and (
-                not performed_action or typed or placed
-                or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
-            )
+            # Submit policy: press the widget's own submit control whenever we
+            # have put an ANSWER into it — a selection, a placed piece, a typed
+            # code — or when we had nothing to do and want the round to advance.
+            #
+            # Two exclusions, and they are the whole rule:
+            #
+            #   a completed SLIDE has already submitted. Letting go of the handle
+            #     is the gesture these puzzles grade; none of them ships a Verify
+            #     button, so anything the generic finder turns up afterwards
+            #     belongs to the host page, and pressing it would submit the form
+            #     the captcha guards while the verdict is still in flight.
+            #   a round that only WAITED has answered nothing. Submitting an
+            #     empty board spends the attempt on a puzzle we were about to
+            #     solve.
+            #
+            # hCaptcha and the reCAPTCHA 4x4 used to be named here as one-shot
+            # special cases; they are ordinary click rounds and this covers them.
+            # (reCAPTCHA 3x3 never reaches here — it returned above, to the
+            # driver that owns its fade-and-re-round rounds.)
+            #
+            # A click round DID used to be excluded, on the reasoning that these
+            # boards re-round and a half-made selection spends the attempt. They
+            # do not: the ones that grade themselves mid-selection draw no submit
+            # control at all, so `verify_button` is None and nothing is pressed
+            # either way. What the exclusion actually bought was a whole extra
+            # model call per puzzle, spent asking a board we had already answered
+            # correctly whether it was `done` — 6.2 s of prosopo_grid_3x3's 13.8 s,
+            # on a selection that scored 1.0 on the first call.
+            answered = clicked or placed or typed
+            should_submit = not slid and (answered or not performed_action)
             if should_submit and verify_button:
                 _log(f"clicking Verify to submit ({puzzle_source}).")
                 self._move_and_click(page, verify_button)
