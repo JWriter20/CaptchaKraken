@@ -5,7 +5,8 @@
  *   npm i -D camoufox-js tsx    # example-only deps
  *   npx camoufox-js fetch        # or point CAMOUFOX_BINARY at your fork binary
  *   source ../captchakraken.env  # VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY
- *   npx tsx examples/demoRecaptcha.ts
+ *   npx tsx examples/demoRecaptcha.ts                     # this demo page
+ *   npx tsx examples/demoRecaptcha.ts https://your.site/  # any URL
  */
 import { runDemo } from './_harness';
 
