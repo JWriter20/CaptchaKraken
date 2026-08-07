@@ -1058,18 +1058,35 @@ class PageSolver:
         a fresh puzzle burns ~18s re-running the pipeline on a closing frame.
         """
         try:
+            # The token FIRST, and unconditionally. It is a hidden field on the
+            # PAGE, not inside the widget, so it never needed the anchor iframe
+            # to be on screen — and the moment it matters most is precisely when
+            # the anchor is NOT on screen, because hCaptcha keeps its challenge
+            # overlay up for a couple of seconds after the winning submit.
+            # Gating this on `_visible(anchor)` meant the one signal that was
+            # already true went unread, and the loop ground on against a frame
+            # being torn down. See tests/test_solved_detection.py.
+            if self._has_non_empty_field_value(page, '[name="h-captcha-response"]'):
+                return True
+            if self._has_non_empty_field_value(page, '[name="g-recaptcha-response"]'):
+                return True
+            # Turnstile. `detect_captcha` already reads this exact field to
+            # decide a Turnstile widget is UNSOLVED, so the signal was known to
+            # one half of the driver and ignored by the other: a solved
+            # Turnstile reported unsolved here and the loop ground through the
+            # readiness waits and a wasted inference until the widget happened
+            # to disappear. Same defect the hCaptcha token had.
+            if self._has_non_empty_field_value(page, '[name="cf-turnstile-response"]'):
+                return True
+
+            # Anchor state is the fallback, and this one DOES need the iframe:
+            # it is read out of the anchor's own document.
             hc = page.query_selector('iframe[src*="hcaptcha"][src*="frame=checkbox"]')
-            if self._visible(hc):
-                if self._has_non_empty_field_value(page, '[name="h-captcha-response"]'):
-                    return True
-                if self._is_hcaptcha_anchor_checked(hc):
-                    return True
+            if self._visible(hc) and self._is_hcaptcha_anchor_checked(hc):
+                return True
             rc = page.query_selector('iframe[src*="recaptcha/api2/anchor"]')
-            if self._visible(rc):
-                if self._has_non_empty_field_value(page, '[name="g-recaptcha-response"]'):
-                    return True
-                if self._is_recaptcha_anchor_checked(rc):
-                    return True
+            if self._visible(rc) and self._is_recaptcha_anchor_checked(rc):
+                return True
         except Exception:
             pass
         return False
@@ -1083,6 +1100,18 @@ class PageSolver:
         try:
             hc = page.query_selector('iframe[src*="hcaptcha"][src*="frame=challenge"]')
             if self._visible(hc):
+                # "Prompt painted" alone does NOT mean a next round. hCaptcha
+                # leaves the round you just answered on screen while it
+                # verifies, so this fired on the CLOSING frame and broke the
+                # post-submit poll out of its solved-check after ~0ms — which
+                # then committed the solver to ~21s of readiness waits and a
+                # full inference against a frame that was about to be destroyed.
+                # The frame must have actually CHANGED since the submit; we
+                # already snapshot exactly that at submit time.
+                if self._last_submit_frame_hash:
+                    current = self._element_frame_hash(hc)
+                    if current and current == self._last_submit_frame_hash:
+                        return False
                 frame = hc.content_frame()
                 prompt = frame.query_selector(".prompt-text") if frame else None
                 if self._visible(prompt):
@@ -1875,6 +1904,14 @@ class PageSolver:
                 self._last_submit_frame_hash = None
             self._wait_for_hcaptcha_challenge_images(element)
             is_animated = self._settle_or_animated(element)
+            # Those three waits total up to ~21s and none of them watches for
+            # success, so the vendor's token routinely lands DURING them. Ask
+            # once more before spending an inference: this is the last free
+            # moment to notice the captcha is already accepted, and the
+            # inference is the single most expensive thing in the loop.
+            if self.is_captcha_solved(page):
+                _log("solved while waiting for the next round; skipping inference.")
+                return False, []
         elif puzzle_source == "unknown":
             # Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle
             # probe was never run for these, so an animated one — GeeTest's svg board
@@ -2134,6 +2171,22 @@ class PageSolver:
                     f"captcha solve timed out after {cfg.overall_solve_timeout_ms}ms "
                     f"(attempt {attempt}/{cfg.max_solve_loops})"
                 )
+
+            # Ask the DOM whether we are DONE before asking what to solve next.
+            # Only once we have interacted: before that a populated token is the
+            # "already satisfied" case handled below, and this ordering would
+            # skip the render-wait a fresh widget needs.
+            #
+            # `detect_captcha` is the expensive call — it settles pixels and
+            # screenshots the element — and after the winning submit it returns
+            # the challenge frame hCaptcha is TEARING DOWN. Solving that frame
+            # cannot succeed; it just runs until the handle goes stale, which
+            # measured 19-33s of dead time at the end of every run while the
+            # answer had already been accepted. `is_captcha_solved` is a couple
+            # of cheap DOM reads and is authoritative, so it goes first.
+            if has_interacted and self.is_captcha_solved(page):
+                _log("captcha reports solved; finishing.")
+                return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
 
             element = self.detect_captcha(page)
             if not element:

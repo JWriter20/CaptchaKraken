@@ -703,6 +703,14 @@ export class CaptchaKrakenSolver {
         console.log('[animated] challenge never settles — recording it');
         isAnimated = true;
       }
+      // Those three waits total ~21s and none of them watches for success, so
+      // the vendor's token routinely lands DURING them. Ask once more before
+      // spending an inference: last free moment to notice the captcha is
+      // already accepted, and inference is the most expensive step in the loop.
+      if (await this.isCaptchaSolved(page)) {
+        console.log('[captchakraken] solved while waiting for the next round; skipping inference.');
+        return { didInteract: false, tokenUsage: [] };
+      }
       this.setState(CaptchaState.Ready);
     } else if (puzzleSource === 'unknown' && this.config.videoSolveEnabled !== false) {
       // Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle probe
@@ -1102,14 +1110,29 @@ export class CaptchaKrakenSolver {
    */
   private async isCaptchaSolved(page: Page): Promise<boolean> {
     try {
+      // The token FIRST, and unconditionally. It is a hidden field on the PAGE,
+      // not inside the widget, so it never needed the anchor iframe to be on
+      // screen — and the moment it matters most is precisely when the anchor is
+      // NOT on screen, because hCaptcha keeps its challenge overlay up for a
+      // couple of seconds after the winning submit. Gating this on the anchor's
+      // visibility meant the one signal that was already true went unread, and
+      // the loop ground on against a frame being torn down. Mirrors the Python
+      // driver; pinned by tests/test_solved_detection.py in the finetune repo.
+      if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
+      if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
+      // Turnstile. detectCaptcha already reads this exact field to decide a
+      // Turnstile widget is UNSOLVED, so the signal was known to one half of
+      // the driver and ignored by the other. Mirrors the Python driver.
+      if (await this.hasNonEmptyFieldValue(page, '[name="cf-turnstile-response"]')) return true;
+
+      // Anchor state is the fallback, and this one DOES need the iframe: it is
+      // read out of the anchor's own document.
       const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
       if (hc && await hc.isVisible().catch(() => false)) {
-        if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
         if (await this.isHcaptchaAnchorChecked(hc)) return true;
       }
       const rc = await page.$('iframe[src*="recaptcha/api2/anchor"]');
       if (rc && await rc.isVisible().catch(() => false)) {
-        if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
         if (await this.isRecaptchaAnchorChecked(rc)) return true;
       }
     } catch { /* fall through */ }
@@ -1126,6 +1149,17 @@ export class CaptchaKrakenSolver {
     try {
       const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
       if (hc && await hc.isVisible().catch(() => false)) {
+        // "Prompt painted" alone does NOT mean a next round. hCaptcha leaves
+        // the round you just answered on screen while it verifies, so this
+        // fired on the CLOSING frame and broke the post-submit poll out of its
+        // solved-check immediately — committing the solver to ~21s of
+        // readiness waits and a full inference against a dying frame. The
+        // frame must have actually CHANGED since the submit, which we already
+        // snapshot at submit time. Mirrors the Python driver.
+        if (this.lastSubmitFrameHash) {
+          const current = await this.elementFrameHash(hc).catch(() => null);
+          if (current && current === this.lastSubmitFrameHash) return false;
+        }
         const frame = await hc.contentFrame();
         const prompt = frame && await frame.$('.prompt-text');
         if (prompt && await prompt.isVisible().catch(() => false)) {
@@ -2774,7 +2808,7 @@ export class CaptchaKrakenSolver {
   }
 
   private async performSmoothMove(page: Page, x: number, y: number) {
-    // 60Hz sampling; see src/trajectory.ts (first-party, replaced cursory-ts)
+    // 60Hz sampling; see src/trajectory.ts
     const [points, timings] = generate_trajectory(
       [this.lastMousePosition.x, this.lastMousePosition.y],
       [x, y],
