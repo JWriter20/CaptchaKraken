@@ -32,7 +32,7 @@ Where CaptchaKraken is headed. Legend: 🟢 shipped · 🟡 in progress · ⚪ p
 
 | Item | Status | Notes |
 |---|---|---|
-| 🧩 **More captcha types** | ⚪ planned | Non-grid hCaptcha puzzles: drag-and-drop, path/connect, tetris-fit, and "choose the card". |
+| 🧩 **More captcha types** | ⚪ planned | The non-grid hCaptcha puzzles still unhandled: tetris-fit and "choose the card". Click, drag and path/connect have shipped (above). |
 
 ---
 

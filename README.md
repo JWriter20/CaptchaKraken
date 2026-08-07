@@ -1,4 +1,11 @@
-<h1 align="center">🐙 CaptchaKraken</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logo-dark.svg">
+    <img src="./docs/assets/logo-light.svg" alt="CaptchaKraken" width="140" height="140">
+  </picture>
+</p>
+
+<h1 align="center">CaptchaKraken</h1>
 
 <p align="center">
   <b>A self-hosted captcha solver for browser automation.</b><br>
@@ -33,29 +40,32 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies — end to en
 | ✅ **hCaptcha 3×3 image grid** | Works end-to-end |
 | ✅ **hCaptcha click / drag puzzles** | Full-puzzle model → pixel click/drag actions |
 | ✅ Cloudflare Turnstile | Works via the checkbox flow |
+| ✅ **GeeTest** (v3 + v4) | Slide, icon, nine, svg. `gobang` and `iconcrush` are weak — see below |
+| ✅ **NetEase Yidun** | Jigsaw, picture-click, icon-click |
+| ✅ **Lemin, Prosopo, Tencent** | Cropped-image, grid, and slide flows |
+| ✅ **Distorted text** | BotDetect, MTCaptcha, Yandex — read and typed, not clicked |
 | ⛔ Video challenges | **Abyss** only — the open weights skip them ([roadmap](./docs/roadmap.md)) |
+
+The non-Google/hCaptcha vendors are driven end-to-end in CI against generated
+fixtures in **both** ports. Per-vendor accuracy varies more than the headline
+grids do; `geetest_v4_gobang` and `geetest_v4_iconcrush` are the two that
+currently fail to drive to completion, and are best treated as experimental.
 
 ### Accuracy, measured
 
-Measured **2026-07-27** against the deployed `CaptchaKraken_v1.1` adapter, over
-the full customer path — HTTPS → gateway → vLLM — rather than against a local
-checkpoint. Exact set match: every correct tile and no incorrect ones, no
-partial credit, because a partially-correct grid answer is a rejected captcha.
+> 🔬 **Being re-measured.** The figures previously published here were taken on
+> 2026-07-27 under an eval split that let some hand-labeled captures reach
+> training, so they measured memorisation as well as skill. That split was
+> replaced — **every** real capture is now held out and nothing hand-labeled
+> trains — and the numbers are being re-taken against the new held-out set on
+> the next full training run. Rather than restate figures we no longer stand
+> behind, this section is blank until that lands.
 
-Test images that also appear in a labeled-train augment pool are **excluded**
-(878 of them, including 313 reCAPTCHA 4×4), the same exclusion `grade.py`
-applies — so these are puzzles the adapter has not been trained on.
-
-| Challenge | n | Exact match | 95% CI |
-|---|---:|---:|---:|
-| reCAPTCHA 4×4 | 100 | **97.0%** | 91.5–99.0% |
-| reCAPTCHA 3×3 | 100 | **96.0%** | 90.2–98.4% |
-| hCaptcha 3×3 property | 100 | **94.0%** | 87.5–97.2% |
-| **Overall** | **300** | **95.7%** | **92.7–97.5%** |
-
-Median latency 1.36 s end to end including the network (p10 0.84 s, p90
-1.76 s), median prompt 341 tokens. Of the 13 failures, 5 differ from the
-ground truth by exactly one tile.
+What the measurement will be, so you can hold us to it: exact set match — every
+correct tile and no incorrect ones, no partial credit, because a
+partially-correct grid answer is a rejected captcha — taken over the full
+customer path (HTTPS → gateway → vLLM) rather than a local checkpoint, against
+captures the adapter has never trained on.
 
 > **Grids are sent with the cell numbers drawn on.** `solver.py` runs
 > `find_grid`, renders `get_numbered_grid_overlay` (red labels, top-right, all
@@ -204,14 +214,21 @@ difference between the two rows. Neither figure is a benchmark; they are proof
 the path works. See
 [Rate limiting & IP reputation](./docs/performance.md#rate-limiting--ip-reputation).
 
-Reproduce either with the live-solve harness:
+Reproduce it yourself — the demos in this repo drive a real browser end to end:
 
 ```bash
-cd tests/live-solve                       # in the CaptchaKrakenFinetune repo
-VLLM_BASE_URL=https://api.captchakraken.com/v1 \
-VLLM_API_KEY=ck_live_… \
-TARGET=recaptcha TRIALS=3 npm run solve
+cd js
+npm install && npm i -D camoufox-js tsx   # example-only deps
+npx camoufox-js fetch                     # one-time browser download
+source ../captchakraken.env               # written by ./setup.sh
+
+npx tsx examples/demoRecaptcha.ts                      # the demo page above
+npx tsx examples/demoRecaptcha.ts https://your.site/   # or your own page
 ```
+
+Add `--headed` to watch it happen in a visible window. The Python engine ships
+the same two demos — `cd python && python examples/demoRecaptcha.py` — and both
+take the same arguments.
 
 ---
 

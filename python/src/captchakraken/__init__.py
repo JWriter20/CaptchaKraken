@@ -9,8 +9,7 @@ Usage:
 
 Model/endpoint defaults live in `captchakraken.config` and are fully
 env-overridable (VLLM_BASE_URL, CAPTCHA_LORA_ADAPTER, …); the solver itself is
-model-agnostic. The legacy v1 stack (SAM3 grounding, multi-provider planner,
-detect/segment/drag-refine) lives on the `v1-old-architecture` branch.
+model-agnostic.
 """
 
 from pathlib import Path
