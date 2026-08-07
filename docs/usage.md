@@ -210,8 +210,7 @@ npm install        # builds the solver + a local CLI venv (postinstall)
   instead of provider API keys.
 - `new CaptchaKrakenSolver()` now needs no model/provider — it defaults to the
   grid LoRA.
-- v1's `transformers` / `torch` / SAM3 dependencies are gone from the solver venv;
-  they live on the `v1-old-architecture` branch if you need them.
+- v1's `transformers` / `torch` / SAM3 dependencies are gone from the solver venv.
 
 ---
 
