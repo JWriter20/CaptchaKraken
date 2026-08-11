@@ -8,7 +8,9 @@ planner with detect/segment/drag-refine; that code is preserved on the
 """
 
 import base64
+import io
 import json
+import math
 import os
 import re
 import sys
@@ -16,12 +18,60 @@ from mimetypes import guess_type
 from typing import Any, Dict, List, Optional
 
 import requests
+from PIL import Image
 
 from . import config, errors, prompts
 from .server_manager import ensure_server
 from .timing import timed
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+# The pixel floor the adapters are TRAINED at, and therefore the floor an image
+# has to clear before it is worth sending.
+#
+# Training exports `MIN_PIXELS=200704` (448², in the finetune repo's
+# scripts/train_unified.sh), so anything smaller is enlarged before the vision
+# encoder sees it. Serving did none of that: vLLM runs with no
+# `--mm-processor-kwargs` and this client used to re-encode the file unchanged,
+# so a small captcha arrived at a geometry the model was never tuned on. It
+# fails as plausible-but-wrong coordinates, never as an error — measured on real
+# geetest_v3_slide captures (277x285), predictions landed 80-105 px from the
+# hand label at native size and 1-4 px away once upscaled.
+#
+# A FLOOR, NOT A RESIZE. Images already above it are passed through byte-for-byte;
+# re-encoding every screenshot would spend time and fidelity on the types that
+# were never affected.
+#
+# Unconditional rather than keyed to the model generation, because the deployed
+# v1.1 adapter improves under it too (mean error ~40 px native vs ~4 px upscaled)
+# — unlike prompts, this is not a per-generation contract.
+MIN_PIXELS = 448 * 448
+
+
+def _encode_image(path: str) -> tuple:
+    """`(mime, base64)` for one image, enlarged to MIN_PIXELS if it is smaller.
+
+    Anything Pillow cannot open is passed through untouched — this is a
+    preprocessing nicety, and it must never be the reason a solve fails.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    mime = guess_type(path)[0] or "image/png"
+    try:
+        im = Image.open(io.BytesIO(raw))
+        width, height = im.size
+    except Exception:  # noqa: BLE001 — unreadable/animated: send it as-is
+        return mime, base64.b64encode(raw).decode()
+    if width * height >= MIN_PIXELS:
+        return mime, base64.b64encode(raw).decode()
+    # ceil, not round: rounding both sides down lands just under the floor
+    # (442x454 = 200,668 for a 277x285 capture) and defeats the whole point.
+    scale = math.sqrt(MIN_PIXELS / (width * height))
+    im = im.convert("RGB").resize(
+        (math.ceil(width * scale), math.ceil(height * scale)), Image.BICUBIC)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return "image/png", base64.b64encode(buf.getvalue()).decode()
 
 # Header the fleet's haproxy front (on the reverse-proxy EC2) routes on. When a
 # caller sets CAPTCHA_REQUEST_PRIORITY to a positive int, every request carries
@@ -268,11 +318,9 @@ class ActionPlanner:
 
         parts: List[Dict[str, Any]] = []
         for p in image_paths:
-            with open(p, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            mime, _ = guess_type(p)
+            mime, b64 = _encode_image(p)
             parts.append({"type": "image_url",
-                          "image_url": {"url": f"data:{mime or 'image/png'};base64,{b64}"}})
+                          "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
         messages = [
             {
