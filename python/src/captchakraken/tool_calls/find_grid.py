@@ -1158,8 +1158,29 @@ def _pick(group):
     becomes the cluster's max (its real length), and we record the cluster size."""
     best = max(group, key=lambda l: l.support)
     wsum = sum(l.support for l in group)
-    best.midline_pos = sum(l.midline_pos * l.support for l in group) / wsum
+    centre = sum(l.midline_pos * l.support for l in group) / wsum
+    # COLOUR comes from the member sitting on that centre, not from the longest
+    # one. The two are routinely different members: a gutter is seeded from each
+    # of its rows, and the longest trace is often the one seeded at its EDGE,
+    # which then runs along tile content rather than the separator. Measured on
+    # hcaptcha_images_ice_cream4: the kept trace sat 11 px off the gutter, on a
+    # pale watermark that exists at some x and not others, and carried
+    # color_std 2.80 while the on-centre traces of the same gutter measured
+    # 0.55-0.80. Position was already re-centred here; the colour was not, so
+    # every downstream colour gate judged the grid by a line that was not on it —
+    # and `CLEAN_GUTTER_STD` (2.3) then withheld the pale-tile relaxation in
+    # `_cells_have_content`, failing a correct 3x3 (2026-08-11).
+    # Ordered by CLEANLINESS, not by distance to the centre: a member a hair
+    # nearer the centre can still be the dirtier read, and preferring it swapped a
+    # 0.00 trace for a 3.43 one on recaptcha_1774954808237_rhitt and lost a grid
+    # that had detected fine. Restricted to members with comparable support, so a
+    # three-sample fragment cannot win on a trivially perfect std.
+    strong = [l for l in group if l.support >= 0.5 * best.support] or group
+    cleanest = min(strong, key=lambda l: (l.color_std, abs(l.midline_pos - centre)))
+    best.midline_pos = centre
     best.support = max(l.support for l in group)
+    best.color_lab = cleanest.color_lab
+    best.color_std = cleanest.color_std
     return best
 
 
