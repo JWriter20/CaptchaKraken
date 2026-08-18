@@ -4,10 +4,31 @@ Two runnable, end-to-end demos that drive a real stealth browser
 ([camoufox](https://github.com/JWriter20/camoufox)) against the standard captcha
 demo sites, run the full solver, and print token speed / total time / outcome:
 
-| File | Site |
+| File | What it shows |
 |---|---|
-| `demoRecaptcha.ts` | Google reCAPTCHA v2 demo |
-| `demoHcaptcha.ts` | hCaptcha demo |
+| `withPlaywright.ts` | Vanilla Playwright — no adapter, 2 added lines |
+| `withPuppeteer.ts` | Puppeteer — `fromPuppeteer(page)`, 2 added lines |
+| `watchPlaywright.ts` | The auto-solver: install once, solves as they appear |
+| `demoRecaptcha.ts` | Google reCAPTCHA v2 demo, via camoufox |
+| `demoHcaptcha.ts` | hCaptcha demo, via camoufox |
+
+The first three take an optional URL, so you can point them at your own page:
+
+```bash
+npm i -D playwright puppeteer tsx     # example-only; the package ships none
+npx playwright install chromium
+
+export VLLM_BASE_URL=https://api.captchakraken.com/v1
+export CAPTCHA_KRAKEN_API_KEY=ck_live_...
+
+npx tsx examples/withPlaywright.ts
+npx tsx examples/withPuppeteer.ts https://your.site/page
+npx tsx examples/watchPlaywright.ts https://your.site/page 60
+```
+
+They use `async function main()` rather than top-level await: this package is
+CommonJS, and tsx transpiles these to CJS, where top-level await is a syntax
+error.
 
 ## Setup
 
