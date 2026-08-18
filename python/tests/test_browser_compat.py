@@ -148,3 +148,46 @@ def test_poll_once_drives_a_real_page_without_blocking(page: Any) -> None:
     assert watcher.poll_once() is not None, "did not solve the captcha already on the page"
     assert watcher.poll_once() is None, "solved twice — the challenge was gone"
     assert time.monotonic() - started < 2.0, "poll_once waited an interval; run() owns the cadence"
+
+
+def test_one_watcher_covers_every_navigation_on_the_page(page: Any) -> None:
+    """The claim the whole per-page design rests on.
+
+    `watch(page)` is installed ONCE and must keep working as the page navigates
+    — which is what makes a browser-wide installer unnecessary for the case
+    people actually hit: a challenge appearing on request 40 of a scrape, on the
+    same page object the run started with. If a watcher stopped at the first
+    navigation, every caller would have to re-install after each `goto` and the
+    API would be the wrong shape.
+
+    Twin of the same case in js/src/browser-compat.test.ts.
+    """
+    solved: List[Any] = []
+
+    class Solver:
+        def detect_captcha(self, p: Any) -> Any:
+            return p.query_selector("#c")
+
+        def solve(self, p: Any) -> Any:
+            p.eval_on_selector("#c", "el => el.remove()")
+            solved.append(True)
+            return {"is_solved": True}
+
+    watcher = CaptchaWatcher(solver=Solver(), page=page, interval_ms=25)
+
+    # Two clean navigations: the watcher must stay quiet, not error out.
+    page.goto("data:text/html,<body>one</body>")
+    watcher.run(timeout_ms=200)
+    page.goto("data:text/html,<body>two</body>")
+    watcher.run(timeout_ms=200)
+    assert solved == [], "solved something on a page with no captcha"
+
+    # A challenge appears on a later navigation.
+    page.goto("data:text/html,<body><div id='c'></div>three</body>")
+    watcher.run(timeout_ms=800)
+    assert len(solved) == 1, "the watcher did not survive navigation"
+
+    # And again, to prove it is still armed rather than having fired once.
+    page.goto("data:text/html,<body><div id='c'></div>four</body>")
+    watcher.run(timeout_ms=800)
+    assert len(solved) == 2, "the watcher stopped arming after its first solve"

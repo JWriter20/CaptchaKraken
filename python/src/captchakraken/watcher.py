@@ -23,6 +23,14 @@ already uses, from the driver side, on a timer:
     it is isolated there by construction rather than by special-casing;
   - reaction time is bounded by `interval_ms`, not by the mutation.
 
+ONE WATCHER COVERS THE WHOLE PAGE, FOR ITS WHOLE LIFE
+A page outlives navigation, and so does the watcher holding it: install it once
+and it keeps probing across every `goto`, staying quiet while there is nothing
+to solve and re-arming after each solve. That is deliberately the whole API --
+the case that motivates a browser-wide installer is almost always a challenge
+appearing on request 40 of a run, on the SAME page object the run started with,
+and that is already covered by one line. Pinned in test_browser_compat.py.
+
 WHY IT BLOCKS, WHERE THE TS PORT DOES NOT (CLAUDE.md 1c)
 `solver.watch(page)` in TypeScript returns immediately and watches in the
 background. It cannot here, and the reason is Playwright's, not ours: a SYNC

@@ -22,6 +22,15 @@
  *   - Reaction time is bounded by `intervalMs`, not by the mutation itself.
  *     A captcha that appears just after a tick waits up to one interval.
  *
+ *
+ * ONE WATCHER COVERS THE WHOLE PAGE, FOR ITS WHOLE LIFE
+ * A `Page` outlives navigation, and so does the watcher holding it: install it
+ * once and it keeps probing across every `goto`, staying quiet while there is
+ * nothing to solve and re-arming after each solve. That is deliberately the
+ * whole API — the case that motivates a browser-wide installer is almost always
+ * a challenge appearing on request 40 of a run, on the SAME page object the run
+ * started with, and that is already covered by one line. Pinned in
+ * browser-compat.test.ts.
  * DETECTION IS THE SOLVER'S, NOT A COPY
  * The trigger is `solver.detectCaptcha(page)`, the same method `solve()` calls,
  * so "what counts as a captcha" has exactly one definition. An earlier sketch
