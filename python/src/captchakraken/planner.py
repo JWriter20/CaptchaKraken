@@ -42,18 +42,26 @@ DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 # re-encoding every screenshot would spend time and fidelity on the types that
 # were never affected.
 #
-# Unconditional rather than keyed to the model generation, because the deployed
-# v1.1 adapter improves under it too (mean error ~40 px native vs ~4 px upscaled)
-# — unlike prompts, this is not a per-generation contract.
+# Unconditional as a DEFAULT, because the deployed v1.1 adapter improves under
+# it too (mean error ~40 px native vs ~4 px upscaled). But it is no longer a
+# constant: `models.json` may declare a `pixel_budget` per model, because the
+# band an adapter TRAINED under is a property of that adapter, exactly like its
+# prompt generation. See prompts.pixel_budget.
 MIN_PIXELS = 448 * 448
 
 
-def _encode_image(path: str) -> tuple:
-    """`(mime, base64)` for one image, enlarged to MIN_PIXELS if it is smaller.
+def _encode_image(path: str,
+                  budget: "Optional[prompts.PixelBudget]" = None) -> tuple:
+    """`(mime, base64)` for one image, fitted into `budget`'s pixel band.
+
+    Area is clamped, never dimensions: aspect ratio is the geometry of a grid
+    puzzle, and squashing it moves every tile centre — fatal when the answer is
+    a coordinate on a normalized 0-1000 scale.
 
     Anything Pillow cannot open is passed through untouched — this is a
     preprocessing nicety, and it must never be the reason a solve fails.
     """
+    budget = budget or prompts.pixel_budget(None)
     with open(path, "rb") as f:
         raw = f.read()
     mime = guess_type(path)[0] or "image/png"
@@ -62,11 +70,22 @@ def _encode_image(path: str) -> tuple:
         width, height = im.size
     except Exception:  # noqa: BLE001 — unreadable/animated: send it as-is
         return mime, base64.b64encode(raw).decode()
-    if width * height >= MIN_PIXELS:
+    cap = budget.maximum
+    if cap and width * height > cap:
+        # floor, not ceil: rounding up here can land back OVER the cap, which
+        # is the mirror of the bug the floor branch below guards against.
+        scale = math.sqrt(cap / (width * height))
+        im = im.convert("RGB").resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.BICUBIC)
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+        return "image/png", base64.b64encode(buf.getvalue()).decode()
+    if width * height >= budget.minimum:
         return mime, base64.b64encode(raw).decode()
     # ceil, not round: rounding both sides down lands just under the floor
     # (442x454 = 200,668 for a 277x285 capture) and defeats the whole point.
-    scale = math.sqrt(MIN_PIXELS / (width * height))
+    scale = math.sqrt(budget.minimum / (width * height))
     im = im.convert("RGB").resize(
         (math.ceil(width * scale), math.ceil(height * scale)), Image.BICUBIC)
     buf = io.BytesIO()
@@ -283,10 +302,13 @@ class ActionPlanner:
         # Doing this ONCE per planner rather than per request: resolution can
         # touch the Hub, and a per-request lookup would put a network call in
         # front of every round of every solve.
-        self.prompts = prompts.resolve(
-            self.model if prompts.canonical_model_id(self.model)
-            else config.lora_adapter()
-        )
+        _prompt_key = (self.model if prompts.canonical_model_id(self.model)
+                       else config.lora_adapter())
+        self.prompts = prompts.resolve(_prompt_key)
+        # Resolution follows the MODEL for the same reason prompts do, and off
+        # the same key: an adapter reads a puzzle at the pixel band it trained
+        # under. Resolved once per planner — see the note above.
+        self.pixel_budget = prompts.pixel_budget(_prompt_key)
         # Auto-start a local vLLM server on the first request if one isn't up
         # (no-op for a healthy or remote endpoint). Guarded so we only try once.
         self._server_ensured = False
@@ -318,7 +340,7 @@ class ActionPlanner:
 
         parts: List[Dict[str, Any]] = []
         for p in image_paths:
-            mime, b64 = _encode_image(p)
+            mime, b64 = _encode_image(p, self.pixel_budget)
             parts.append({"type": "image_url",
                           "image_url": {"url": f"data:{mime};base64,{b64}"}})
 

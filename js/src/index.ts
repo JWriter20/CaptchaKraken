@@ -80,3 +80,21 @@ export { fromPuppeteer } from './puppeteer-adapter';
  * ```
  */
 export type { Page, PlaywrightPage, PlaywrightFrame, PlaywrightElementHandle } from './playwright-types';
+
+/**
+ * Auto-solve watcher: `solver.watch(page)` installs a background poller that
+ * solves captchas as they appear, and returns a handle with `stop()`.
+ *
+ * Injects nothing into the page, on any platform — see watcher.ts. On Camoufox
+ * its DOM reads run in the isolated Juggler world by default.
+ *
+ * @example
+ * ```typescript
+ * const solver = new CaptchaKrakenSolver();
+ * const watcher = solver.watch(page, { onSolved: r => console.log(r.isSolved) });
+ * // ... your automation ...
+ * await watcher.stop();
+ * ```
+ */
+export { watchPage } from './watcher';
+export type { CaptchaWatcher, WatchOptions, WatchableSolver } from './watcher';

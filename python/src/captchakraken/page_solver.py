@@ -123,10 +123,32 @@ class NoCaptchaFoundError(CaptchaSolveError):
     """No interactive widget — reCAPTCHA v3/invisible, or a click-triggered challenge."""
 
 
+class PageClosedError(CaptchaSolveError):
+    """The page, context or browser went away mid-solve.
+
+    Split out from staleness deliberately. These two used to share one pattern,
+    which meant a DEAD target was retried three times as if it were a live one
+    mid-transition, and the error that finally escaped named whichever call ran
+    last — `ElementHandle.screenshot`, usually — instead of saying the page had
+    closed. That cost a real debugging session on the headed reCAPTCHA run.
+    """
+
+
 # Playwright surfaces these as messages, not types, so both drivers match on
 # text. Kept as one pattern so the two lists can be diffed against each other.
+#
+# "Target closed" is NOT here on purpose — see `_CLOSED_TARGET_RE`. Everything in
+# this list describes a handle that went stale while the PAGE IS STILL ALIVE, so
+# re-detecting next round is the right response.
 _STALE_HANDLE_RE = re.compile(
-    r"Timeout .*exceeded|not visible|not attached|detached|Target closed",
+    r"Timeout .*exceeded|not visible|not attached|detached",
+    re.IGNORECASE,
+)
+
+# A target that no longer exists. Nothing can be re-detected on it, so this is
+# terminal rather than retryable.
+_CLOSED_TARGET_RE = re.compile(
+    r"Target (?:page, context or browser )?(?:has been )?closed|Session closed",
     re.IGNORECASE,
 )
 
@@ -2113,6 +2135,27 @@ class PageSolver:
     # Public entry point
     # ------------------------------------------------------------------
 
+    def watch(self, page: Any, **options: Any) -> "CaptchaWatcher":
+        """
+        A watcher that solves captchas on `page` as they appear.
+
+        Mirrors the TS `solver.watch(page)` in intent, but NOT in whether it
+        blocks: this returns an idle watcher and you choose how to drive it,
+        because a sync Playwright handle cannot be driven from a worker thread.
+
+            solver.watch(page).run()              # blocking; hold the page clean
+            w = solver.watch(page)
+            while my_loop():
+                w.poll_once()                     # cooperative; you own the cadence
+
+        Options are `CaptchaWatcher`'s fields: `interval_ms`, `max_solves`,
+        `error_backoff_ms`, `on_solved`, `on_error`. Nothing is injected into
+        the page; see watcher.py.
+        """
+        from .watcher import CaptchaWatcher
+
+        return CaptchaWatcher(solver=self, page=page, **options)
+
     def solve(self, page: Any) -> SolveResult:
         """
         Solve whatever captcha is on `page`.
@@ -2268,18 +2311,47 @@ class PageSolver:
                 # the old iframe. Only after interacting — a first-frame failure
                 # is a genuine problem worth surfacing.
                 message = str(exc)
-                if (
-                    has_interacted
-                    and stale_element_retries < cfg.max_stale_element_retries
-                    and _STALE_HANDLE_RE.search(message)
-                ):
-                    stale_element_retries += 1
-                    _log(
-                        f"stale challenge handle after submit; re-detecting next round "
-                        f"({stale_element_retries}/{cfg.max_stale_element_retries})."
-                    )
-                    _delay(cfg.stale_element_backoff_ms)
-                    continue
+                closed = bool(_CLOSED_TARGET_RE.search(message))
+                if has_interacted and (closed or _STALE_HANDLE_RE.search(message)):
+                    # ASK THE VENDOR FIRST. The handle most often went stale
+                    # BECAUSE the answer was accepted: reCAPTCHA tears the
+                    # challenge iframe down the instant it takes an answer, and
+                    # hCaptcha swaps the frame out. Re-entering the pipeline
+                    # here spends a whole round — detect, screenshot, infer — on
+                    # a puzzle that no longer exists, and races the teardown.
+                    # Headless usually won that race; headed usually lost it and
+                    # surfaced `TargetClosedError` from whatever ran next.
+                    #
+                    # The top-of-loop check is not enough on its own: it runs
+                    # only after the backoff, and it does DOM reads that throw
+                    # on a target that is already gone.
+                    try:
+                        if self.is_captcha_solved(page):
+                            _log("captcha reports solved; finishing.")
+                            return SolveResult(
+                                True, self._last_mouse, _aggregate(cumulative_usage)
+                            )
+                    except Exception:  # noqa: BLE001
+                        # Can't consult the vendor — the page is gone. Fall
+                        # through; `closed` decides between a named error and a
+                        # retry, and neither wants this exception in its place.
+                        pass
+
+                    if closed:
+                        raise PageClosedError(
+                            "the page, context or browser closed mid-solve, after the "
+                            "answer had been submitted but before the vendor's verdict "
+                            "could be read — the solve may in fact have succeeded"
+                        ) from exc
+
+                    if stale_element_retries < cfg.max_stale_element_retries:
+                        stale_element_retries += 1
+                        _log(
+                            f"stale challenge handle after submit; re-detecting next round "
+                            f"({stale_element_retries}/{cfg.max_stale_element_retries})."
+                        )
+                        _delay(cfg.stale_element_backoff_ms)
+                        continue
                 raise
 
             has_interacted = has_interacted or did_interact

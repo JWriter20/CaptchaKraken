@@ -11,8 +11,9 @@ import {
   PlaywrightElementHandle as ElementHandle,
   PlaywrightFrame as Frame,
 } from './playwright-types';
+import { watchPage, CaptchaWatcher, WatchOptions } from './watcher';
 import { generate_trajectory } from './trajectory.js';
-import { exec, execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import { exec, execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -22,6 +23,8 @@ import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, TypeAction,
 import { aggregateTokenUsage } from './token-usage';
 import { parseApiError } from './errors';
 import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
+import { resolvePythonCommand } from './python-command';
+import { buildSolveArgs, redactCommand, solveEnv } from './cli-invocation';
 import { solveSlideGeometry } from './slide-geometry';
 
 const execAsync = promisify(exec);
@@ -44,6 +47,20 @@ function getBundledCliRoot(): string {
   const bundled = path.resolve(__dirname, '..', 'python');
   if (fs.existsSync(bundled)) return bundled;
   return path.resolve(__dirname, '..', '..', 'python');
+}
+
+/**
+ * Is `command` runnable? Probed with `--version`, which every candidate
+ * interpreter answers cheaply and without side effects. `shell: false` so a
+ * command name can never be interpreted by /bin/sh.
+ */
+function commandExists(command: string): boolean {
+  try {
+    const probe = spawnSync(command, ['--version'], { stdio: 'ignore', shell: false });
+    return !probe.error && probe.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function getVenvPython(cliRoot: string): string | null {
@@ -309,6 +326,28 @@ export class CaptchaKrakenSolver {
       // separate captchas into one billable attempt.
       this.solveSessionId = null;
     }
+  }
+
+  /**
+   * Install an auto-solver: probe `page` on a timer and solve any captcha that
+   * becomes visible, until `stop()`.
+   *
+   * Returns immediately — the watching happens in the background, so your
+   * automation carries on and captchas are handled underneath it.
+   *
+   * Nothing is injected into the page on any platform; see watcher.ts for why,
+   * and for the note on Camoufox, where the probe's DOM reads land in its
+   * isolated world by default.
+   *
+   * ```typescript
+   * const solver = new CaptchaKrakenSolver();
+   * const watcher = solver.watch(page);
+   * await page.goto('https://example.com/protected');   // solved as it appears
+   * await watcher.stop();
+   * ```
+   */
+  watch(page: Page, options: WatchOptions = {}): CaptchaWatcher {
+    return watchPage(this, page, options);
   }
 
   private async solveImpl(page: Page): Promise<SolveResult | void> {
@@ -1470,7 +1509,7 @@ export class CaptchaKrakenSolver {
    * is missing — callers that must not throw (e.g. runCliTool) wrap this.
    */
   private resolveCli(): { cliRoot: string; py: string } {
-    const { repoPath, pythonCommand = 'python' } = this.config;
+    const { repoPath, pythonCommand } = this.config;
     const cliRoot = repoPath ?? getBundledCliRoot();
     if (!fs.existsSync(cliRoot)) {
       throw new Error(
@@ -1478,7 +1517,15 @@ export class CaptchaKrakenSolver {
         `If you installed from npm, ensure the package ships 'python/'.`
       );
     }
-    const py = getVenvPython(cliRoot) ?? pythonCommand;
+    // Was `getVenvPython(cliRoot) ?? 'python'`. Debian-family systems have no
+    // bare `python`, so with no bundled venv every solve died at
+    // `/bin/sh: 1: python: not found` — before reaching the model, and only on
+    // the JS side, which made it read as an endpoint fault. See python-command.ts.
+    const py = resolvePythonCommand({
+      configured: pythonCommand,
+      venvPython: getVenvPython(cliRoot),
+      exists: commandExists,
+    });
     return { cliRoot, py };
   }
 
@@ -2258,14 +2305,19 @@ export class CaptchaKrakenSolver {
       '--fps', String(this.config.videoBurstFps ?? 10),
       '--model', model,
     ];
-    if (apiKey) args.push('--api-key', apiKey);
+    // NOT `args.push('--api-key', apiKey)`: a flag value is argv just as much as
+    // a positional is, and argv is world-readable on Linux. Env, same as the
+    // still-image path.
 
     try {
       // execFile (no shell): the temp dir path is ours but still goes through
       // literally, with no quoting hazard.
       const { stdout, stderr } = await execFileAsync(py, args, {
         cwd: cliRoot,
-        env: cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+        env: solveEnv(
+          cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+          apiKey,
+        ),
         maxBuffer: 10 * 1024 * 1024,
       });
       if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
@@ -2351,14 +2403,14 @@ export class CaptchaKrakenSolver {
   }
 
   private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
-    // v2 ships a single provider: the JobHarvest vLLM server via the bundled
+    // v2 ships a single provider: the CaptchaKraken vLLM server via the bundled
     // CaptchaKraken CLI. The CLI's planner reads VLLM_BASE_URL and the bearer
     // token (CAPTCHA_KRAKEN_API_KEY, falling back to VLLM_API_KEY) from the
     // environment; we also forward the key explicitly as a CLI arg below so it
     // works even when the subprocess doesn't inherit it.
     const {
       // vLLM LoRA name. Defaults to the full-puzzle `captcha` adapter
-      // (JobHarvest/qwen3.5-9b-captcha-lora — solves grids AND click/drag/pixel
+      // (CaptchaKraken's captcha LoRA — solves grids AND click/drag/pixel
       // puzzles). Override in code or via CAPTCHA_LORA_NAME (e.g. `captcha-grid`
       // for the older grids-only adapter). Most users only set the endpoint URL
       // and, for the hosted API, CAPTCHA_KRAKEN_API_KEY.
@@ -2388,42 +2440,43 @@ export class CaptchaKrakenSolver {
 
     const { cliRoot, py } = this.resolveCli();
 
-    const cmdParts = [
-      py,
-      '-m',
-      'captchakraken.cli',
-      `"${imagePath}"`,
+    // An ARGV ARRAY for execFile, not a string for a shell.
+    //
+    // This was `cmdParts.join(' ')` handed to `exec`, so the bearer token sat in
+    // argv — world-readable at /proc/<pid>/cmdline for the life of the solve —
+    // and the same string was then printed to stdout, putting it in CI logs and
+    // scrollback. The key now travels in the environment (see cli-invocation.ts),
+    // and dropping the shell also removes the quoting hazard: `"${imagePath}"`
+    // was hand-quoted, which a path containing a quote defeats.
+    //
+    // The vendor hint goes on as --puzzle-source=<vendor>; the CLI's argparse
+    // falls through to the flag form for unknown trailing args.
+    const args = buildSolveArgs({
+      imagePath,
       model,
-      'captchaKrakenApi',
-    ];
+      puzzleSource,
+      retryMode,
+      // The DOM said this puzzle has a text box, so the CLI must send the
+      // distorted-text prompt and skip grid detection. The picture alone cannot
+      // decide this — see the textMode note in solveSingle.
+      textMode,
+    });
 
-    if (apiKey) {
-      cmdParts.push(apiKey);
-    }
-
-    // Always pass the vendor hint at the end as --puzzle-source=<vendor>; the
-    // CLI's argparse falls through to the flag form for unknown trailing args.
-    cmdParts.push(`--puzzle-source=${puzzleSource}`);
-    if (retryMode) {
-      cmdParts.push(`--retry-mode=${retryMode}`);
-    }
-    // The DOM said this puzzle has a text box, so the CLI must send the
-    // distorted-text prompt and skip grid detection. The picture alone cannot
-    // decide this — see the textMode note in solveSingle.
-    if (textMode) {
-      cmdParts.push('--text-mode');
-    }
-
-    const command = cmdParts.join(' ');
-    console.log(`Executing CaptchaKraken CLI: ${command}`);
+    console.log(
+      `Executing CaptchaKraken CLI: ${redactCommand([py, ...args].join(' '), apiKey)}`
+    );
 
     try {
-      const { stdout, stderr } = await execAsync(command, {
+      const { stdout, stderr } = await execFileAsync(py, args, {
         cwd: cliRoot,
         // Only this call reaches the model, so it's the only one that needs the
         // session id — the other cliEnv() call sites run pure-OpenCV subcommands
-        // that never touch the inference endpoint.
-        env: cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+        // that never touch the inference endpoint. `solveEnv` adds the bearer
+        // token here, which is what keeps it out of argv.
+        env: solveEnv(
+          cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+          apiKey,
+        ),
         maxBuffer: 10 * 1024 * 1024 // Increase buffer for large outputs if needed
       });
 

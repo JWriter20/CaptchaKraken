@@ -68,6 +68,9 @@ Everything model-specific lives in `captchakraken.config` and is env-overridable
 
 ## License
 
-**CaptchaKraken Source-Available License v1.0** — see [LICENSE](./LICENSE).
-Build *with* it (scrapers, stealth browsers, QA tooling); you may **not sell the
-solve itself** or ship a thin wrapper (browser extension, hosted solving API).
+**CaptchaKraken Source-Available License v1.1** — see [LICENSE](./LICENSE).
+Build *with* it (scrapers, QA tooling) and run it against **any** browser you
+like, stealth or not. You may **not sell the solve itself**, ship a thin wrapper
+(browser extension, hosted solving API), or **bundle it as a built-in feature of
+a stealth/antidetect browser you distribute** — using it with one is fine. Those
+three are licensable, not categorically refused: open an issue to ask.

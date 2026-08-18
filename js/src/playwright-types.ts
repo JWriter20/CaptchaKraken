@@ -117,6 +117,14 @@ export interface PlaywrightPage {
   $(selector: string): Promise<PlaywrightElementHandle | null>;
   /** All matching element handles. */
   $$(selector: string): Promise<PlaywrightElementHandle[]>;
+  /**
+   * Whether the page has been closed. OPTIONAL because it is the one member
+   * here the solver itself never needs — the auto-solve watcher uses it to end
+   * its loop when the caller closes the browser out from under it, and falls
+   * back to treating the page as open when a launcher does not expose it.
+   * Playwright and Puppeteer both do.
+   */
+  isClosed?(): boolean;
   /** Run `pageFunction` against the first matching element, in the page context. */
   $eval<R>(
     selector: string,

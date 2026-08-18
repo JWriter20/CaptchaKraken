@@ -14,6 +14,7 @@
  *   - `handle.getAttribute(name)`      → `handle.evaluate((el,n)=>el.getAttribute(n), name)`
  *   - `handle.textContent()`           → `handle.evaluate(el=>el.textContent)`
  *   - `handle.scrollIntoViewIfNeeded()`→ `handle.scrollIntoView()`
+ *   - `page.isClosed()`                → same, but must be forwarded explicitly
  * Everything else (`$`, `$$`, `$eval`, `waitForFunction`, `mouse.*`,
  * `screenshot({path})`, `boundingBox`, `contentFrame`, `isVisible`) is
  * call-compatible and passed straight through.
@@ -81,6 +82,7 @@ interface PuppeteerPage {
   $(selector: string): Promise<PuppeteerElementHandle | null>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
   $eval(selector: string, pageFunction: (element: Element) => any, ...args: any[]): Promise<any>;
+  isClosed(): boolean;
 }
 
 /** Translate Playwright `{state}` selector options to Puppeteer `{visible}/{hidden}`. */
@@ -153,5 +155,11 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     $: async (selector) => wrapHandle(await page.$(selector)),
     $$: async (selector) => (await page.$$(selector)).map((h) => wrapHandle(h)!).filter(Boolean),
     $eval: (selector, pageFunction, arg) => page.$eval(selector, pageFunction as any, arg),
+    // Same name and shape on both libraries, but it still has to be forwarded:
+    // the wrapper is a fresh object literal, so anything not listed here is
+    // simply absent. The auto-solve watcher reads it to end its loop when the
+    // caller closes the browser, and an undefined `isClosed` reads as "still
+    // open" — a watcher that polls a dead page forever.
+    isClosed: () => page.isClosed(),
   };
 }

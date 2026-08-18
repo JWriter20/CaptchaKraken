@@ -415,6 +415,70 @@ def resolve(model: Optional[str]) -> PromptSet:
     return ps
 
 
+# ─── training pixel budget ──────────────────────────────────────────────────
+# Same registry, same reason, different axis. See models.json's header comment:
+# an adapter learns to read a puzzle at whatever MIN_PIXELS/MAX_PIXELS band its
+# training exported, and serving it under a different band is the prompt bug
+# wearing a different hat — silent, and wrong on every puzzle.
+
+MIN_PIXELS_ENV = "CAPTCHA_MIN_PIXELS"
+MAX_PIXELS_ENV = "CAPTCHA_MAX_PIXELS"
+
+
+@dataclass(frozen=True)
+class PixelBudget:
+    """The image-area band a model was trained under, in pixels.
+
+    `minimum` is a floor: smaller images are upscaled to it. `maximum` is a
+    ceiling, or None for "send it as-is and let the server decide" — which is
+    what every model published before this field existed did.
+    """
+    minimum: int
+    maximum: Optional[int]
+    source: str
+
+
+#: What the client did before models.json carried a budget. 448² is Qwen's own
+#: ViT floor; there was never a ceiling. Anything unregistered keeps this, so
+#: adding the field cannot change an existing deployment.
+DEFAULT_PIXEL_BUDGET = PixelBudget(minimum=448 * 448, maximum=None,
+                                   source="client-default")
+
+
+def _env_int(name: str) -> Optional[int]:
+    try:
+        value = int(os.environ.get(name) or 0)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def pixel_budget(model: Optional[str]) -> PixelBudget:
+    """The budget to send `model` images at. Never raises.
+
+    Order mirrors `resolve`: an explicit env pin wins, then the registry, then
+    the historical default. There is deliberately no Hub fetch — a wrong budget
+    degrades quality silently, so it may only come from a source we can verify
+    offline.
+    """
+    env_min, env_max = _env_int(MIN_PIXELS_ENV), _env_int(MAX_PIXELS_ENV)
+    if env_min or env_max:
+        return PixelBudget(
+            minimum=env_min or DEFAULT_PIXEL_BUDGET.minimum,
+            maximum=env_max if env_max else DEFAULT_PIXEL_BUDGET.maximum,
+            source="env")
+
+    repo_id = canonical_model_id(model)
+    entry = (registered_models().get(repo_id) or {}) if repo_id else {}
+    budget = entry.get("pixel_budget") or {}
+    if budget:
+        return PixelBudget(
+            minimum=int(budget.get("min") or DEFAULT_PIXEL_BUDGET.minimum),
+            maximum=int(budget["max"]) if budget.get("max") else None,
+            source=f"registry:{repo_id}")
+    return DEFAULT_PIXEL_BUDGET
+
+
 def clear_cache() -> None:
     _cache.clear()
     global _REGISTRY

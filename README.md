@@ -320,14 +320,20 @@ these as they ship.
 
 ## License
 
-Source-available under the **CaptchaKraken Source-Available License v1.0** — see
+Source-available under the **CaptchaKraken Source-Available License v1.1** — see
 **[LICENSE](./LICENSE)** (plain-English: **[docs/licensing.md](./docs/licensing.md)**).
 
-- ✅ **Build _with_ it** — scrapers, stealth browsers, data pipelines, QA tooling:
-  commercial use is fine when captcha solving is an internal, enabling component.
+- ✅ **Build _with_ it** — scrapers, data pipelines, QA tooling: commercial use is
+  fine when captcha solving is an internal, enabling component.
+- ✅ **Use it with any browser you like** — Camoufox, Puppeteer, Playwright, any
+  stealth browser. Running the solver against your own automation is unrestricted.
 - ⛔ **Don't sell _the solve_** — no captcha-solving-as-a-service, no thin wrappers
   (browser extensions, hosted endpoints, CLIs) whose main purpose is solving, and
   no relaying the model's outputs through a paid solving API.
+- ⛔ **Don't _ship_ the solve** — you may not bundle, preinstall, or advertise this
+  as a built-in captcha feature of a stealth browser, antidetect/profile manager,
+  or automation platform you distribute to other people. Using it with one is
+  fine; shipping it as part of one needs a license.
 
 For otherwise-prohibited uses, open an issue about a commercial license.
 
