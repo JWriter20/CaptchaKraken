@@ -170,3 +170,61 @@ test('the watcher solves a captcha that appears after it is installed', { skip: 
     await browser.close();
   }
 });
+
+test('one watcher covers every navigation on the page', { skip: !playwright && 'playwright not installed' }, async () => {
+  /**
+   * The claim the whole per-page design rests on.
+   *
+   * `watch(page)` is installed ONCE and is expected to keep working as the page
+   * navigates — which is what makes a browser-wide installer unnecessary for the
+   * case people actually hit: a challenge appearing on request 40 of a scrape,
+   * on the same `Page` object the run started with. If a watcher stopped at the
+   * first navigation, every user would need to re-install after each `goto` and
+   * the API would be the wrong shape.
+   *
+   * Waits on the COUNT rather than sleeping a fixed span: `node --test` runs
+   * test files in parallel, so several Chromium launches compete for CPU and a
+   * fixed 400ms is enough alone and not enough in the suite. That is how the
+   * first version of this test passed in isolation and flaked in CI.
+   */
+  const browser = await playwright.chromium.launch({ headless: true, args: LAUNCH_ARGS });
+  try {
+    const page = await browser.newPage();
+    let solves = 0;
+    const solver = {
+      async detectCaptcha(p: any) { return await p.$('#c'); },
+      async solve(p: any) {
+        await p.$eval('#c', (el: any) => el.remove());
+        solves += 1;
+        return { isSolved: true } as any;
+      },
+    };
+
+    const until = async (want: number, why: string) => {
+      const deadline = Date.now() + 15_000;
+      while (solves < want && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(solves, want, why);
+    };
+
+    const watcher = watchPage(solver, page as unknown as PlaywrightPage, { intervalMs: 25 });
+
+    // Two clean navigations: the watcher must stay quiet, not error out. This
+    // one IS a fixed settle, because it asserts an absence — there is no count
+    // to wait for.
+    await page.goto('data:text/html,<body>one</body>');
+    await page.goto('data:text/html,<body>two</body>');
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(solves, 0, 'solved something on a page with no captcha');
+
+    await page.goto('data:text/html,<body><div id="c"></div>three</body>');
+    await until(1, 'the watcher did not survive navigation');
+
+    // Again, to prove it is still armed rather than having fired once.
+    await page.goto('data:text/html,<body><div id="c"></div>four</body>');
+    await until(2, 'the watcher stopped arming after its first solve');
+
+    await watcher.stop();
+  } finally {
+    await browser.close();
+  }
+});
