@@ -9,20 +9,18 @@
     "for the legacy output/PascalCase schema. The model answered in a hybrid,",
     "the parser dropped it, and EVERY drag puzzle failed as 'unsupported' with",
     "no test going red. Recording the prompt hashes here means any edit to a",
-    "serving prompt fails CI until someone consciously re-pins — which forces",
+    "serving prompt fails CI until someone consciously re-pins \u2014 which forces",
     "the question 'does the pinned adapter still expect this prompt?'.",
     "",
     "To ship a new adapter: update lora_adapter/lora_revision, re-run the Tier 2",
     "static-image gate against it, and update prompt_sha256 if the prompts moved."
   ],
-
   "base_model": "RedHatAI/Qwen3.5-9B-FP8-dynamic",
-  "lora_adapter": "CaptchaKraken/CaptchaKraken_v1.1",
+  "lora_adapter": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
   "lora_revision": "main",
-  "lora_name": "captcha",
-
+  "lora_name": "captcha-v12",
   "prompt_sha256": {
-    "PIXEL_ACTION_PROMPT": "15d4833135330aa57ec64eb9132d15739cbf4a10bcda2e6d85d2d0ad92e0216a",
-    "SELECT_GRID_PROMPT": "f014dbc1cb8c773cc9501ff97aea92ff0281e5687b3d637d1c626ded9212fd3c"
+    "PIXEL_ACTION_PROMPT": "21afc1def6faaa706ba4a8afc2e243f949fc6bb8936e624ecf8be0b82baeaae1",
+    "SELECT_GRID_PROMPT": "b259d39ac78adc92c4fe4e78aee248d073342aa4a797e9708d37dcea7532367d"
   }
 }

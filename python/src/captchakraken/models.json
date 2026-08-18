@@ -20,17 +20,45 @@
     "`latest` is what you get by default. Pin a specific model with",
     "CAPTCHA_LORA_ADAPTER (or CAPTCHA_LORA_NAME for a served alias) — pinning is",
     "opt-in, so the default download and the default prompt always move forward",
-    "together.",
+    "together. That coupling is why moving `latest` to a generation-2 model is",
+    "safe here and would not have been before: a client that ships this file",
+    "reads prompt_version 2 from the same entry that named the weights. Clients",
+    "old enough to predate this file resolve from pinned_model.json instead and",
+    "never see `latest`, so they are not silently moved onto prompts they cannot",
+    "produce.",
     "",
     "Adding a model: add its entry here IN THE SAME COMMIT as publishing it. The",
     "finetune repo's check_prompt_parity.py fails if any registered model names a",
     "prompt_version this client ships no built-ins for, so an unmapped model",
-    "cannot reach a release."
+    "cannot reach a release.",
+    "",
+    "`pixel_budget` is the same idea for RESOLUTION. Qwen reads MIN_PIXELS /",
+    "MAX_PIXELS from the environment and clamps each image's AREA into that band,",
+    "so the budget an adapter trained under decides how many visual tokens it ever",
+    "learned to read a puzzle from. Serve it under a different band and you have",
+    "the prompt bug again in a different costume: nothing errors, the model just",
+    "answers on a picture at a scale it was not tuned for. It lives here, per",
+    "model, for exactly the reason prompt_version does — a client constant cannot",
+    "be right for two adapters trained at different budgets.",
+    "",
+    "Omit it and the client keeps its historical behaviour (floor at 448 squared,",
+    "no ceiling). Absent means UNKNOWN, not zero: it is only recorded where the",
+    "training run that produced the adapter is known."
   ],
 
-  "latest": "CaptchaKraken/CaptchaKraken_v1.1",
+  "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
 
   "models": {
+    "CaptchaKraken/CaptchaKraken-Lora-v1.2": {
+      "prompt_version": "2",
+      "kind": "lora",
+      "base_model": "RedHatAI/Qwen3.5-9B-FP8-dynamic",
+      "lora_revision": "main",
+      "lora_name": "captcha-v12",
+      "pixel_budget": { "min": 200704, "max": 518400 },
+      "note": "Run 20260812-005302 (ready-to-deploy). PUBLIC on the Hub under Source-Available License v1.1, and the first published generation-2 model. Budget is what scripts/train_unified.sh exported for that run: floor 448^2, ceiling 720^2. Was served as `captcha-v12` while absent from this file, which resolved it to generation 1 prompts against generation-2 weights — the failure this file exists to prevent."
+    },
+
     "CaptchaKraken/CaptchaKraken_v1.1": {
       "prompt_version": "1",
       "kind": "lora",
@@ -63,6 +91,7 @@
 
   "served_aliases": {
     "_comment": "A hosted endpoint serves a bare name, not a repo id. Map it back so prompt resolution works for callers who only ever see the alias.",
-    "captcha": "CaptchaKraken/CaptchaKraken_v1.1"
+    "captcha": "CaptchaKraken/CaptchaKraken_v1.1",
+    "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2"
   }
 }

@@ -3,9 +3,42 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [Unreleased]
+## [2.5.0] - 2026-08-18
 
 ### Added
+- **Solve captchas as they appear.** `solver.watch(page)` (TS) and
+  `PageSolver.watch(page)` (Python) install a watcher that probes the page and
+  solves any challenge that becomes visible, so a script no longer has to know
+  where a captcha might interrupt it. Exposed through camoufox as
+  `watchCaptcha` / `watch_captcha`.
+
+  It injects **nothing** into the page. The obvious build — a `MutationObserver`
+  signalling out through an exposed binding — reacts faster and is the one
+  design that cannot be stealthy everywhere, because a binding is a function on
+  `window` and an observer is script a vendor can enumerate. Instead it drives
+  the existing `detectCaptcha()` from the driver side on a timer, so there is no
+  new detection surface on any launcher; under camoufox those DOM reads land in
+  the sandboxed Juggler world for free, since that is camoufox's default for all
+  Playwright evaluation. The cost is reaction time bounded by `interval_ms`
+  rather than by the mutation.
+
+  Python's blocks (`run()`) where TypeScript's returns a handle, and offers
+  `poll_once()` for callers with their own loop: a sync Playwright handle cannot
+  be driven from a worker thread, so a background watcher is not available to it.
+
+### Fixed
+- **The Puppeteer adapter was never actually verified.** Its header claimed it
+  was "verified against Puppeteer 24.x" while nothing in the package touched it:
+  there was no test for it, and Tier 3 drives camoufox on both ports. It is now
+  covered by unit tests for every API delta it bridges, plus a live check that
+  launches real Puppeteer and real Playwright and drives every member of the
+  structural page surface through them (skipped when those libraries are not
+  installed — this package still ships with zero browser dependencies).
+
+  That verification found a real gap: `fromPuppeteer` did not forward
+  `isClosed`, which the new watcher reads to end its loop. A Puppeteer-driven
+  watcher would have polled a closed page forever.
+
 - **Distorted-text captchas are typed, and puzzle-piece sliders are dragged.**
   Two answer families the model was already trained to produce and the driver
   silently threw away. `ActionPlanner._normalize_pixel` dropped both — a
@@ -80,6 +113,28 @@ semantic versioning; v2 is a major, **breaking** release.
   trained on the keyframe format is what makes the answers good.
 
 ### Changed
+- **License bumped to CaptchaKraken Source-Available License v1.1.** One new
+  restriction and one new clarification, both about stealth browsers.
+
+  v1.0 listed "stealth / anti-detection browsers and browser automation
+  frameworks" as an illustrative *permitted* commercial use. That gave away the
+  thing worth keeping: any antidetect browser vendor could ship CaptchaKraken as
+  a built-in feature and market the solve as theirs. **§3(d)** now requires a
+  commercial license to embed, bundle, preinstall, fetch on demand, or advertise
+  the Software as a captcha-solving capability of a stealth/antidetect browser,
+  profile manager, or automation platform **distributed to third parties**.
+
+  It is a restriction on **distribution, not use**, and **§2(c)** says so
+  explicitly, because the ambiguity would otherwise land on exactly the people
+  this project is for: pointing the solver at Camoufox, Puppeteer, Playwright, or
+  any stealth browser to automate *your own* work stays unrestricted, commercial
+  or not. If you are the one clicking "run", nothing changed for you.
+
+  **Forward-only.** v1.1 governs releases distributed under it. Copies obtained
+  under v1.0 — including the already-published `CaptchaKrakenV1_Lora`,
+  `Sunlight-AWQ-4bit`, and `Twilight-FP8` weights — remain governed by v1.0; a
+  grant already made cannot be revoked by editing a file. `docs/licensing.md`
+  carries the plain-English version and a using-vs-shipping table.
 - **`AnimatedChallengeError` / `.animated` narrowed.** It used to mean "the
   challenge never settles, give up". It now means "an animated challenge we could
   not RECORD" — the element refused to screenshot, or `video_solve_enabled` is
@@ -334,7 +389,7 @@ unless you deliberately set it.
 
 ### Added
 - **Bring-your-own browser — zero browser dependency.** The package no longer
-  depends on any browser library in any form: `@jobharvest/camoufox-js`,
+  depends on any browser library in any form: the vendored `camoufox-js`,
   `patchright`, and `patchright-core` are gone (not even devDependencies). The
   public API types `solve(page)` against an implementation-neutral, self-contained
   structural Playwright `Page` interface defined by the package itself (not
@@ -366,7 +421,7 @@ unless you deliberately set it.
   per-type solve-rate summary.
 
 ### Solver / model
-- Grid LoRA (`JobHarvest/qwen3.5-9b-grid-lora`) exact-tile accuracy on held-out
+- Grid LoRA (CaptchaKraken's grid adapter) exact-tile accuracy on held-out
   real data: reCAPTCHA 3×3 **94.7%**, hCaptcha 3×3 property **86.7%**,
   reCAPTCHA 4×4 **76.2%** (overall **85.8%**).
 - reCAPTCHA dynamic 3×3 (multi-round in-place refresh) and 4×4 one-shot grids,

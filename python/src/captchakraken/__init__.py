@@ -45,11 +45,13 @@ try:  # pragma: no cover - exercised only when the serving stack is installed
     # caller supplies the Playwright-compatible page (see page_solver's module
     # docstring on why we duck-type rather than import one).
     from .page_solver import PageSolver, SolveResult, solve_captcha_on_page
+    from .watcher import CaptchaWatcher
 except ModuleNotFoundError:
     ActionPlanner = None  # type: ignore[assignment,misc]
     CaptchaSolver = None  # type: ignore[assignment,misc]
     solve_captcha = None  # type: ignore[assignment]
     PageSolver = None  # type: ignore[assignment,misc]
+    CaptchaWatcher = None  # type: ignore[assignment,misc]
     SolveResult = None  # type: ignore[assignment,misc]
     solve_captcha_on_page = None  # type: ignore[assignment]
 
@@ -57,6 +59,7 @@ __all__ = [
     "CaptchaSolver",
     "solve_captcha",
     "PageSolver",
+    "CaptchaWatcher",
     "SolveResult",
     "solve_captcha_on_page",
     "ActionPlanner",

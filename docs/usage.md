@@ -188,6 +188,68 @@ That's it — no model name to pass, no provider to choose, and **no browser loc
 in**. The solver defaults to the unified captcha LoRA and the endpoint from your
 env, and works with whatever browser you handed it.
 
+## Solve captchas as they appear
+
+`solve(page)` is a one-shot: it solves whatever challenge is on the page right
+now. When you do not know *where* in a script a captcha will show up, install a
+watcher instead and let it handle them underneath your automation.
+
+**TypeScript** — returns immediately, watches in the background:
+
+```typescript
+const solver = new CaptchaKrakenSolver();
+const watcher = solver.watch(page, {
+  onSolved: (r) => console.log('solved:', r.isSolved),
+});
+
+await page.goto('https://example.com/protected');   // solved as it appears
+// ... the rest of your automation ...
+
+await watcher.stop();                               // waits for a solve in flight
+```
+
+**Python** — the same idea, in the two shapes a synchronous driver allows:
+
+```python
+solver = PageSolver()
+
+solver.watch(page).run()          # blocking: hold this page clean
+
+watcher = solver.watch(page)      # or cooperatively, inside your own loop
+while working():
+    watcher.poll_once()
+```
+
+Options are the same on both (snake_cased in Python): `interval_ms` (default
+1000), `max_solves`, `error_backoff_ms` (default 5000, applied only after a
+solve *raises*), `on_solved`, `on_error`.
+
+### Why Python blocks and TypeScript does not
+
+A synchronous Playwright handle is bound to the greenlet that created it, so a
+worker thread cannot drive the page — `threading` would buy an exception, not a
+background watcher. The TypeScript driver is async and has no such limit. This
+is the one place the two ports deliberately differ.
+
+### It injects nothing into the page
+
+The obvious implementation is a `MutationObserver` in the page that calls out
+through an exposed binding. That reacts faster, and it is the one design that
+cannot be made stealthy everywhere: an exposed binding puts a function on
+`window`, and an observer is script the page can enumerate.
+
+So the watcher injects nothing at all. It drives the same `detectCaptcha()` the
+solver already uses, from the driver side, on a timer — there is no new
+detection surface on any launcher. Under camoufox the DOM reads that probe
+performs run in the sandboxed Juggler world, because that is camoufox's default
+for **all** Playwright evaluation (`main_world_eval` and an `mw:` prefix are the
+opt-*out*). Nothing here opts out, so the page can no more see the watcher than
+it can see Playwright itself.
+
+The trade is latency: a captcha that appears just after a tick waits up to one
+`interval_ms` to be noticed. Against a solve measured in seconds, that is not
+the number that matters.
+
 ## Cloning this repo
 
 If you're cloning instead of installing from npm, initialize the submodule that

@@ -1,4 +1,4 @@
-CaptchaKraken Source-Available License v1.0
+CaptchaKraken Source-Available License v1.1
 Copyright (c) 2026 CaptchaKraken LLC. All rights reserved.
 
 This license governs use of the CaptchaKraken software in this repository and of
@@ -26,11 +26,16 @@ You MAY use the Software for:
 
   Illustrative (non-exhaustive) examples of PERMITTED commercial use:
       - Web scrapers and data-collection pipelines.
-      - Stealth / anti-detection browsers and browser automation frameworks
-        that use the Software as one internal capability.
+      - Browser automation you build and operate for your own purposes.
       - QA, testing, and accessibility tooling.
       - Any application where the captcha solve is a means to an end the user
         is actually paying for.
+
+  (c) RUNNING the Software alongside a stealth, anti-detection, or antidetect
+      browser — Camoufox, Puppeteer, Playwright, or any similar tool — to
+      automate your own work, commercially or otherwise. Section 3(d) restricts
+      SHIPPING the Software as a feature of such a browser to other people. It
+      does not restrict USING it with one.
 
 ================================================================================
 3. PROHIBITED USES
@@ -51,7 +56,23 @@ holder:
       models (e.g. bounding boxes, tile selections, click plans) through a paid
       or public API as a captcha-solving service.
 
-  In short: you may BUILD WITH this Software, but you may not SELL THE SOLVE.
+  (d) Embed, bundle, preinstall, or otherwise ship the Software — or a client,
+      wrapper, plugin, or extension for it — as a captcha-solving capability of
+      any stealth browser, anti-detection or antidetect browser, browser
+      profile or identity manager, or browser-automation product or platform
+      that you distribute, host, or otherwise offer to third parties. This
+      applies whether the Software ships inside your distribution, is fetched
+      on demand, or is merely wired up and advertised as a supported
+      integration, and it applies whether or not you charge for it.
+
+      This restriction is about DISTRIBUTION, not use. Nothing in it limits
+      Section 2(c): a person who uses such a browser may install and run the
+      Software with it freely.
+
+  In short: you may BUILD WITH this Software, and you may USE it with whatever
+  browser you like — but you may not SELL THE SOLVE, and you may not SHIP THE
+  SOLVE as a feature of a stealth browser or automation product you hand to
+  other people.
 
 ================================================================================
 4. MODEL OUTPUTS
@@ -65,6 +86,7 @@ outputs as a captcha-solving service is prohibited under Section 3(c).
 ================================================================================
 If you redistribute the Software (modified or not), you must retain this license
 and this notice, and you must not remove or alter the restrictions in Section 3.
+The right to redistribute granted by Section 1 is subject to Section 3(d).
 
 ================================================================================
 6. TRADEMARKS
@@ -95,11 +117,29 @@ not endorse using the Software to violate any third party's terms or rights.
 9. COMMERCIAL LICENSING
 ================================================================================
 For uses prohibited under Section 3 — including selling captcha-solving as a
-service — contact the copyright holder to discuss a separate commercial license.
+service, and shipping the Software as a built-in capability of a stealth browser
+or automation product — contact the copyright holder to discuss a separate
+commercial license. These uses are licensable; they are not categorically
+refused.
+
+================================================================================
+10. VERSION HISTORY
+================================================================================
+v1.1 — Section 3(d) added: shipping the Software as a captcha-solving feature of
+       a stealth/anti-detection browser or automation product distributed to
+       third parties now requires a commercial license. Section 2(c) added to
+       make clear that USING the Software with such a browser remains permitted.
+       The v1.0 text listed "stealth / anti-detection browsers" as an
+       illustrative PERMITTED commercial use; that example is removed.
+v1.0 — Initial release.
+
+Each version applies to the releases distributed under it. Copies obtained under
+v1.0 remain governed by v1.0.
 
 --------------------------------------------------------------------------------
 This text is a license, not legal advice. If the boundary between a permitted
-"value-add" product and a prohibited "thin wrapper" is unclear for your use
+"value-add" product and a prohibited "thin wrapper", or between using the
+Software with a browser and shipping it as part of one, is unclear for your use
 case, ask by opening an issue or messaging the maintainer on GitHub:
 https://github.com/JWriter20/CaptchaKraken
 --------------------------------------------------------------------------------
