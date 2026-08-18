@@ -26,6 +26,19 @@ npx tsx examples/withPuppeteer.ts https://your.site/page
 npx tsx examples/watchPlaywright.ts https://your.site/page 60
 ```
 
+Running them **from this repo** needs one extra step: they `import
+{ ... } from 'captchakraken'`, exactly as your own code would, and that resolves
+from npm for a normal user but from nothing inside the checkout. Link the
+package to itself once:
+
+```bash
+cd js && ln -sfn "$(pwd)" node_modules/captchakraken && npm run build
+```
+
+`npm run build` matters too — the examples run the built `dist/`, and it also
+recopies `python/`, which wipes the bundled engine's venv. Re-create it with
+`node scripts/setup-python.js` if a solve dies on `No module named 'pydantic'`.
+
 They use `async function main()` rather than top-level await: this package is
 CommonJS, and tsx transpiles these to CJS, where top-level await is a syntax
 error.
