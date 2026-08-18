@@ -188,6 +188,14 @@ That's it — no model name to pass, no provider to choose, and **no browser loc
 in**. The solver defaults to the unified captcha LoRA and the endpoint from your
 env, and works with whatever browser you handed it.
 
+### Puppeteer in Python — there isn't one
+
+`fromPuppeteer()` is TypeScript-only, because Puppeteer is a Node library.
+Python's `pyppeteer` last released in February 2024, pins `urllib3 <2.0.0`
+against CaptchaKraken's own `requests`, and is async-only against a synchronous
+driver — two independent blockers. Playwright is the Python path, and
+`patchright` / `camoufox` are stealth-patched builds of it.
+
 ## Solve captchas as they appear
 
 `solve(page)` is a one-shot: it solves whatever challenge is on the page right
