@@ -292,6 +292,19 @@ export class CaptchaKrakenSolver {
   // the model about it, re-querying is wasted work — reuse the prior answer.
   // Cleared at the top of each solve. See getSolution().
   private solutionCache: Map<string, CliResponse> = new Map();
+  // Set when a screenshot we have ALREADY answered comes back this solve.
+  //
+  // Every answer getSolution returns is executed — there is no speculative
+  // call — so an identical picture on a later round cannot mean "nothing
+  // changed, reuse it". It means the answer we already tried changed nothing.
+  // On a board that CYCLES (GeeTest's svg variant advances through screens and
+  // dwells ~1.5s on each) the pixels come back around, the settle probe reads
+  // that dwell as static, and the driver replayed a failed answer every round:
+  // 81 solve loops, 12 model calls, 69 cache hits, 0 solves across 16 live
+  // attempts. So a repeat is treated as EVIDENCE the still reading was wrong,
+  // and the challenge is re-solved from a recorded burst. See
+  // repeated-answer.test.ts.
+  private repeatedAnswerSeen = false;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
   // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
   private state: CaptchaState = CaptchaState.Detecting;
@@ -360,8 +373,7 @@ export class CaptchaKrakenSolver {
     this.imageCounter = 0;
     this.stepIndex = 0;
     this.solveStartMs = start;
-    this.solutionCache.clear();
-    this.lastSubmitFrameHash = null;
+    this.resetSolveState();
     this.setState(CaptchaState.Detecting);
 
     // Initialize session debug directory if debugging is enabled
@@ -764,6 +776,19 @@ export class CaptchaKrakenSolver {
       }
     }
 
+    /*
+     * A board that cycles but DWELLS defeats the settle probe: it holds each
+     * screen still for far longer than the ~440ms of stillness that declares a
+     * challenge static, so it is read as a picture and answered from whichever
+     * screen we caught. The tell arrives a round later, when a screenshot we
+     * have already answered comes back — proof that the answer ran and moved
+     * nothing. Record it from here on instead of guessing at another still.
+     */
+    if (!isAnimated && this.shouldRetryAsAnimated(puzzleSource)) {
+      console.log('[animated] a picture we already answered came back — recording it');
+      isAnimated = true;
+    }
+
     // Only the image-challenge frame (bframe) holds a grid. The anchor checkbox
     // (api2/anchor) has none — running the grid settle/detect on it just wastes
     // an 8s timeout + a find-grid subprocess before the checkbox click. Gate the
@@ -776,21 +801,18 @@ export class CaptchaKrakenSolver {
     // blank/partial grid. Poll until the grid's cells have settled before
     // grabbing the frame. Best-effort — falls through on timeout. The in-place
     // refresh re-enters solveSingle each loop, so this guard covers it too.
-    // True only for a one-shot reCAPTCHA grid (4x4): click all matching tiles,
-    // then submit in the same pass — these never blank/fade, so there's no
-    // dynamic-refresh loop to run.
-    let isRecaptchaOneShotGrid = false;
     // Grid size the solver establishes for this challenge, surfaced in the
     // baseline step's meta so callers (e.g. the demo recorder) can bucket
     // reCAPTCHA attempts into 3x3 vs 4x4 without scraping debug logs.
     let establishedGridSize: number | null = null;
     if (isRecaptchaChallenge) {
       await this.waitForGridCellsLoaded(captchaElement);
-      // 3x3 reCAPTCHA puzzles refresh tiles in place (blank/fade → new image),
-      // so they need the multi-round driver: click → hover/wait for fades →
-      // re-solve, submitting only when the CLI says `done`. 4x4 puzzles only ever
-      // return `checked` (no in-place refresh) and are one-shot like hCaptcha.
-      // Falls through if the grid can't be established.
+      // Only a 3x3 reCAPTCHA ever refreshes its tiles in place (blank/fade →
+      // new image), so only a 3x3 can need the multi-round driver: click →
+      // hover/wait for fades → re-solve. Whether THIS one does is decided inside
+      // the driver, by what the widget does with the first click. A 4x4 never
+      // refreshes and is one-shot like hCaptcha: click all matching tiles, then
+      // submit in the same pass. Falls through if the grid can't be established.
       const grid = await this.getGridBoxes(captchaElement);
       if (grid && grid.size === 3) {
         establishedGridSize = 3;
@@ -800,7 +822,6 @@ export class CaptchaKrakenSolver {
         }
       } else if (grid && grid.size === 4) {
         establishedGridSize = 4;
-        isRecaptchaOneShotGrid = true;
       }
     }
 
@@ -1879,22 +1900,42 @@ export class CaptchaKrakenSolver {
   }
 
   /**
-   * Detect whether any tiles are blank or fading, watching for the ONSET of the
-   * reCAPTCHA refresh over a short grace window. The blank/fade transition lags
-   * the click by a beat, so a single snapshot right after clicking misses it
-   * (the tile still shows its old image — not yet white, not yet changing). We
-   * poll consecutive frames and mark a cell loading if it is `empty` (≥97%
-   * near-white) OR `changing` (>2% pixels differ). HOVERS a clicked tile each
-   * poll so the mouse keeps moving (no unnatural pauses). Returns the loading
-   * cells (priority/clicked first) as soon as any appears, or [] if the whole
-   * window passes with nothing loading (→ solved). Logs every poll + frame.
+   * Watch the just-clicked tiles until the widget says what it did with them.
+   *
+   * Two answers because reCAPTCHA gives a click one of exactly two replies, and
+   * they are the two kinds of board:
+   *
+   *   - `chipped`: the small blue chip landed in the tiles' top-left corners —
+   *     the photos were KEPT. Nothing is on its way in, the selection is the
+   *     answer, and the caller should press Verify.
+   *   - `loading`: the photos are blanking or dissolving under a large centred
+   *     check — those tiles are being SWAPPED, and what lands may match too, so
+   *     the board has to be read again.
+   *
+   * A widget that swaps one clicked cell swaps them all, so the two never share
+   * a board and one look at the tiles we just clicked settles it. The chip is
+   * what the CV layer reports as `selected` (top-left corner only, behind a
+   * circularity and a centroid test a centred check fails), and we already read
+   * it on every poll. `chipped` needs EVERY watched tile: a partial reading is a
+   * misread, and calling a swapping board finished submits half an answer and
+   * burns the attempt, where calling a chipped board unfinished costs one
+   * inference.
+   *
+   * The blank/fade transition lags the click by a beat, so a single snapshot
+   * right after clicking misses it (the tile still shows its old image — not yet
+   * white, not yet changing). We poll consecutive frames and mark a cell loading
+   * if it is `empty` (≥97% near-white) OR `changing` (>2% pixels differ). HOVERS
+   * a clicked tile each poll so the mouse keeps moving (no unnatural pauses).
+   * Returns as soon as either verdict is in, or `{loading: [], chipped: false}`
+   * if the whole window passes with nothing happening (→ solved). Logs every
+   * poll + frame.
    */
-  private async currentLoadingCells(
+  private async watchClickedTiles(
     page: Page,
     captchaElement: ElementHandle,
     session: GridSession,
     priority: number[] = [],
-  ): Promise<number[]> {
+  ): Promise<{ loading: number[]; chipped: boolean }> {
     const grace = this.config.recaptchaFadeOnsetGraceMs ?? 4000;
     const interval = this.config.recaptchaDynamicFadePollMs ?? 250;
     const start = Date.now();
@@ -1946,21 +1987,30 @@ export class CaptchaKrakenSolver {
           empty: st?.empty ?? null, changing: st?.changing ?? null,
           loaded: st?.loaded ?? null, selected: st?.selected ?? null,
         }, b);
+        // Chip first: a chip landing on a tile ZOOMS its photo out, which reads
+        // as `changing` on the very frame that shows the chip. Test the swap
+        // first and every chipped board looks like a swapping one for as long as
+        // that animation runs.
+        const selected = st?.selected ?? [];
+        if (priority.length && priority.every(c => selected.includes(c))) {
+          this.gridDebug('fade-onset:chipped', { chipped: priority, afterMs: Date.now() - start });
+          return { loading: [], chipped: true };
+        }
         const loading = [...new Set([...emptyW, ...changingW])];
         if (loading.length) {
           const ordered = this.orderByPriority(loading, priority);
           this.gridDebug('fade-onset:loading-detected', { loading: ordered, afterMs: Date.now() - start });
-          return ordered;
+          return { loading: ordered, chipped: false };
         }
 
         const stale = frames.shift();
         if (stale && fs.existsSync(stale)) fs.unlinkSync(stale);
       }
       this.gridDebug('fade-onset:none', { afterMs: Date.now() - start, polls });
-      return [];
+      return { loading: [], chipped: false };
     } catch (e) {
       this.gridDebug('fade-onset:error', { error: String(e) });
-      return [];
+      return { loading: [], chipped: false };
     } finally {
       for (const f of frames) {
         if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
@@ -2053,7 +2103,13 @@ export class CaptchaKrakenSolver {
    * and on a `wait`, it hovers the just-clicked / currently blank+fading tiles
    * (in click order) and waits for at least one to finish reloading before
    * re-screenshotting and re-solving — so we don't burn a solver call on a grid
-   * that's still mid-fade. It submits only on `done`.
+   * that's still mid-fade.
+   *
+   * Only a board that SWAPS a clicked tile out is worth those extra rounds. One
+   * that ticks the tile and keeps the photo has been fully answered by the round
+   * that clicked it — same as the 4x4 — so `watchClickedTiles` reports the chip
+   * and this submits there and then. Rounds 2..N exist for the fading board and
+   * nothing else. It submits on `done`, and on a board that ticked our clicks.
    *
    * Returns the same shape as solveSingle so the outer solve loop — including the
    * under-selection retry and post-solve detectCaptcha — wraps it unchanged.
@@ -2150,8 +2206,8 @@ export class CaptchaKrakenSolver {
         // Tiles are still loading; the CLI explicitly told us NOT to submit.
         // Find what's loading, hover it, and wait for at least one to settle.
         console.log(`[recaptcha-grid] round ${round}: CLI says wait (${(action as any).duration_ms ?? 0}ms).`);
-        const loadingCells = await this.currentLoadingCells(page, captchaElement, session, clickedOrder);
-        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loadingCells);
+        const { loading } = await this.watchClickedTiles(page, captchaElement, session, clickedOrder);
+        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading);
         continue;
       }
 
@@ -2184,23 +2240,25 @@ export class CaptchaKrakenSolver {
         this.gridDebug(`round-${round}:clicked`, { bboxes, clickedThisRound });
         await this.emitStep(captchaElement, 'click', `round-${round}:clicked ${bboxes.length} tile(s)`, 'recaptcha', 'challenge', attempt, { round, clickedThisRound, bboxes });
 
-        // 5. The clicked tiles may go blank / fade out for a replacement
-        //    (dynamic puzzle), or they may just stay checked (the puzzle is
-        //    fully solved). reCAPTCHA's blank/fade transition lags the click, so
-        //    we watch a grace window (not a single instant-after snapshot).
-        const loadingCells = await this.currentLoadingCells(page, captchaElement, session, clickedThisRound);
-        if (!loadingCells.length) {
-          // Nothing is loading/fading within the grace window → the model fully
-          // solved it; submit immediately rather than burning another round.
-          console.log(`[recaptcha-grid] round ${round}: no tiles loading after click; submitting.`);
-          this.gridDebug(`round-${round}:no-loading-submit`, {});
+        // 5. The clicked tiles either wear the chip (the widget kept the photo:
+        //    this board is answered) or go blank / fade out for a replacement
+        //    (dynamic puzzle: read it again). reCAPTCHA's reply lags the click,
+        //    so we watch a grace window, not a single instant-after snapshot.
+        const { loading, chipped } = await this.watchClickedTiles(page, captchaElement, session, clickedThisRound);
+        if (chipped || !loading.length) {
+          // Either the widget ticked our clicks and kept the photos — a board
+          // that does that is fully answered by the round that clicked it — or
+          // nothing loaded within the grace window. Submit rather than paying
+          // for another round to be told the same thing.
+          console.log(`[recaptcha-grid] round ${round}: ${chipped ? 'tiles chipped' : 'no tiles loading'} after click; submitting.`);
+          this.gridDebug(`round-${round}:${chipped ? 'chipped-submit' : 'no-loading-submit'}`, {});
           shouldSubmit = true;
           break;
         }
         // Tiles are reloading — wait (while hovering) for at least one to settle
         // before re-solving, so we don't feed the model a mid-fade grid.
-        console.log(`[recaptcha-grid] round ${round}: tiles loading ${JSON.stringify(loadingCells)}; waiting.`);
-        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loadingCells);
+        console.log(`[recaptcha-grid] round ${round}: tiles loading ${JSON.stringify(loading)}; waiting.`);
+        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading);
         continue;
       }
 
@@ -2210,8 +2268,9 @@ export class CaptchaKrakenSolver {
     }
 
     // Submit: click Verify if present (no-op if the grid is gone). Only when the
-    // CLI signalled `done` — never on a timeout/round-cap exit, which leaves the
-    // outer loop to re-detect and decide.
+    // CLI signalled `done` or the widget chipped our clicks — never on a
+    // timeout/round-cap exit, which leaves the outer loop to re-detect and
+    // decide.
     if (shouldSubmit) {
       const frame = await captchaElement.contentFrame();
       if (frame) {
@@ -2256,7 +2315,16 @@ export class CaptchaKrakenSolver {
         await captchaElement.screenshot({
           path: frame,
           timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
-          animations: 'disabled',
+          // ANIMATIONS STAY ON. Everywhere else in this file screenshots are
+          // taken with animations: 'disabled', which is right when the goal is
+          // a stable still — it fast-forwards finite animations and FREEZES
+          // infinite ones. Here the motion IS the subject, so freezing it
+          // records the same picture forty times: GeeTest's svg board cycles in
+          // CSS, and the slicer correctly reported the burst as `mode=static`
+          // and cut it down to a single keyframe, putting us back to answering
+          // a still. hCaptcha's animated challenges hid this because they
+          // animate in canvas, which that flag does not touch.
+          animations: 'allow',
         });
         captured++;
       } catch {
@@ -2402,41 +2470,87 @@ export class CaptchaKrakenSolver {
     return false;
   }
 
+  /**
+   * Per-solve state that must not leak into the next challenge on the page.
+   *
+   * A repeat is a fact about ONE challenge. Carrying it forward would make the
+   * captcha after a cycling one record a burst it does not need.
+   */
+  private resetSolveState(): void {
+    this.solutionCache.clear();
+    this.repeatedAnswerSeen = false;
+    this.lastSubmitFrameHash = null;
+  }
+
+  /**
+   * The answer for this picture, asking the model only if we have not already.
+   *
+   * The cache saving is real and is kept: a byte-identical picture costs no
+   * second inference. What changed is what a hit MEANS. It used to mean
+   * "nothing has changed, so this answer still stands"; it actually means the
+   * answer already ran and moved nothing, because every answer this returns is
+   * executed. So the hit is served (it is free) and recorded, and the round
+   * after it stops guessing at a still frame — see `shouldRetryAsAnimated`.
+   */
+  private async answerFor(cacheKey: string, ask: () => Promise<CliResponse>): Promise<CliResponse> {
+    const cached = this.solutionCache.get(cacheKey);
+    if (cached) {
+      console.log(
+        '[dedup] this exact picture was already answered and the answer already ran — '
+        + 'the challenge is cycling, not still; re-solving it as animated.',
+      );
+      this.repeatedAnswerSeen = true;
+      // Reuse the actions but drop the token usage (no new tokens were spent).
+      return { actions: cached.actions, token_usage: [] };
+    }
+    const fresh = await ask();
+    this.solutionCache.set(cacheKey, fresh);
+    return fresh;
+  }
+
+  /**
+   * Should this round be recorded and solved from keyframes instead of read as
+   * a still?
+   *
+   * reCAPTCHA is excluded deliberately. Its dynamic 3x3 REPLACES tiles in place
+   * and has its own multi-round driver with its own fade gates; its grids are
+   * never animated, so escalating there would swap a path that works for one
+   * that cannot read a grid.
+   */
+  private shouldRetryAsAnimated(puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown'): boolean {
+    if (!this.repeatedAnswerSeen) return false;
+    if (puzzleSource === 'recaptcha') return false;
+    return this.config.videoSolveEnabled !== false;
+  }
+
   private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
     // v2 ships a single provider: the CaptchaKraken vLLM server via the bundled
     // CaptchaKraken CLI. The CLI's planner reads VLLM_BASE_URL and the bearer
     // token (CAPTCHA_KRAKEN_API_KEY, falling back to VLLM_API_KEY) from the
     // environment; we also forward the key explicitly as a CLI arg below so it
-    // works even when the subprocess doesn't inherit it.
-    const {
-      // vLLM LoRA name. Defaults to the full-puzzle `captcha` adapter
-      // (CaptchaKraken's captcha LoRA — solves grids AND click/drag/pixel
-      // puzzles). Override in code or via CAPTCHA_LORA_NAME (e.g. `captcha-grid`
-      // for the older grids-only adapter). Most users only set the endpoint URL
-      // and, for the hosted API, CAPTCHA_KRAKEN_API_KEY.
-      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
-      apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
-    } = this.config;
+    // works even when the subprocess doesn't inherit it. The LoRA name defaults
+    // to the full-puzzle `captcha` adapter; override via CAPTCHA_LORA_NAME.
 
-    // Dedup: if we've already asked the model about a byte-identical screenshot
-    // under the same prompt (puzzle source + retry mode), the page hasn't
-    // changed and another vLLM call would be wasted work. Reuse the answer.
-    // The image bytes ARE the cache key — any real page change (tile refresh,
-    // new challenge, fade) alters pixels and misses the cache, so this never
-    // stales a genuinely-changed puzzle.
+    // Dedup on the screenshot's bytes under the same prompt (puzzle source +
+    // retry mode). A hit costs no inference; what it MEANS is answerFor's job,
+    // and it is not "nothing changed" — see the note on repeatedAnswerSeen.
     let cacheKey: string | null = null;
     try {
       const imgHash = createHash('sha1').update(fs.readFileSync(imagePath)).digest('hex');
       cacheKey = `${imgHash}|${puzzleSource}|${retryMode ?? ''}|${textMode ? 'text' : ''}`;
-      const cached = this.solutionCache.get(cacheKey);
-      if (cached) {
-        console.log('[dedup] identical screenshot already solved this session — skipping vLLM query.');
-        // Reuse the actions but drop the token usage (no new tokens were spent).
-        return { actions: cached.actions, token_usage: [] };
-      }
     } catch {
       cacheKey = null; // hashing failed — fall through to a normal query
     }
+    if (cacheKey) return this.answerFor(cacheKey, () => this.askModel(imagePath, puzzleSource, retryMode, textMode));
+    return this.askModel(imagePath, puzzleSource, retryMode, textMode);
+  }
+
+  /** One inference: build the CLI invocation, run it, parse what comes back. */
+  private async askModel(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
+    const {
+      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
+      apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
+    } = this.config;
 
     const { cliRoot, py } = this.resolveCli();
 
@@ -2516,11 +2630,8 @@ export class CaptchaKrakenSolver {
           }
         }
 
-        const response: CliResponse = { actions, token_usage: tokenUsage };
-        // Cache under the screenshot hash so a byte-identical re-query this
-        // session reuses this answer instead of hitting vLLM again.
-        if (cacheKey) this.solutionCache.set(cacheKey, response);
-        return response;
+        // Caching is answerFor's, so that what a hit MEANS lives in one place.
+        return { actions, token_usage: tokenUsage };
       } catch (parseError) {
         throw new Error(`Failed to parse CLI output: ${stdout}\nStderr: ${stderr}`);
       }
