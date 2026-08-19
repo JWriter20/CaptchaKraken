@@ -38,7 +38,7 @@ changes, so you can switch later by editing one variable.
 |---|---|---|
 | You need | Nothing | 11 GB+ of VRAM or Apple unified memory |
 | Takes | ~1 minute | ~20 minutes (model download) |
-| Runs | Our production adapter, on our fleet — the **Twilight** weights, served for you | The same model family, on your card |
+| Runs | **Twilight v1.2** on our fleet, served for you | The same weights, on your card |
 | Cost | $0.30 per 1,000 image responses. Checkbox and Turnstile are free. | Your electricity |
 | Screenshots | Sent to our gateway | Never leave your machine |
 
@@ -98,7 +98,8 @@ stays up. Hardware notes, server commands, and updating:
 
 > `setup.sh` installs a **LoRA adapter**, which needs vLLM. If you use another
 > runtime — or just want one file and no adapter flags — serve the merged
-> **Sunlight** (4-bit) or **Twilight** (8-bit) builds instead. Both are public.
+> **Sunlight v1.2** (4-bit) or **Twilight v1.2** (8-bit) builds instead. Both
+> are public.
 > See [The models](#the-models).
 
 **Already run your own vLLM server?** Point at it and skip all of the above. A
@@ -215,52 +216,59 @@ accuracy: **[docs/performance.md](./docs/performance.md)**.
 
 ## The models
 
-Three models, named for the ocean's depth zones. Depth means capability, and it
-also means access: at the surface the weights are yours to download, and at the
-bottom the model is not published at all.
+Two public releases. Within each, the same weights in three shapes: the **LoRA
+adapter** (strongest, needs vLLM and two downloads) and two **merged** builds
+that are one self-contained file any safetensors runtime will serve.
 
-| | Depth | What it is | Weights |
-|---|---|---|---|
-| 🟦 **Sunlight** | 0–200 m | The adapter merged into the base and quantised to **4-bit (AWQ)**. ~9 GB, comfortable on 11 GB of VRAM. | [Public](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
-| 🟦 **Twilight** | 200–1,000 m | The same merge at **8-bit (FP8)**. ~14 GB, wants 22 GB to serve comfortably. | [Public](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
-| ⬛ **Abyss** | 4,000–6,000 m | **In training, not serving yet.** Trained against the failures of the open weights. Hosted-only when it lands. | **Never published** |
+### v1.2 — current
 
-Alongside them is the **LoRA adapter**, which is what `setup.sh` installs:
-[`CaptchaKraken/CaptchaKraken-Lora-v1.2`](https://huggingface.co/CaptchaKraken/CaptchaKraken-Lora-v1.2).
-It is applied at serve time on top of a stock `Qwen3.5-9B-VL`, which means two
-downloads and an `--enable-lora` flag — and it is the **newest and strongest**
-open weights we publish.
+**Covers every vendor we solve**: 44 puzzle types across reCAPTCHA, hCaptcha,
+GeeTest, NetEase Yidun, BotDetect, MTCaptcha, Yandex, Tencent, Lemin and
+Prosopo — and it is the first generation to handle **animated challenges** and
+**typed text**. Prompt generation 2; needs `captchakraken >= 2.5.0`.
 
-**Sunlight and Twilight exist so you do not have to do that.** They are the
-adapter already merged into the base and quantised, so what you download is one
-self-contained model that vLLM, and any runtime that loads standard
-safetensors, will serve without knowing what a LoRA is.
+| | Precision | Size | Min VRAM | Weights |
+|---|---|---|---|---|
+| **LoRA adapter** | bf16 on a stock base | ~0.4 GB + base | depends on base | [`CaptchaKraken-Lora-v1.2`](https://huggingface.co/CaptchaKraken/CaptchaKraken-Lora-v1.2) |
+| 🟦 **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
+| 🟦 **Sunlight** | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
 
-> ℹ️ **Sunlight and Twilight are a generation behind.** They merge the earlier
-> `CaptchaKrakenV1_Lora` (prompt generation 1). The `-Lora-v1.2` adapter above
-> is generation 2 and scores higher. Convenience or accuracy — pick one; both
-> are supported.
+`./setup.sh` installs the LoRA adapter. **Twilight v1.2 is what the hosted API
+answers with** — the same LoRA on the same base, merged.
 
-**Abyss is not serving yet.** The hosted API answers with the production
-adapter today — the same weights published as **Twilight**. Abyss is the next
-model, and it is hosted-only on purpose: it is not a bigger quantisation of the
-public weights. Every puzzle the open model gets wrong on the held-out set is
-a labelled example of a weakness, and Abyss is trained specifically to close
-them — starting with the non-grid hCaptcha puzzles and video, which the open
-weights skip rather than guess at. Keeping it on our own fleet is what lets it
-keep learning from production failures without shipping a customer's puzzle set
-to everyone who runs `hf download`.
+### v1.1 — previous
+
+**reCAPTCHA and hCaptcha only.** Not "worse at" the other vendors — it was
+never shown them, and will not attempt a GeeTest slider or a typed-text captcha
+at all. Prompt generation 1. Still published and supported; take it if that is
+all you face and you want the smaller stack.
+
+| | Precision | Size | Min VRAM | Weights |
+|---|---|---|---|---|
+| **LoRA adapter** | bf16 on a stock base | ~0.4 GB + base | depends on base | [`CaptchaKrakenV1_Lora`](https://huggingface.co/CaptchaKraken/CaptchaKrakenV1_Lora) |
+| 🟦 **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
+| 🟦 **Sunlight** | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
+
+### ⬛ Abyss — not published, not serving yet
+
+**In training.** Trained against the failures of the open weights, and
+**hosted-only** when it lands — it is not a bigger quantisation of the public
+models. Every puzzle the open model gets wrong on the held-out set is a
+labelled example of a weakness, and Abyss is trained specifically to close
+them, starting with the non-grid hCaptcha puzzles. Keeping it on our own fleet
+is what lets it keep learning from production failures without shipping a
+customer's puzzle set to everyone who runs `hf download`. **Do not plan around
+it today** — the hosted API answers with Twilight v1.2 until it ships.
 
 Which one you want:
 
 | If | Use |
 |---|---|
 | You have no GPU | the [hosted API](./docs/hosted-api.md) |
-| You want the best open weights, and run vLLM | the **LoRA adapter** — `./setup.sh` |
-| You want one file and the simplest serve, 22 GB+ | **Twilight** |
-| You want one file and the simplest serve, 11–22 GB | **Sunlight** |
-| You don't use vLLM | **Sunlight** or **Twilight** |
-| You need video challenges | the [hosted API](./docs/hosted-api.md) — `setup.sh`'s adapter skips them rather than guess |
+| You want the best open weights, and run vLLM | the **v1.2 LoRA adapter** — `./setup.sh` |
+| You want one file and the simplest serve, 22 GB+ | **Twilight v1.2** |
+| You want one file and the simplest serve, 11–22 GB | **Sunlight v1.2** |
+| You only face reCAPTCHA / hCaptcha and want the older, smaller stack | **v1.1** |
 
 Serving details for every option: **[docs/self-hosting.md](./docs/self-hosting.md)**.
 
@@ -391,10 +399,10 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 - 🟢 **Shipped** — the **hosted API** (`api.captchakraken.com`, self-serve
   signup), a mid-inference **freshness guard** (never act on a stale frame),
   and a one-command **`captchakraken fetch`** updater.
-- 🟢 **Shipped** — the **Sunlight** and **Twilight** merges, now public on
-  [HuggingFace](https://huggingface.co/CaptchaKraken).
-- 🟡 **In progress** — 🎥 **video challenges**, and **Abyss**, the next hosted
-  model.
+- 🟢 **Shipped** — **v1.2**: every vendor we solve (44 puzzle types across 10),
+  animated challenges, typed text — as a LoRA and as **Sunlight** / **Twilight**
+  merges, all public on [HuggingFace](https://huggingface.co/CaptchaKraken).
+- 🟡 **In progress** — **Abyss**, the next hosted-only model.
 - ⚪ **Planned** — 🧩 more non-grid hCaptcha puzzles (drag, path, tetris-fit).
 
 The visual, always-current version is in **[docs/roadmap.md](./docs/roadmap.md)**.

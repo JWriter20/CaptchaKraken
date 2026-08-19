@@ -134,25 +134,25 @@ a **merged** model instead. Both are public:
 
 | Model | Precision | Size | Min VRAM | Hub id |
 |---|---|---|---|---|
-| **Sunlight** | 4-bit (AWQ) | ~9.1 GB | ~11 GB | `CaptchaKraken/Sunlight-AWQ-4bit` |
-| **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | `CaptchaKraken/Twilight-FP8` |
+| **Sunlight v1.2** | 4-bit (AWQ) | ~9 GB | ~11 GB | `CaptchaKraken/Sunlight-v1.2-AWQ-4bit` |
+| **Twilight v1.2** | 8-bit (FP8) | ~14 GB | ~22 GB | `CaptchaKraken/Twilight-v1.2-FP8` |
 
 ```bash
-vllm serve CaptchaKraken/Twilight-FP8 \
+vllm serve CaptchaKraken/Twilight-v1.2-FP8 \
   --max-model-len 8192 --gpu-memory-utilization 0.85 \
   --trust-remote-code --port 8000
 
 export VLLM_BASE_URL=http://localhost:8000/v1
 export CAPTCHA_KRAKEN_API_KEY=EMPTY
-export CAPTCHA_LORA_NAME=CaptchaKraken/Twilight-FP8   # must match the served name
+export CAPTCHA_LORA_NAME=CaptchaKraken/Twilight-v1.2-FP8   # must match the served name
 ```
 
 No `--enable-lora`, no adapter flags — the adapter is already merged in.
 
-**Trade-off, state it honestly:** the merged models are prompt **generation 1**
-(merges of `CaptchaKrakenV1_Lora`). The adapter `setup.sh` installs is
-`CaptchaKraken-Lora-v1.2`, **generation 2**, and scores higher. Convenience
-versus accuracy.
+**These are generation-2 merges of the same v1.2 adapter `setup.sh` installs**,
+so there is no accuracy-versus-convenience trade any more — only 4-bit vs 8-bit.
+The older v1.1 merges (`Sunlight-AWQ-4bit`, `Twilight-FP8`) are still published
+but cover reCAPTCHA and hCaptcha only.
 
 If you write a client against a merged model directly: send
 `chat_template_kwargs: {"enable_thinking": false}`, and expect coordinates
@@ -339,8 +339,8 @@ client unless you have a reason not to.
   Say they are not published yet.
 - **Abyss is not serving yet** and is never downloadable. Do not tell a user
   the hosted API runs it, and do not suggest weights or a workaround for it.
-  The hosted endpoint answers with the production adapter (the **Twilight**
-  weights). Verify with `GET /v1/models` before claiming otherwise.
+  The hosted endpoint answers with **Twilight v1.2**. Verify with
+  `GET /v1/models` before claiming otherwise.
 - **Never print an API key** into a transcript, a log, or a commit. Use the MCP
   flow, which writes it to disk instead.
 - **Do not commit `captchakraken.env`.** It holds a key and is gitignored.
