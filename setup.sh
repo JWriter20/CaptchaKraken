@@ -35,8 +35,13 @@ VENV_DIR="$PY_DIR/.venv"
 BASE_BF16="Qwen/Qwen3.5-9B"                     # full precision, ~18 GB, matches training
 BASE_FP8="RedHatAI/Qwen3.5-9B-FP8-dynamic"      # 8-bit, ~14 GB, best accuracy/size trade
 BASE_AWQ="cyankiwi/Qwen3.5-9B-AWQ-4bit"         # 4-bit, ~6 GB, lighter / lower accuracy
-LORA_ADAPTER="CaptchaKraken/CaptchaKraken_v1"   # the unified captcha adapter
-LORA_NAME="captcha"                             # served name the client requests as `model`
+# These two MUST match the `latest` entry in python/src/captchakraken/models.json:
+# the env file we write overrides the client's own defaults, and an adapter that
+# is not registered there resolves to generation-1 prompts against whatever
+# generation the weights were trained on — silently, on every puzzle.
+# tests/test_setup_sh_model_ids.py pins the match.
+LORA_ADAPTER="CaptchaKraken/CaptchaKraken-Lora-v1.2"   # the unified captcha adapter
+LORA_NAME="captcha-v12"                         # served name the client requests as `model`
 PORT="${VLLM_PORT:-8000}"
 REPO_URL="https://github.com/JWriter20/CaptchaKraken"
 
@@ -91,7 +96,7 @@ pick_quant() {
   else
     err "Detected ~${DETECT_MEM_GB} GB ${DETECT_KIND} — below the ${HARD_FLOOR} GB floor to serve even the 4-bit model."
     echo "  1) Download weights anyway (stage for a bigger box):  ./setup.sh --download-only"
-    echo "  2) Watch the repo for smaller models + a hosted API:  $REPO_URL"
+    echo "  2) Use the hosted API instead — no GPU needed:  https://captchakraken.com/signin"
     if [[ "$ASSUME_YES" == "1" ]]; then exit 1; fi
     read -r -p "Download-only now? [y/N]: " a
     case "${a:-N}" in y|Y) QUANT="awq"; DOWNLOAD_ONLY=1 ;; *) exit 0 ;; esac
@@ -214,4 +219,4 @@ else
   echo "  Or start it explicitly now:  captchakraken server start"
 fi
 echo
-info "Self-hosted for now — hosted cloud API coming: $REPO_URL"
+info "No GPU on another box? The hosted API needs none: https://captchakraken.com/signin"

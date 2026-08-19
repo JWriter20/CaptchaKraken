@@ -8,10 +8,11 @@
 <h1 align="center">CaptchaKraken</h1>
 
 <p align="center">
-  <b>A self-hosted captcha solver for browser automation.</b><br>
+  <b>A captcha solver for browser automation.</b><br>
   Give it a page — it finds the captcha, reads the puzzle with a fine-tuned
   <b>Qwen3.5-9B</b> vision model, and clicks through to a token.<br>
-  Everything runs on <b>your</b> hardware. No third-party solving service.
+  Run the model on <b>your own hardware</b>, or call the <b>hosted API</b> and
+  run nothing at all.
 </p>
 
 <p align="center">
@@ -22,9 +23,141 @@
 </p>
 
 > ⭐ **Enjoying CaptchaKraken?** [Star & watch the repo](https://github.com/JWriter20/CaptchaKraken)
-> for new puzzle types, smaller models, and the hosted cloud API. One repo, two
+> for new puzzle types, smaller models, and video support. One repo, two
 > published ports — the TypeScript browser driver (**npm:** `captchakraken`) and
 > the Python engine (**PyPI:** `captchakraken`).
+
+---
+
+## Setup
+
+Two ways to run the model. The client code is identical — only the endpoint
+changes, so you can switch later by editing one variable.
+
+| | ☁️ **Hosted API** | 🖥️ **Self-hosted** |
+|---|---|---|
+| You need | Nothing | 11 GB+ of VRAM or Apple unified memory |
+| Takes | ~1 minute | ~20 minutes (model download) |
+| Runs | Our production adapter, on our fleet — the **Twilight** weights, served for you | The same model family, on your card |
+| Cost | $0.30 per 1,000 image responses. Checkbox and Turnstile are free. | Your electricity |
+| Screenshots | Sent to our gateway | Never leave your machine |
+
+**Agents:** the same instructions in a shorter, machine-readable form are in
+**[AGENTS.md](./AGENTS.md)**.
+
+### Option 1 — Hosted API
+
+No GPU, no download, no server.
+
+The easiest path is the account MCP server. It signs you in and writes the key
+to disk for you, so **you set no environment variables at all**:
+
+```bash
+claude mcp add captchakraken -- npx -y captchakraken-mcp
+```
+
+Then call `sign_in` (a human approves it in a browser with GitHub — new accounts
+get free trial credits), and call `create_api_key`. The key and the endpoint are
+written to `~/.captchakraken/credentials`, which the solver reads by itself. The
+key is never printed into your terminal or your agent's transcript.
+
+Prefer to do it by hand? Sign in at
+**[captchakraken.com/signin](https://captchakraken.com/signin)**, copy your
+`ck_live_…` key, and set two variables:
+
+```bash
+export VLLM_BASE_URL=https://api.captchakraken.com/v1
+export CAPTCHA_KRAKEN_API_KEY=ck_live_your_key_here
+```
+
+You are billed per **model response**, not per captcha — one captcha usually
+takes 1–2. A single solve attempt is capped at **5 billable responses**, so a
+stubborn captcha cannot run up an unbounded bill.
+
+### Option 2 — Self-host
+
+One command. It checks your GPU or Apple memory, picks a model size that fits,
+downloads it, and writes a config file:
+
+```bash
+git clone https://github.com/JWriter20/CaptchaKraken
+cd CaptchaKraken
+./setup.sh
+source captchakraken.env
+```
+
+| Your memory | What it installs |
+|---|---|
+| **22 GB+** | 8-bit base (~14 GB) — best accuracy |
+| **11–22 GB** | 4-bit base (~6 GB) — lighter |
+| **Under 11 GB** | Stops and explains your options |
+
+**You never start a server.** vLLM starts by itself on your first solve and
+stays up. Hardware notes, server commands, and updating:
+**[docs/self-hosting.md](./docs/self-hosting.md)**.
+
+> `setup.sh` installs a **LoRA adapter**, which needs vLLM. If you use another
+> runtime — or just want one file and no adapter flags — serve the merged
+> **Sunlight** (4-bit) or **Twilight** (8-bit) builds instead. Both are public.
+> See [The models](#the-models).
+
+**Already run your own vLLM server?** Point at it and skip all of the above. A
+non-local URL is never auto-started or managed for you:
+
+```bash
+export VLLM_BASE_URL=https://your-server:8000/v1
+export CAPTCHA_KRAKEN_API_KEY=your-server-key
+```
+
+### Then install the client and solve
+
+Same for every option above. Python needs 3.10+; neither package installs a
+browser, so bring your own.
+
+```bash
+npm install captchakraken        # TypeScript browser driver
+pip install captchakraken        # Python engine + `captchakraken` CLI
+```
+
+In the browser — hand it any Playwright-compatible page:
+
+```typescript
+import { chromium } from 'playwright';
+import { CaptchaKrakenSolver } from 'captchakraken';
+
+const page = await (await (await chromium.launch()).newContext()).newPage();
+await page.goto('https://www.google.com/recaptcha/api2/demo');
+
+await new CaptchaKrakenSolver().solve(page);   // detect → solve → click → verify
+```
+
+In Python — synchronous Playwright:
+
+```python
+from playwright.sync_api import sync_playwright
+from captchakraken import PageSolver
+
+with sync_playwright() as p:
+    page = p.chromium.launch().new_page()
+    page.goto("https://www.google.com/recaptcha/api2/demo")
+    print(PageSolver().solve(page).is_solved)
+```
+
+Or with no browser at all — a screenshot in, a JSON click plan out:
+
+```bash
+captchakraken path/to/captcha.png
+```
+
+Check your setup any time with `captchakraken server status`. Every browser
+framework (Playwright, Patchright, camoufox, Puppeteer) and the background
+watcher are in **[docs/usage.md](./docs/usage.md)**.
+
+**Stay current** — pull the latest model + engine in one step, no reinstall:
+
+```bash
+captchakraken fetch
+```
 
 ---
 
@@ -44,7 +177,7 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies — end to en
 | ✅ **NetEase Yidun** | Jigsaw, picture-click, icon-click |
 | ✅ **Lemin, Prosopo, Tencent** | Cropped-image, grid, and slide flows |
 | ✅ **Distorted text** | BotDetect, MTCaptcha, Yandex — read and typed, not clicked |
-| ⛔ Video challenges | **Abyss** only — the open weights skip them ([roadmap](./docs/roadmap.md)) |
+| 🟡 Video challenges | Driver support ships; the adapter `setup.sh` installs skips them ([roadmap](./docs/roadmap.md)) |
 
 The non-Google/hCaptcha vendors are driven end-to-end in CI against generated
 fixtures in **both** ports. Per-vendor accuracy varies more than the headline
@@ -88,28 +221,30 @@ bottom the model is not published at all.
 
 | | Depth | What it is | Weights |
 |---|---|---|---|
-| 🟦 **Sunlight** | 0–200 m | The adapter merged into the base and quantised to **4-bit (AWQ)**. ~6 GB, comfortable on 11 GB of VRAM. | Public *(planned)* |
-| 🟦 **Twilight** | 200–1,000 m | The same merge at **8-bit (FP8)**. ~14 GB, wants 22 GB to serve comfortably. The most accurate weights we publish. | Public *(planned)* |
-| ⬛ **Abyss** | 4,000–6,000 m | What the hosted API runs. Trained against the failures of the open weights, and the only one that handles **video challenges**. | **Never published** |
+| 🟦 **Sunlight** | 0–200 m | The adapter merged into the base and quantised to **4-bit (AWQ)**. ~9 GB, comfortable on 11 GB of VRAM. | [Public](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
+| 🟦 **Twilight** | 200–1,000 m | The same merge at **8-bit (FP8)**. ~14 GB, wants 22 GB to serve comfortably. | [Public](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
+| ⬛ **Abyss** | 4,000–6,000 m | **In training, not serving yet.** Trained against the failures of the open weights. Hosted-only when it lands. | **Never published** |
 
-All three descend from one training run, which produces the public LoRA adapter
-[`CaptchaKraken/CaptchaKraken_v1`](https://huggingface.co/CaptchaKraken/CaptchaKraken_v1).
-That adapter is what `setup.sh` installs today: it is applied at serve time on
-top of a stock `Qwen3.5-9B-VL`, which means two downloads and an
-`--enable-lora` flag.
+Alongside them is the **LoRA adapter**, which is what `setup.sh` installs:
+[`CaptchaKraken/CaptchaKraken-Lora-v1.2`](https://huggingface.co/CaptchaKraken/CaptchaKraken-Lora-v1.2).
+It is applied at serve time on top of a stock `Qwen3.5-9B-VL`, which means two
+downloads and an `--enable-lora` flag — and it is the **newest and strongest**
+open weights we publish.
 
 **Sunlight and Twilight exist so you do not have to do that.** They are the
 adapter already merged into the base and quantised, so what you download is one
-self-contained model that vLLM, Ollama, SGLang or plain `transformers` will
-load without knowing what a LoRA is.
+self-contained model that vLLM, and any runtime that loads standard
+safetensors, will serve without knowing what a LoRA is.
 
-> ⚠️ **Sunlight and Twilight are not on HuggingFace yet.** The merges are
-> specified and the ids reserved; the weights are not uploaded. Until they are,
-> `./setup.sh` installs the LoRA and a matching quantised base, which is the
-> same model in two files. This note comes down when they ship.
+> ℹ️ **Sunlight and Twilight are a generation behind.** They merge the earlier
+> `CaptchaKrakenV1_Lora` (prompt generation 1). The `-Lora-v1.2` adapter above
+> is generation 2 and scores higher. Convenience or accuracy — pick one; both
+> are supported.
 
-**Abyss is hosted-only on purpose, and it is not a bigger quantisation of the
-public weights.** Every puzzle the open model gets wrong on the held-out set is
+**Abyss is not serving yet.** The hosted API answers with the production
+adapter today — the same weights published as **Twilight**. Abyss is the next
+model, and it is hosted-only on purpose: it is not a bigger quantisation of the
+public weights. Every puzzle the open model gets wrong on the held-out set is
 a labelled example of a weakness, and Abyss is trained specifically to close
 them — starting with the non-grid hCaptcha puzzles and video, which the open
 weights skip rather than guess at. Keeping it on our own fleet is what lets it
@@ -120,11 +255,14 @@ Which one you want:
 
 | If | Use |
 |---|---|
-| You have no GPU | **Abyss**, via the hosted API |
-| You have 22 GB+ of VRAM | **Twilight** |
-| You have 11–22 GB | **Sunlight** |
-| You already serve your own Qwen3.5-9B-VL | the **LoRA adapter** |
-| You need video challenges | **Abyss** — the open weights skip them rather than guess |
+| You have no GPU | the [hosted API](./docs/hosted-api.md) |
+| You want the best open weights, and run vLLM | the **LoRA adapter** — `./setup.sh` |
+| You want one file and the simplest serve, 22 GB+ | **Twilight** |
+| You want one file and the simplest serve, 11–22 GB | **Sunlight** |
+| You don't use vLLM | **Sunlight** or **Twilight** |
+| You need video challenges | the [hosted API](./docs/hosted-api.md) — `setup.sh`'s adapter skips them rather than guess |
+
+Serving details for every option: **[docs/self-hosting.md](./docs/self-hosting.md)**.
 
 ---
 
@@ -232,68 +370,13 @@ take the same arguments.
 
 ---
 
-## Quickstart
-
-**1. Self-host the model** (one command — detects your GPU/Apple-silicon memory,
-picks a model size that fits, downloads it, and writes a config file):
-
-```bash
-./setup.sh
-```
-
-`setup.sh` installs the LoRA plus a base quantised to fit your card — 8-bit
-above 22 GB of VRAM, 4-bit above 11 GB. When **Sunlight** and **Twilight** ship
-it will offer those single-file merges instead. Full hardware guide:
-**[docs/self-hosting.md](./docs/self-hosting.md)**.
-
-> 💡 **No GPU?** Use the hosted API and run **Abyss** — no weights, no vLLM, no
-> card. Sign in with GitHub at
-> **[captchakraken.com](https://captchakraken.com/signin)** and you get a key
-> and free credits immediately; billing is per inference round. Then skip to
-> step 2 with `VLLM_BASE_URL=https://api.captchakraken.com/v1` and your
-> `ck_live_…` key.
-
-**2. Solve.** The server auto-starts on your first solve — nothing else to run.
-
-```bash
-source captchakraken.env
-captchakraken path/to/captcha.png     # Python: screenshot → JSON click plan
-```
-
-In the browser (TypeScript) — bring your own Playwright/Puppeteer page:
-
-```typescript
-import { chromium } from 'playwright';
-import { CaptchaKrakenSolver } from 'captchakraken';
-
-const page = await (await (await chromium.launch()).newContext()).newPage();
-await page.goto('https://www.google.com/recaptcha/api2/demo');
-
-await new CaptchaKrakenSolver().solve(page);   // detect → solve → click → verify
-```
-
-Install the port you need and see every framework (Playwright, Patchright,
-camoufox-js, Puppeteer) in **[docs/usage.md](./docs/usage.md)**:
-
-```bash
-npm install captchakraken        # TypeScript browser driver
-pip install captchakraken        # Python engine + `captchakraken` CLI
-```
-
-**Stay current** — pull the latest model + engine in one step, no reinstall:
-
-```bash
-captchakraken fetch              # latest LoRA from HuggingFace + vLLM upgrade + restart
-```
-
----
-
 ## Documentation
 
 Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md)**.
 
 | Guide | What's in it |
 |---|---|
+| ☁️ [Hosted API](./docs/hosted-api.md) | Sign in, keys, pricing, per-session billing, error codes |
 | 📦 [Self-hosting](./docs/self-hosting.md) | `setup.sh`, model sizes, server management, config, **updating** |
 | 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, the Python CLI, migrating from v1 |
 | ⚙️ [How it works](./docs/how-it-works.md) | The solve pipeline, `find_grid`, the freshness guard, dedup |
@@ -308,8 +391,10 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 - 🟢 **Shipped** — the **hosted API** (`api.captchakraken.com`, self-serve
   signup), a mid-inference **freshness guard** (never act on a stale frame),
   and a one-command **`captchakraken fetch`** updater.
-- 🟡 **In progress** — 🎥 **video challenges** (Abyss), publishing the
-  **Sunlight** and **Twilight** merges.
+- 🟢 **Shipped** — the **Sunlight** and **Twilight** merges, now public on
+  [HuggingFace](https://huggingface.co/CaptchaKraken).
+- 🟡 **In progress** — 🎥 **video challenges**, and **Abyss**, the next hosted
+  model.
 - ⚪ **Planned** — 🧩 more non-grid hCaptcha puzzles (drag, path, tetris-fit).
 
 The visual, always-current version is in **[docs/roadmap.md](./docs/roadmap.md)**.
