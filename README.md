@@ -230,8 +230,8 @@ Prosopo — and it is the first generation to handle **animated challenges** and
 | | Precision | Size | Min VRAM | Weights |
 |---|---|---|---|---|
 | **LoRA adapter** | bf16 on a stock base | ~0.4 GB + base | depends on base | [`CaptchaKraken-Lora-v1.2`](https://huggingface.co/CaptchaKraken/CaptchaKraken-Lora-v1.2) |
-| 🟦 **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
-| 🟦 **Sunlight** | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
+| 🟦 **Twilight** | 8-bit (FP8) | 13 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
+| 🟦 **Sunlight** | 4-bit (AWQ) | 11 GB | ~14 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
 
 `./setup.sh` installs the LoRA adapter. **Twilight v1.2 is what the hosted API
 answers with** — the same LoRA on the same base, merged.
@@ -267,7 +267,7 @@ Which one you want:
 | You have no GPU | the [hosted API](./docs/hosted-api.md) |
 | You want the best open weights, and run vLLM | the **v1.2 LoRA adapter** — `./setup.sh` |
 | You want one file and the simplest serve, 22 GB+ | **Twilight v1.2** |
-| You want one file and the simplest serve, 11–22 GB | **Sunlight v1.2** |
+| You want one file and the simplest serve, 14–22 GB | **Sunlight v1.2** |
 | You only face reCAPTCHA / hCaptcha and want the older, smaller stack | **v1.1** |
 
 Serving details for every option: **[docs/self-hosting.md](./docs/self-hosting.md)**.
