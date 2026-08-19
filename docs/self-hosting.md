@@ -26,15 +26,21 @@ adapter if you want the most accurate open weights.
 The adapter already merged into the base and quantised, so there is nothing to
 wire up.
 
-| | Depth | Precision | Size | Min VRAM | Hub |
+| | Release | Precision | Size | Min VRAM | Hub |
 |---|---|---|---|---|---|
-| 🟦 **Sunlight** | 0–200 m | 4-bit (AWQ) | ~9.1 GB | ~11 GB | [`CaptchaKraken/Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
-| 🟦 **Twilight** | 200–1,000 m | 8-bit (FP8) | ~14 GB | ~22 GB | [`CaptchaKraken/Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
+| 🟦 **Sunlight v1.2** | current | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
+| 🟦 **Twilight v1.2** | current | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
+| ⬜ Sunlight v1.1 | previous | 4-bit (AWQ) | ~9.1 GB | ~11 GB | [`Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
+| ⬜ Twilight v1.1 | previous | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
+
+**Take v1.2 unless you have a reason not to.** v1.1 was trained on reCAPTCHA and
+hCaptcha alone and will not attempt the other eight vendors, animated
+challenges or typed text — see [The models](../README.md#the-models).
 
 Serve either one directly — no `--enable-lora`, no adapter flags:
 
 ```bash
-vllm serve CaptchaKraken/Twilight-FP8 \
+vllm serve CaptchaKraken/Twilight-v1.2-FP8 \
   --max-model-len 8192 --gpu-memory-utilization 0.85 \
   --trust-remote-code --port 8000
 ```
@@ -44,7 +50,7 @@ Then point the client at it, and tell it which name to ask for:
 ```bash
 export VLLM_BASE_URL=http://localhost:8000/v1
 export CAPTCHA_KRAKEN_API_KEY=EMPTY
-export CAPTCHA_LORA_NAME=CaptchaKraken/Twilight-FP8
+export CAPTCHA_LORA_NAME=CaptchaKraken/Twilight-v1.2-FP8
 ```
 
 > ⚠️ **`CAPTCHA_LORA_NAME` must match the name your server serves.** It is the
@@ -71,8 +77,8 @@ plus a base model sized for your card, and vLLM applies the adapter at serve
 time.
 
 **Abyss** is the next hosted model — trained against the failures of the open
-weights, still in training, and never published. The hosted API serves the
-production adapter today, not Abyss. See [the roadmap](./roadmap.md).
+weights, still in training, and never published. The hosted API answers with
+**Twilight v1.2** today, not Abyss. See [the roadmap](./roadmap.md).
 
 ## One-command install
 

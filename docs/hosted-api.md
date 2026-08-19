@@ -3,9 +3,9 @@
 Send screenshots to `https://api.captchakraken.com/v1`. No GPU, no model
 download, no server to run.
 
-The hosted API answers with our production adapter, running on our fleet —
-the same weights we publish as **Twilight**. You are paying for the hardware and
-the uptime, not for weights you cannot get.
+The hosted API answers with **Twilight v1.2**, running on our fleet — the same
+weights we publish, merged from the same LoRA on the same base. You are paying
+for the hardware and the uptime, not for weights you cannot get.
 
 **Abyss** — the next model, trained against the failures of the open weights —
 is still in training. It is not serving yet, and when it lands it will be
