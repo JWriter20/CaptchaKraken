@@ -423,6 +423,30 @@ export class CaptchaKrakenSolver {
         throw new Error(`Captcha solve timed out after ${overallSolveTimeoutMs}ms (attempt ${attempt}/${maxSolveLoops}).`);
       }
 
+      /*
+       * ASK THE VENDOR BEFORE DOING ANY MORE WORK.
+       *
+       * Once we have interacted, the cheapest possible question is "did that
+       * already work?" — a hidden response field on the page, no iframe, no
+       * screenshot, microseconds. Skipping it meant a solved reCAPTCHA still
+       * paid a full re-detect on the challenge iframe the vendor was tearing
+       * down: settle probe, grid poll, each screenshot waiting on an element
+       * that would never go stable again, ~10s after the answer was already
+       * accepted.
+       *
+       * Gated on hasInteracted for the same reason the post-interaction branch
+       * below is: before we touch anything, a response token belongs to
+       * somebody else's earlier solve and says nothing about this one.
+       */
+      if (hasInteracted && await this.isCaptchaSolved(page)) {
+        console.log('Vendor reports solved; returning without another detect pass.');
+        return {
+          isSolved: true,
+          finalMousePosition: this.lastMousePosition,
+          tokenUsage: aggregateTokenUsage(cumulativeTokenUsage),
+        };
+      }
+
       const captchaElement = await this.detectCaptcha(page);
       if (!captchaElement) {
         // Two-stage detection. detectCaptcha() returns null when there's no
@@ -1229,6 +1253,16 @@ export class CaptchaKrakenSolver {
       }
       const rc = await page.$('iframe[src*="recaptcha/api2/bframe"]');
       if (rc && await rc.isVisible().catch(() => false)) {
+        // The SAME gate as hCaptcha above, and for the same reason. reCAPTCHA
+        // also leaves the answered board on screen while it verifies, and its
+        // instructions stay visible throughout — so "instructions are showing"
+        // fired on the closing frame and reported a fresh round that was not
+        // coming. This branch simply never got the fix when the hCaptcha one
+        // did.
+        if (this.lastSubmitFrameHash) {
+          const current = await this.elementFrameHash(rc).catch(() => null);
+          if (current && current === this.lastSubmitFrameHash) return false;
+        }
         const frame = await rc.contentFrame();
         const instr = frame && await frame.$('.rc-imageselect-instructions, #rc-imageselect');
         if (instr && await instr.isVisible().catch(() => false)) return true;
@@ -1708,7 +1742,34 @@ export class CaptchaKrakenSolver {
     try {
       while (Date.now() - start < timeout) {
         const f = tmp();
-        await captchaElement.screenshot({ path: f });
+        /*
+         * AN EXPLICIT, SHORT TIMEOUT — and the loop's own budget is not one.
+         *
+         * Playwright defaults to 30s and waits for the element to be visible
+         * and stable first. Right after the grid driver clicks Verify, this
+         * element is a challenge iframe the vendor is tearing down, so that
+         * wait runs to the full default. The `while` above is consulted only
+         * BETWEEN iterations, so one hung screenshot sails straight past the
+         * 8s cap it looks protected by: measured live, submit at 24.5s and the
+         * solved verdict at 64.7s, a 38.5s tail on a solve whose real work took
+         * twelve seconds — paid on every multi-round reCAPTCHA.
+         *
+         * waitForElementSettled already carries this fix and the note
+         * explaining it; this poll was written in the same shape without it.
+         */
+        const left = timeout - (Date.now() - start);
+        try {
+          await captchaElement.screenshot({
+            path: f,
+            timeout: Math.max(500, Math.min(2500, left)),
+            animations: 'disabled',
+          });
+        } catch {
+          // The challenge cannot be photographed: it is gone or going. There is
+          // no grid here to finish loading, so stop rather than spend the rest
+          // of the budget proving it again.
+          return false;
+        }
         frames.push(f);
 
         if (frames.length >= 2) {
@@ -1786,7 +1847,9 @@ export class CaptchaKrakenSolver {
   ): Promise<{ boxes: number[][]; size: 3 | 4; screenshotW: number; screenshotH: number } | null> {
     const f = path.join(os.tmpdir(), `findgrid_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
     try {
-      await captchaElement.screenshot({ path: f });
+      // Explicit timeout — the challenge may be mid-teardown and Playwright's
+      // 30s default waits for it to go stable. See screenshot-timeouts.test.ts.
+      await captchaElement.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
       const res = await this.runCvTool('find-grid', { image: f }, ['find-grid', f]);
       if (!Array.isArray(res) || (res.length !== 9 && res.length !== 16)) {
         return null;
@@ -1950,7 +2013,13 @@ export class CaptchaKrakenSolver {
     let hoverIdx = 0;
     try {
       const first = tmp();
-      await captchaElement.screenshot({ path: first });
+      try {
+        await captchaElement.screenshot({ path: first, timeout: 2500, animations: 'disabled' });
+      } catch {
+        // Cannot photograph the challenge: it is gone or going, so no tile is
+        // loading and none was chipped. Same verdict as an empty window.
+        return { loading: [], chipped: false };
+      }
       frames.push(first);
       this.gridDebug('fade-onset:baseline', {}, first);
 
@@ -1968,7 +2037,16 @@ export class CaptchaKrakenSolver {
         const elapsed = Date.now() - iterStart;
         if (elapsed < interval) await delay(interval - elapsed);
         const f = tmp();
-        await captchaElement.screenshot({ path: f });
+        /*
+         * Explicit timeout: this element is a challenge iframe that may be
+         * mid-teardown, and Playwright's 30s default waits for it to become
+         * stable first. See screenshot-timeouts.test.ts.
+         */
+        try {
+          await captchaElement.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+        } catch {
+          break; // challenge gone — let the post-loop verdict stand
+        }
         frames.push(f);
         polls++;
 
@@ -2055,7 +2133,16 @@ export class CaptchaKrakenSolver {
         const elapsed = Date.now() - iterStart;
         if (elapsed < interval) await delay(interval - elapsed);
         const f = tmp();
-        await captchaElement.screenshot({ path: f });
+        /*
+         * Explicit timeout: this element is a challenge iframe that may be
+         * mid-teardown, and Playwright's 30s default waits for it to become
+         * stable first. See screenshot-timeouts.test.ts.
+         */
+        try {
+          await captchaElement.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+        } catch {
+          break; // challenge gone — nothing left to wait for
+        }
         frames.push(f);
 
         if (frames.length >= 2) {
@@ -2152,7 +2239,16 @@ export class CaptchaKrakenSolver {
       // 1. Settle and screenshot.
       await this.waitForGridCellsLoaded(captchaElement);
       const shotA = path.join(os.tmpdir(), `recap_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-      await captchaElement.screenshot({ path: shotA });
+      try {
+        // Explicit timeout — after a Verify this element is being torn down,
+        // and the 30s default waits for it to go stable first. See
+        // screenshot-timeouts.test.ts.
+        await captchaElement.screenshot({ path: shotA, timeout: 2500, animations: 'disabled' });
+      } catch {
+        // The board is gone. Stop driving rounds and let the outer loop
+        // re-detect — which, having interacted, reads "nothing left" as solved.
+        break;
+      }
       this.saveImageForDebug(shotA);
       // Per-round boundary snapshot for onStep observers. Round 1's snapshot is
       // the baseline (pre-action) for the 3x3 dynamic path.
@@ -2279,6 +2375,12 @@ export class CaptchaKrakenSolver {
           console.log('[recaptcha-grid] clicking Verify to submit.');
           await this.moveAndClick(page, verifyButton);
           await this.emitStep(captchaElement, 'submit', 'submitted (Verify)', 'recaptcha', 'challenge', attempt);
+          // Snapshot the submitted frame, exactly as the one-shot path does.
+          // Without it isChallengeFreshlyRendered reads the CLOSING board as a
+          // fresh round, breaks the post-submit solved-poll on its first tick,
+          // and commits the solver to a full re-detect against a dying iframe —
+          // measured at 13s per solve, on top of a 12s solve.
+          this.lastSubmitFrameHash = await this.elementFrameHash(captchaElement).catch(() => null);
         }
       }
     }
@@ -2712,7 +2814,7 @@ export class CaptchaKrakenSolver {
           `freshsolve_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
         );
         try {
-          await captchaElement.screenshot({ path: fresh });
+          await captchaElement.screenshot({ path: fresh, timeout: 2500, animations: 'disabled' });
         } catch {
           break; // can't grab a fresh frame — act on the answer we have.
         }
