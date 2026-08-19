@@ -265,6 +265,19 @@ const SLIDE_PROBE_OFFSETS_PX = [24, 64];
 const SLIDE_TOLERANCE_PX = 2;
 const SLIDE_MAX_CORRECTIONS = 2;
 
+/**
+ * The two numbers that bound a solve, together, because they only make sense
+ * together: `maxSolveLoops` is the count that FITS inside the timeout at the
+ * ~4-7s a round costs, and the timeout is the backstop for when it does not.
+ * Named rather than inlined as `??` defaults so the relationship between them
+ * can be pinned by a test — see no-progress.test.ts. The Python port keeps the
+ * same pair on `PageSolverConfig`.
+ */
+export const SOLVE_DEFAULTS = {
+  maxSolveLoops: 6,
+  overallSolveTimeoutMs: 45_000,
+} as const;
+
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
   private lastMousePosition: Vector; // Start at safe position
@@ -305,6 +318,16 @@ export class CaptchaKrakenSolver {
   // and the challenge is re-solved from a recorded burst. See
   // repeated-answer.test.ts.
   private repeatedAnswerSeen = false;
+  // Slicing mode of the burst the current answer came from, as reported by
+  // `solve-animated`. `waitForKeyframe` reads it: `even` means the slicer found
+  // no state that RECURS, so there is nothing for the page to come back to and
+  // the gate can only ever time out. See test_even_clips_do_not_wait.py.
+  private keyframeMode: string | null = null;
+  // Repeat detection; see `maxNoProgressRounds`. `lastAnswerSig` is the answer
+  // the previous round EXECUTED, `noProgressRounds` how many rounds running
+  // have re-executed it.
+  private lastAnswerSig: string | null = null;
+  private noProgressRounds = 0;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
   // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
   private state: CaptchaState = CaptchaState.Detecting;
@@ -364,9 +387,10 @@ export class CaptchaKrakenSolver {
   }
 
   private async solveImpl(page: Page): Promise<SolveResult | void> {
-    const maxSolveLoops = this.config.maxSolveLoops ?? 10;
+    const maxSolveLoops = this.config.maxSolveLoops ?? SOLVE_DEFAULTS.maxSolveLoops;
     const postSolveDelayMs = this.config.postSolveDelayMs ?? 1200;
-    const overallSolveTimeoutMs = this.config.overallSolveTimeoutMs ?? 120_000;
+    const overallSolveTimeoutMs =
+      this.config.overallSolveTimeoutMs ?? SOLVE_DEFAULTS.overallSolveTimeoutMs;
 
     const start = Date.now();
     let cumulativeTokenUsage: TokenUsage[] = [];
@@ -416,7 +440,12 @@ export class CaptchaKrakenSolver {
     let hasInteracted = false;
     // Bounded wait for an in-DOM-but-still-rendering widget (Stage 1).
     let renderWaits = 0;
-    const MAX_RENDER_WAITS = 6;
+    // Strictly FEWER than the solve loops. A render wait consumes an attempt,
+    // so at parity the loop runs out first and the "no interactive captcha
+    // widget" branch below never fires — the correct, benign answer for a
+    // reCAPTCHA v3 / invisible page gets reported as "still detected after N
+    // solve loops" instead. Mirrors page_solver.py's max_render_waits.
+    const MAX_RENDER_WAITS = Math.min(6, maxSolveLoops - 1);
 
     for (let attempt = 1; attempt <= maxSolveLoops; attempt++) {
       if (Date.now() - start > overallSolveTimeoutMs) {
@@ -574,6 +603,18 @@ export class CaptchaKrakenSolver {
         throw e;
       }
       hasInteracted = hasInteracted || didInteract;
+
+      // Give up on a solve that is repeating itself, rather than letting the
+      // clock do it. The alternative is not "one more chance" — it is the same
+      // click, again, until overallSolveTimeoutMs.
+      if (this.noProgressRounds >= (this.config.maxNoProgressRounds ?? 2)) {
+        throw new Error(
+          `No progress: the model returned the same answer ${this.noProgressRounds + 1} `
+          + `times running and the challenge is still up `
+          + `(attempt ${attempt}/${maxSolveLoops}). Total usage: `
+          + JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))
+        );
+      }
       renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
 
@@ -587,7 +628,7 @@ export class CaptchaKrakenSolver {
       // re-solves, so it can't loop. If not solved in the window, the original
       // detectCaptcha path below handles a genuine next round exactly as before.
       const settleMs = didInteract
-        ? (this.config.postSolveOutcomeTimeoutMs ?? 2500)
+        ? (this.config.postSolveOutcomeTimeoutMs ?? 1000)
         : postSolveDelayMs + Math.random() * 300;
       if (didInteract) {
         const deadline = Date.now() + settleMs;
@@ -597,7 +638,7 @@ export class CaptchaKrakenSolver {
           // A fresh next round has rendered → stop waiting, go solve it now
           // (keeps multi-round solves fast instead of burning the full window).
           if (await this.isChallengeFreshlyRendered(page)) break;
-          await delay(200);
+          await delay(this.config.postSolveOutcomePollMs ?? 75);
         }
         if (solved) {
           return {
@@ -909,6 +950,11 @@ export class CaptchaKrakenSolver {
         throw new Error('Could not get bounding box of captcha element');
       }
 
+      // Recorded at the moment of EXECUTION, which is what makes a repeat mean
+      // something: this exact answer is about to be performed, so if it matches
+      // the last one, the last one already ran and the page is still asking the
+      // same question.
+      this.noteAnswer(actionList, retryMode);
       console.log(`Executing ${actionList.length} actions.`);
       const frame = await captchaElement.contentFrame();
       let verifyButton: ElementHandle | null = null;
@@ -1099,6 +1145,29 @@ export class CaptchaKrakenSolver {
       const hcaptchaVerify = await frame.$('.button-submit');
       if (hcaptchaVerify && await hcaptchaVerify.isVisible()) {
         return hcaptchaVerify;
+      }
+    }
+
+    if (!submitted) {
+      // 4. GeeTest: `<div class="geetest_submit geetest_disable">OK</div>`.
+      //
+      // Invisible to BOTH shapes above — a bare div carries no role="button",
+      // and "OK" is on none of the four word lists. So nothing was ever pressed
+      // on the puzzles that need pressing, and since a GeeTest board does not
+      // grade until you do, the solve loop re-read the same unchanged panel and
+      // re-answered it identically until the round cap. Ordered icon-click
+      // scored 0/31 and 0/13 that way while the model was answering correctly:
+      // measured on 2026-08-19, three returned points landed on the three
+      // reference icons in order and the cursor arrived within 0.005 normalised
+      // of each. A driver that discards a right answer is indistinguishable
+      // from a model that cannot solve the puzzle, which is how this hid.
+      //
+      // Matched by CLASS, not by the word: `geetest_submit_tips` sits beside it
+      // and also reads "OK", and pressing the tooltip does nothing at all.
+      // `.geetest_submit` is a distinct class token, so it cannot match it.
+      const geetestSubmit = await frame.$('.geetest_submit');
+      if (geetestSubmit && await geetestSubmit.isVisible()) {
+        return geetestSubmit;
       }
     }
     return null;
@@ -1294,7 +1363,10 @@ export class CaptchaKrakenSolver {
 
       // Prompt must be present and non-empty first — it's the cheapest signal
       // that the challenge frame has rendered its content at all.
-      await frame.waitForSelector('.prompt-text', { state: 'visible', timeout: 8000 });
+      await frame.waitForSelector('.prompt-text', {
+        state: 'visible',
+        timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000,
+      });
 
       // Then wait for the actual imagery to load. Grid tiles expose a
       // background-image; click/drag puzzles expose a canvas or example image.
@@ -1317,8 +1389,18 @@ export class CaptchaKrakenSolver {
         const example = document.querySelector(
           '.challenge-example img, .image-wrapper img',
         ) as HTMLImageElement | null;
-        return !!(example && example.complete && example.naturalWidth > 0);
-      }, { timeout: 8000 });
+        if (example) return example.complete && example.naturalWidth > 0;
+        // NOTHING TO WAIT FOR IS READY. This used to be
+        // `return !!(example && ...)`, false when there was no example image at
+        // all — so a challenge with no tile grid, no canvas and no example
+        // polled out the whole timeout and then carried on regardless.
+        // Measured in the Python port, which had the identical clause: 24.0s of
+        // a 45.2s solve, the full window three times, spent asking about
+        // elements that were not on the page. A gate can only report on what it
+        // can see; with nothing to check it has no opinion, and no opinion must
+        // not read as "not ready".
+        return true;
+      }, { timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000 });
     } catch {
       // Timed out or frame detached mid-load; fall through to the screenshot.
     }
@@ -2492,6 +2574,7 @@ export class CaptchaKrakenSolver {
       });
       if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
       const parsed = JSON.parse(stdout.trim());
+      this.keyframeMode = parsed.keyframe_mode ?? null;
       console.log(
         `[animated] ${parsed.source_frames} frames -> ${(parsed.keyframes ?? []).length} `
         + `keyframe(s) (mode=${parsed.keyframe_mode})`,
@@ -2527,6 +2610,17 @@ export class CaptchaKrakenSolver {
    *
    * Never throws. Returns whether the state was reached; on timeout the caller
    * clicks anyway (see `keyframeWaitTimeoutMs`).
+   *
+   * NOT ATTEMPTED on an `even` clip. The slicer picks that mode precisely when
+   * the clip never revisits a picture it has already shown — a rotation, a
+   * one-way fade, a sprite crossing — so there is no state to come back to and
+   * this can only run out its full 6s, PER CLICK, before clicking the
+   * coordinates it already had. It is also the normal case, not a corner: all
+   * 116 real clips under cleanSamples/test/raw are `even` and `cycle` has never
+   * fired on real footage. Measured on hcaptcha_rotating_obj_video: 6.0s of a
+   * 28.8s solve, closest region diff 0.0721 against a 0.05 tolerance, then the
+   * same click, then solved. Kept for `cycle`/`static`, where the state does
+   * come back and waiting is the difference between the sprite and background.
    */
   private async waitForKeyframe(
     captchaElement: ElementHandle,
@@ -2534,6 +2628,13 @@ export class CaptchaKrakenSolver {
     cx: number,
     cy: number,
   ): Promise<boolean> {
+    if (this.keyframeMode === 'even') {
+      console.log(
+        '[animated] clip is mode=even (no state recurs); '
+        + "acting on the model's frame without waiting",
+      );
+      return false;
+    }
     const timeout = this.config.keyframeWaitTimeoutMs ?? 6000;
     const interval = this.config.keyframeWaitPollMs ?? 120;
     const deadline = Date.now() + timeout;
@@ -2582,6 +2683,64 @@ export class CaptchaKrakenSolver {
     this.solutionCache.clear();
     this.repeatedAnswerSeen = false;
     this.lastSubmitFrameHash = null;
+    this.keyframeMode = null;
+    this.lastAnswerSig = null;
+    this.noProgressRounds = 0;
+  }
+
+  /**
+   * A stable identity for "the answer this round is about to execute".
+   *
+   * Keyed on the retry mode too: the missed-tiles retry deliberately re-asks
+   * about the same board and its answer legitimately overlaps the previous one,
+   * so counting that as a repeat would abandon the one path built to recover
+   * from an under-selection.
+   *
+   * Coordinates are ROUNDED rather than compared exactly — the same tile chosen
+   * twice can differ in the last float digit after the normalise/clamp
+   * round-trip, and a repeat that reads as "different" is a repeat that costs a
+   * round. Returns null when the answer cannot be summarised, which counts as
+   * "not a repeat": an unreadable answer must never be why a solve is
+   * abandoned. Mirrors page_solver.py `_answer_signature`.
+   */
+  private static answerSignature(actions: any[], retryMode: string | null): string | null {
+    const round3 = (v: any): any => {
+      if (typeof v === 'number') return Math.round(v * 1000) / 1000;
+      if (Array.isArray(v)) return v.map(round3);
+      return v ?? null;
+    };
+    try {
+      return JSON.stringify([retryMode ?? null, actions.map((a: any) => [
+        a?.action ?? null,
+        round3(a?.target_bounding_boxes),
+        round3(a?.target_bounding_box),
+        round3(a?.target_coordinates),
+        round3(a?.source_bounding_box),
+        a?.text ?? null,
+      ])]);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Count consecutive identical answers; see `maxNoProgressRounds`. */
+  private noteAnswer(actions: any[], retryMode: string | null): void {
+    const sig = CaptchaKrakenSolver.answerSignature(actions, retryMode);
+    if (sig !== null && sig === this.lastAnswerSig) {
+      this.noProgressRounds++;
+      console.log(
+        `[no-progress] the model returned the same answer again `
+        + `(${this.noProgressRounds}/${this.config.maxNoProgressRounds ?? 2}) — `
+        + `the previous one already ran and changed nothing`,
+      );
+      // A board that reads the same every round is the signature of a CYCLING
+      // challenge answered as a still. Let the recording path have a go before
+      // giving up on the solve entirely.
+      this.repeatedAnswerSeen = true;
+    } else {
+      this.noProgressRounds = 0;
+      this.lastAnswerSig = sig;
+    }
   }
 
   /**

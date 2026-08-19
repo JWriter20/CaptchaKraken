@@ -147,17 +147,22 @@ HCAPTCHA_CHALLENGE = 'iframe[src*="hcaptcha"][src*="frame=challenge"]'
 HCAPTCHA_CHECKBOX = 'iframe[src*="hcaptcha"][src*="frame=checkbox"]'
 
 
+#: Truthy stand-in for the CaptchaSolver, so `__init__` does not build a real
+#: one (it would open an HTTP session to vLLM). Replaced with None immediately.
+_NO_MODEL = object()
+
+
 def _solver(**overrides: Any) -> PageSolver:
     """A PageSolver whose model half is stubbed — no CaptchaSolver constructed."""
-    solver = PageSolver.__new__(PageSolver)
-    solver.config = PageSolverConfig(**overrides)
+    # The REAL __init__, with a sentinel standing in for the model half, so
+    # per-solve state added there cannot go missing here. Hand-listing the
+    # attributes instead is what it used to do, and every attribute added since
+    # broke this helper with an AttributeError raised nowhere near the
+    # behaviour under test (`_budget`, most recently).
+    solver = PageSolver(config=PageSolverConfig(**overrides), solver=_NO_MODEL)
     solver._solver = None
-    solver._last_mouse = (0.0, 0.0)
-    solver._last_submit_frame_hash = None
-    solver._deadline_ms = None
-    solver._viewport_cache = None
-    # Matches __init__. Without it every path through _smooth_move raises
-    # AttributeError before it reaches the behaviour under test.
+    # Deliberately NOT __init__'s value: these tests call the mouse helpers
+    # directly, and an unseeded cursor takes the seeding path first.
     solver._cursor_seeded = True
     return solver
 

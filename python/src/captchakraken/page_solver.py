@@ -42,14 +42,17 @@ import os
 import random
 import re
 import shutil
+import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .action_types import CaptchaAction
 from .solver import CaptchaSolver, UnsupportedCaptchaError
+from .timing import PhaseBudget, timings_enabled
 from .trajectory import generate_trajectory
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
@@ -174,6 +177,31 @@ class _GridSession:
     screenshot_h: int
 
 
+def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int) -> str:
+    """The pixel-settle rule, over `(elapsed_ms, moved)` polls.
+
+    Split out of the polling loop so the RULE can be tested against recorded
+    timelines without a browser — see `tests/test_animated_is_detected.py`,
+    which pins what it does to each shipped animated puzzle.
+
+    Note what it cannot do: 'animated' needs a poll that MOVED at or after
+    `animated_after_ms`, so any `settle_frames` run of stillness before then
+    ends the wait as 'settled' first. Every animated puzzle we ship rests
+    between screens for longer than that, which is why the caller also probes.
+    """
+    still_streak = 0
+    for elapsed_ms, moved in samples:
+        if moved:
+            still_streak = 0
+            if elapsed_ms >= animated_after_ms:
+                return "animated"
+        else:
+            still_streak += 1
+            if still_streak >= settle_frames:
+                return "settled"
+    return "timeout"
+
+
 @dataclass
 class PageSolverConfig:
     """
@@ -181,10 +209,65 @@ class PageSolverConfig:
     value tuned on one driver can be found on the other.
     """
 
-    max_solve_loops: int = 10
-    overall_solve_timeout_ms: int = 120_000
+    # 45s, and the loop count that fits inside it rather than one that needs
+    # policing by the clock. A round costs ~4-7s once the waits below are paid,
+    # so six rounds is the budget; ten never fitted and only ever expressed
+    # itself as a timeout. The cap is a BACKSTOP — `max_no_progress_rounds` is
+    # what is supposed to end a hopeless solve, and a solve that reaches this
+    # number is a bug report, not a normal outcome.
+    max_solve_loops: int = 6
+    overall_solve_timeout_ms: int = 45_000
+    #: Consecutive rounds producing the SAME answer before the solve is
+    #: abandoned.
+    #:
+    #: At temperature 0 the model is a function of the picture, so an identical
+    #: answer means an identical picture — and every answer this driver produces
+    #: is EXECUTED, so the previous one already ran and moved nothing. Repeating
+    #: it cannot do better; it just spends a round.
+    #:
+    #: Measured on recaptcha_grid_4x4 (fixture seed 20260730): the model answers
+    #: `[2,6,7,9,10]` on round 1 and then `[2,6,7,10]` on rounds 2 THROUGH 10 —
+    #: nine identical click sets, each one clicked, each one rejected, ending in
+    #: "still detected after 10 solve loops" at 66.1s. Of that, 39.0s was pure
+    #: waiting. Stopping on the second repeat ends it at round 4.
+    #:
+    #: 2 rather than 1: the first repeat also ARMS the animated probe, which is
+    #: the one recovery worth trying (a cycling board reads as a still and
+    #: answers the same way every round). One more round buys that chance.
+    max_no_progress_rounds: int = 2
     post_solve_delay_ms: int = 1_200
-    post_solve_outcome_timeout_ms: int = 2_500
+    # How long to keep watching for a SUCCESS after submitting.
+    #
+    # That is the window's whole job, and it is why a wrong answer spends all of
+    # it: the vendors emit nothing on a wrong answer, they just re-deal. Sizing
+    # it therefore means asking how late a real success can arrive.
+    #
+    # MEASURED over 34 successful rounds across 20 puzzle types (fixture server,
+    # two seeds each): min 3ms, p50 360ms, p90 378ms, max 528ms.
+    #
+    # Read that with care — those values are quantized by `..._poll_ms`, not by
+    # any vendor. The clusters sit at one poll (~200ms), two polls (~370ms, the
+    # `widget_gone >= 2` confirmation) and three (~520ms). So the measurement
+    # mostly describes THIS loop, and the fixture's verdict is a local fetch,
+    # which means real hCaptcha/reCAPTCHA round-trips are absent from it
+    # entirely.
+    #
+    # 1000ms is therefore the measured worst case (528ms, ~264ms once the poll
+    # below is halved) plus deliberate headroom for a vendor round-trip nobody
+    # has measured yet. Down from 2500ms, which was spent in full on every
+    # unsuccessful round — 25.5s of one 66.1s recaptcha_grid_4x4 solve.
+    #
+    # To replace the headroom with a number: drive the real vendor pages via
+    # `tests/live-solve/src/demo-targets.ts` and re-read this distribution.
+    post_solve_outcome_timeout_ms: int = 1_000
+    #: Poll interval inside that window.
+    #:
+    #: The success signals are polled, so detection latency is a MULTIPLE of
+    #: this — and the one that matters most, "the widget is gone", needs two
+    #: consecutive polls to confirm, so it cannot be seen in less than 2x. At
+    #: 150ms that put a 300ms floor under every inline vendor's success. 75ms
+    #: halves it, and the poll is cheap: `detect_captcha` measures ~3ms.
+    post_solve_outcome_poll_ms: int = 75
     element_screenshot_timeout_ms: int = 8_000
     max_unsupported_resolves: int = 3
     max_stale_element_retries: int = 3
@@ -208,6 +291,19 @@ class PageSolverConfig:
     # than abandoned. Off switch for callers who would rather fail fast than spend
     # the recording time.
     video_solve_enabled: bool = True
+    # Whether a repeated answer may escalate to a RECORDING of the widget.
+    #
+    # A board that cycles reads as static to `_wait_for_element_settled` (it
+    # rests between screens for far longer than the 440ms that rule stops at),
+    # gets answered from whichever screen the screenshot caught, and then
+    # answers identically every round. That repeat is the signal, and the
+    # response is to record a burst and let the SLICER decide: a widget that
+    # really is static slices to one keyframe and is solved as the still it is,
+    # so the escalation costs one burst and can never produce a worse answer.
+    #
+    # Off restores the old behaviour for a caller who would rather re-read a
+    # still than spend `video_burst_duration_ms` finding out.
+    animated_probe_enabled: bool = True
     # Burst geometry. Deliberately identical to the collector's
     # (`_collect_common.BURST_DURATION_MS` / `BURST_FPS` in the finetune repo), so a
     # challenge recorded here is the same shape of artifact the model trained on —
@@ -223,6 +319,12 @@ class PageSolverConfig:
     keyframe_wait_poll_ms: int = 120
 
     # Grid load / dynamic-refresh timing.
+    # How long to wait for hCaptcha's task images to paint before screenshotting
+    # anyway. Best-effort by design — the screenshot happens either way — so it
+    # is bounded by what a loading tile plausibly costs, not by a generous
+    # default. 8s was two-thirds of what a whole solve is now allowed to take.
+    hcaptcha_images_timeout_ms: int = 3_000
+
     grid_load_poll_interval_ms: int = 250
     grid_load_timeout_ms: int = 8_000
     recaptcha_max_dynamic_rounds: int = 8
@@ -385,6 +487,84 @@ class PageSolver:
         self._deadline_ms: Optional[float] = None
         # Window size for clamping, resolved once per solve. See _viewport.
         self._viewport_cache: Optional[Dict[str, float]] = None
+        # Animation detection, all reset per solve by `_reset_animated_state`.
+        # `_known_animated` latches: once a widget has been SEEN to animate,
+        # every later round takes the keyframe path without re-probing.
+        self._known_animated = False
+        self._animated_probe_armed = False
+        self._animated_probe_done = False
+        self._keyframe_mode: Optional[str] = None
+        # Repeat detection; see `max_no_progress_rounds`.
+        self._last_answer_sig: Optional[str] = None
+        self._no_progress_rounds = 0
+        # Per-solve phase accounting; see `_phase`.
+        self._budget: Optional[PhaseBudget] = None
+
+    @contextmanager
+    def _phase(self, name: str):
+        """Attribute the enclosed wall-clock to `name` for this solve's budget.
+
+        A no-op outside a solve, so helpers stay callable from tests and from
+        the CLI without a budget having been opened.
+        """
+        if self._budget is None:
+            yield
+            return
+        with self._budget.phase(name):
+            yield
+
+    @staticmethod
+    def _answer_signature(actions: Sequence[Any], retry_mode: Optional[str]) -> Optional[str]:
+        """A stable identity for "the answer this round is about to execute".
+
+        Keyed on the retry mode too: the missed-tiles retry deliberately re-asks
+        about the same board and its answer legitimately overlaps the previous
+        one, so counting that as a repeat would abandon the one path built to
+        recover from an under-selection.
+
+        Returns None when the actions cannot be summarised, which is treated as
+        "not a repeat" — an unreadable answer must never be the reason a solve
+        is abandoned.
+        """
+        try:
+            parts = []
+            for raw in actions:
+                a = _as_dict(raw)
+                parts.append((
+                    a.get("action"),
+                    _round_pts(a.get("target_bounding_boxes")),
+                    _round_pts(a.get("target_bounding_box")),
+                    _round_pts(a.get("target_coordinates")),
+                    _round_pts(a.get("source_bounding_box")),
+                    a.get("text"),
+                ))
+            return repr((retry_mode, parts))
+        except Exception:  # noqa: BLE001 — a signature is an optimisation, not a contract
+            return None
+
+    def _note_answer(self, actions: Sequence[Any], retry_mode: Optional[str]) -> None:
+        """Count consecutive identical answers; see `max_no_progress_rounds`."""
+        sig = self._answer_signature(actions, retry_mode)
+        if sig is not None and sig == self._last_answer_sig:
+            self._no_progress_rounds += 1
+            _log(f"[no-progress] the model returned the same answer again "
+                 f"({self._no_progress_rounds}/{self.config.max_no_progress_rounds}) — "
+                 f"the previous one already ran and changed nothing")
+            # A board that reads the same every round is the signature of a
+            # CYCLING challenge answered as a still. Give the recording path a
+            # chance before giving up on the solve entirely.
+            self._arm_animated_probe()
+        else:
+            self._no_progress_rounds = 0
+            self._last_answer_sig = sig
+
+    def _reset_animated_state(self) -> None:
+        self._known_animated = False
+        self._animated_probe_armed = False
+        self._animated_probe_done = False
+        self._keyframe_mode = None
+        self._last_answer_sig: Optional[str] = None
+        self._no_progress_rounds = 0
 
     def _check_deadline(self, where: str) -> None:
         """
@@ -621,7 +801,8 @@ class PageSolver:
     def _smooth_move(self, page: Any, x: float, y: float) -> None:
         self._seed_cursor(page)
         points, timings = generate_trajectory(self._last_mouse, (x, y), 60)
-        self._trace_path(page, points, timings)
+        with self._phase("mouse"):
+            self._trace_path(page, points, timings)
 
     def _move_to_element(self, page: Any, element: Any, padding_percentage: float = 25.0) -> None:
         # BOUNDED. Playwright's default timeout is 30s, and this is called once
@@ -1217,6 +1398,26 @@ class PageSolver:
             hcaptcha_verify = frame.query_selector(".button-submit")
             if self._visible(hcaptcha_verify):
                 return hcaptcha_verify
+            # GeeTest: `<div class="geetest_submit geetest_disable">OK</div>`.
+            #
+            # Invisible to BOTH shapes above — a bare div carries no
+            # role="button", and "OK" is on none of the four word lists. So
+            # nothing was ever pressed on the puzzles that need pressing, and a
+            # GeeTest board does not grade until you do: the solve loop re-read
+            # the same unchanged panel and re-answered it identically until the
+            # round cap. Ordered icon-click scored 0/31 and 0/13 that way while
+            # the model was answering CORRECTLY (measured 2026-08-19). A driver
+            # that discards a right answer is indistinguishable from a model
+            # that cannot solve the puzzle, which is how this hid.
+            #
+            # Matched by CLASS, not by the word: `geetest_submit_tips` sits
+            # beside it and also reads "OK", and pressing the tooltip does
+            # nothing. `.geetest_submit` is a distinct token, so it cannot
+            # match it. Mirrors getVerifyButton in js/src/solver.ts — CLAUDE.md
+            # 1c, the two ports must behave the same.
+            geetest_submit = frame.query_selector(".geetest_submit")
+            if self._visible(geetest_submit):
+                return geetest_submit
         except Exception:
             pass
         return None
@@ -1225,18 +1426,30 @@ class PageSolver:
     # Frame readiness
     # ------------------------------------------------------------------
 
-    def _screenshot(self, element: Any, path: str, timeout_ms: Optional[int] = None) -> None:
+    def _screenshot(self, element: Any, path: str, timeout_ms: Optional[int] = None,
+                    animations: str = "disabled") -> None:
         """
-        Short timeout + animations disabled, always.
+        Short timeout, and animations disabled unless the caller needs the motion.
 
         Playwright's default 30s stability wait hangs per-screenshot on a
         closing/animating challenge element; that alone made a multi-round solve
         take ~115s. Failing fast and skipping a frame is strictly better.
+
+        `animations` is 'disabled' everywhere the goal is a STABLE STILL, which
+        is almost everywhere. It is not a formality: the flag fast-forwards
+        finite animations and FREEZES infinite ones, which is exactly what a
+        model-facing screenshot wants and exactly what a recording must not do.
+        The burst and the animation probe pass 'allow' — see `solver.ts`
+        `recordKeyframeBurst`, which learned this first: GeeTest's svg board
+        cycles in CSS, so a burst taken with animations disabled captured the
+        same picture forty times, the slicer honestly reported `mode=static`,
+        and the solve went back to answering a single still. hCaptcha hid it,
+        because it animates in canvas and the flag does not touch canvas.
         """
         element.screenshot(
             path=path,
             timeout=timeout_ms if timeout_ms is not None else 2_500,
-            animations="disabled",
+            animations=animations,
         )
 
     def _element_frame_hash(self, element: Any) -> Optional[str]:
@@ -1262,8 +1475,11 @@ class PageSolver:
         cfg = self.config
         start = time.monotonic() * 1000.0
         previous: Optional[str] = None
-        still_streak = 0
         frames: List[str] = []
+        # This loop only COLLECTS polls; the verdict is `settle_verdict`'s, so
+        # the recorded timelines in tests/test_animated_is_detected.py exercise
+        # the same rule that runs here rather than a copy of it that can drift.
+        samples: List[Tuple[float, bool]] = []
         try:
             while (time.monotonic() * 1000.0) - start < cfg.settle_timeout_ms:
                 self._check_deadline("waiting for the challenge to settle")
@@ -1277,14 +1493,16 @@ class PageSolver:
                 frames.append(path)
                 if previous:
                     moved = self._has_movement(previous, path, cfg.settle_diff_threshold)
-                    still_streak = 0 if moved else still_streak + 1
                     if len(frames) > 1:
                         _unlink(frames.pop(0))
-                    if still_streak >= cfg.settle_frames:
-                        return "settled"
-                    # Still moving this late means it is not merely loading.
-                    if moved and (time.monotonic() * 1000.0) - start >= cfg.animated_challenge_after_ms:
-                        return "animated"
+                    samples.append(((time.monotonic() * 1000.0) - start, moved))
+                    verdict = settle_verdict(
+                        samples,
+                        settle_frames=cfg.settle_frames,
+                        animated_after_ms=cfg.animated_challenge_after_ms,
+                    )
+                    if verdict != "timeout":
+                        return verdict
                 previous = frames[-1]
                 _delay(cfg.settle_poll_ms)
             return "timeout"
@@ -1308,14 +1526,55 @@ class PageSolver:
         `video_solve_enabled=False` restores the old behaviour for callers who would
         rather fail fast than spend the recording time.
         """
-        if self._wait_for_element_settled(element) != "animated":
-            return False
+        # Already established for this widget — don't re-probe every round.
+        if self._known_animated:
+            return True
+
+        with self._phase("settle"):
+            verdict = self._wait_for_element_settled(element)
+        if verdict != "animated":
+            # 'settled' is not proof of static. The settle rule stops at the
+            # first `settle_frames` of stillness, and every animated puzzle we
+            # ship rests between screens for longer than that, so it calls all
+            # of them settled (tests/test_animated_is_detected.py has the
+            # measured timelines).
+            #
+            # What decides it instead is a RECORDING, taken once a round has
+            # already answered the same thing twice — the signature of a
+            # cycling board read as a still. The recording is self-checking: if
+            # the widget really is static it slices to one keyframe and the
+            # caller solves that frame as the still it is. So there is nothing
+            # to be careful about here, and nothing to observe first.
+            if not self._animated_probe_armed or self._animated_probe_done:
+                return False
+            self._animated_probe_done = True
+            self._animated_probe_armed = False
+            _log("[animated] the same answer came back twice — recording the "
+                 "challenge to see whether it is cycling")
+
+        # Latch either route. Re-deciding every round would re-record a widget
+        # we have already SEEN animate, and on a puzzle that rests between
+        # screens a later recording can land inside a hold, slice to one frame,
+        # and flip the solve back onto the still path halfway through.
+        self._known_animated = True
+
         if not self.config.video_solve_enabled:
             raise AnimatedChallengeError(
                 "the challenge never settles and video_solve_enabled is off"
             )
-        _log("[animated] challenge never settles — recording it")
+        _log("[animated] challenge is animated — solving it from keyframes")
         return True
+
+    def _arm_animated_probe(self) -> None:
+        """Round N finished without finishing the CHALLENGE — probe next round.
+
+        Deliberately not armed for round 1. A static puzzle solves there and
+        never pays anything, which is what keeps the common case at the ~530ms
+        settle it has today. Only a widget that survived a round is worth
+        spending a cycle of observation on.
+        """
+        if self.config.animated_probe_enabled and not self._animated_probe_done:
+            self._animated_probe_armed = True
 
     def _record_keyframes(self, element: Any) -> Tuple[List[str], str]:
         """Record the widget and return `(keyframe_paths, temp_dir)`.
@@ -1344,14 +1603,20 @@ class PageSolver:
         total = max(1, round(cfg.video_burst_duration_ms / (1000.0 / fps)))
         interval = 1.0 / fps
 
+        frames: List[Any] = []
+
+        remaining = max(0, total - len(frames))
         shot = _tmp_png("burst")
-        frames = []
         try:
-            for i in range(total):
+            for i in range(remaining):
                 self._check_deadline("recording the animated challenge")
                 start = time.monotonic()
                 try:
-                    self._screenshot(element, shot)
+                    # animations ALLOWED — see `_screenshot`. The JS port has
+                    # done this since the GeeTest svg burst came back as 40
+                    # copies of one picture; this port never did, so every
+                    # CSS-animated vendor was recorded frozen.
+                    self._screenshot(element, shot, animations="allow")
                 except Exception as exc:  # noqa: BLE001 — a dropped frame is not fatal
                     _debug(f"burst frame {i} failed: {exc}")
                 else:
@@ -1364,7 +1629,7 @@ class PageSolver:
                 # the recording covers more wall-clock than the model trained on and
                 # a cycle's period lands differently across the frames.
                 wait = interval - (time.monotonic() - start)
-                if wait > 0 and i < total - 1:
+                if wait > 0 and i < remaining - 1:
                     time.sleep(wait)
         finally:
             _unlink(shot)
@@ -1379,6 +1644,9 @@ class PageSolver:
         temp_dir = tempfile.mkdtemp(prefix="ck_keyframes_")
         paths = write_keyframes(kfset, temp_dir, stem="challenge")
         _log(f"[animated] sliced to {len(paths)} keyframe(s) (mode={kfset.mode})")
+        # The wait gate consults this: `even` means the extractor found no state
+        # that RECURS, so there is nothing for the page to come back to.
+        self._keyframe_mode = kfset.mode
         return [str(p) for p in paths], temp_dir
 
     def _wait_for_keyframe(self, element: Any, keyframe_path: str,
@@ -1399,10 +1667,34 @@ class PageSolver:
 
         Returns whether the state was reached. On timeout the caller clicks anyway
         — see `keyframe_wait_timeout_ms`.
+
+        NOT ATTEMPTED on an `even` clip. `keyframes.py` picks that mode precisely
+        when the clip never revisits a picture it has already shown — a slow
+        one-way change, a rotation, a cross-fade — so there is no state for the
+        page to come BACK to and the wait can only ever run out. It is not a
+        cheap failure: the gate polls the full `keyframe_wait_timeout_ms` (6s)
+        PER CLICK before giving up and clicking anyway.
+        And `even` is not the rare case. All 116 real clips under
+        `cleanSamples/test/raw/**/keyframes/` are `even`; `cycle` has never once
+        fired on real footage, which keyframes.py itself records ("real state
+        separations top out around 0.007, well under this"). So on real traffic
+        this gate was 6s of dead time on every animated click, always followed by
+        the same click it would have made immediately. Measured on
+        `hcaptcha_rotating_obj_video`: 6.0s of a 28.8s solve, closest region diff
+        0.0721 against a 0.05 tolerance, then it clicked and solved.
+
+        The gate stays for `cycle`/`static`, where a state genuinely does recur
+        and waiting is the difference between clicking the sprite and clicking
+        the background.
         """
         import cv2
 
         from .keyframes import MATCH_REGION_TOLERANCE, region_box, region_diff_ratio
+
+        if self._keyframe_mode == "even":
+            _log("[animated] clip is mode=even (no state recurs); "
+                 "acting on the model's frame without waiting")
+            return False
 
         ref = cv2.imread(keyframe_path)
         if ref is None:
@@ -1456,12 +1748,24 @@ class PageSolver:
         ships an empty `url("")` placeholder before it arrives. Best-effort: a
         timeout falls through to the screenshot, where the existing fail-fast
         path still covers a genuinely unsupported puzzle.
+
+        "NOTHING TO WAIT FOR" IS READY. The last clause used to be
+        `return !!(example && ...)`, which is false when there is no example
+        image — so a challenge with no tile grid, no canvas and no example
+        polled until the timeout and then carried on regardless. Measured on
+        `hcaptcha_number_with_highest_value_video`: 24.0s of a 45.2s solve, the
+        full 8s three times over, more than half the budget spent asking a
+        question about elements that were not on the page. A readiness gate can
+        only report on what it can see; with nothing to check it has no opinion,
+        and "no opinion" must not read as "not ready".
         """
+        cfg = self.config
         try:
             frame = challenge_iframe.content_frame()
             if not frame:
                 return
-            frame.wait_for_selector(".prompt-text", state="visible", timeout=8_000)
+            frame.wait_for_selector(".prompt-text", state="visible",
+                                    timeout=cfg.hcaptcha_images_timeout_ms)
             frame.wait_for_function(
                 """() => {
                     const tiles = Array.from(
@@ -1476,9 +1780,10 @@ class PageSolver:
                     if (canvas && canvas.width > 0 && canvas.height > 0) return true;
                     const example = document.querySelector(
                         '.challenge-example img, .image-wrapper img');
-                    return !!(example && example.complete && example.naturalWidth > 0);
+                    if (example) return example.complete && example.naturalWidth > 0;
+                    return true;   // nothing here to be waited for
                 }""",
-                timeout=8_000,
+                timeout=cfg.hcaptcha_images_timeout_ms,
             )
         except Exception:
             pass  # timed out or detached mid-load; screenshot anyway
@@ -1830,7 +2135,8 @@ class PageSolver:
             # Each round can legitimately spend ~10s waiting on fades, so eight
             # of them plus the model calls can outlast the whole solve budget.
             self._check_deadline(f"recaptcha grid round {round_index}")
-            self._wait_for_grid_cells_loaded(element)
+            with self._phase("grid-load"):
+                self._wait_for_grid_cells_loaded(element)
             shot = _tmp_png("recap")
             action: Optional[Dict[str, Any]] = None
             try:
@@ -1965,9 +2271,11 @@ class PageSolver:
         is_animated = False
         if puzzle_source == "hcaptcha" and "frame=challenge" in src:
             if self._last_submit_frame_hash:
-                self._wait_for_change_since(element, self._last_submit_frame_hash)
+                with self._phase("await-next-round"):
+                    self._wait_for_change_since(element, self._last_submit_frame_hash)
                 self._last_submit_frame_hash = None
-            self._wait_for_hcaptcha_challenge_images(element)
+            with self._phase("hcaptcha-images"):
+                self._wait_for_hcaptcha_challenge_images(element)
             is_animated = self._settle_or_animated(element)
             # Those three waits total up to ~21s and none of them watches for
             # success, so the vendor's token routinely lands DURING them. Ask
@@ -1991,7 +2299,8 @@ class PageSolver:
         # the anchor checkbox just burns an 8s timeout before the click.
         is_recaptcha_challenge = puzzle_source == "recaptcha" and "recaptcha/api2/bframe" in src
         if is_recaptcha_challenge:
-            self._wait_for_grid_cells_loaded(element)
+            with self._phase("grid-load"):
+                self._wait_for_grid_cells_loaded(element)
             grid = self._get_grid_boxes(element)
             if grid and grid["size"] == 3:
                 # Only a 3x3 ever refreshes its tiles in place, so only a 3x3
@@ -2013,6 +2322,7 @@ class PageSolver:
         typed = False
         all_usage: List[Dict[str, Any]] = []
         keyframe_dir: Optional[str] = None
+        have_shot = False
         try:
             if is_animated:
                 # The freshness guard is deliberately SKIPPED here. It re-solves when
@@ -2021,22 +2331,58 @@ class PageSolver:
                 # whole re-solve budget would burn without ever acting. The frame
                 # number in the answer is the real guard: it names the state to act
                 # in, and `_execute_click` waits for it.
-                keyframes, keyframe_dir = self._record_keyframes(element)
-                actions, all_usage = self._get_keyframe_solution(keyframes)
-            else:
-                self._screenshot(element, shot, timeout_ms=self.config.element_screenshot_timeout_ms)
-                actions, all_usage = self._solve_frame_freshness_guarded(
-                    element,
-                    shot,
-                    lambda image_path: self._get_solution(
-                        image_path, puzzle_source, retry_mode, text_mode=text_mode
-                    ),
-                )
+                with self._phase("burst"):
+                    keyframes, keyframe_dir = self._record_keyframes(element)
+                # THE RECORDING IS THE TEST. A burst of a widget that turns out
+                # not to move slices to a single keyframe (`mode=static`), and
+                # that frame is exactly the still this round would have taken
+                # anyway — so a wrong guess about "is it animated" costs the
+                # burst and nothing else, and cannot produce a wrong answer.
+                #
+                # This replaced a separate probe that watched the widget FIRST
+                # and only recorded if it saw motion. That paid for the
+                # observation twice over: up to `animated_probe_ms` to decide,
+                # then the burst to act, and it still had to be long enough to
+                # outlast the longest hold (8.2s measured on
+                # number_with_highest_value_video) or it answered "static" from
+                # inside one — which it did, live, burning 9s of a 45s budget to
+                # reach the wrong conclusion about a puzzle that was animating.
+                if len(keyframes) < 2:
+                    _log("[animated] the recording shows one picture; "
+                         "solving it as a still")
+                    is_animated = False
+                    # Reuse the frame we just recorded rather than taking
+                    # another screenshot of the same motionless widget.
+                    shutil.copyfile(keyframes[0], shot)
+                    have_shot = True
+                    shutil.rmtree(keyframe_dir, ignore_errors=True)
+                    keyframe_dir = None
+                else:
+                    with self._phase("inference"):
+                        actions, all_usage = self._get_keyframe_solution(keyframes)
+
+            if not is_animated:
+                if not have_shot:
+                    self._screenshot(element, shot,
+                                     timeout_ms=self.config.element_screenshot_timeout_ms)
+                with self._phase("inference"):
+                    actions, all_usage = self._solve_frame_freshness_guarded(
+                        element,
+                        shot,
+                        lambda image_path: self._get_solution(
+                            image_path, puzzle_source, retry_mode, text_mode=text_mode
+                        ),
+                    )
 
             element_box = element.bounding_box()
             if not element_box:
                 raise CaptchaSolveError("could not get bounding box of captcha element")
 
+            # Recorded at the moment of EXECUTION, which is what makes a repeat
+            # mean something: this exact answer is about to be performed, so if
+            # it matches the last one, the last one already ran and the page is
+            # still asking the same question.
+            self._note_answer(actions, retry_mode)
             _log(f"executing {len(actions)} action(s)")
             frame = element.content_frame()
             verify_button = None
@@ -2213,6 +2559,8 @@ class PageSolver:
         self._deadline_ms = start + self.config.overall_solve_timeout_ms
         self._viewport_cache = None
         self._cursor_seeded = False
+        self._reset_animated_state()
+        self._budget = PhaseBudget()
 
         # Mint one session id for the WHOLE solve, exactly as the TS driver does
         # per `solve()`. The planner turns it into `X-CK-Session`, which is what
@@ -2229,6 +2577,10 @@ class PageSolver:
         try:
             return self._solve_impl(page, start, cumulative_usage)
         finally:
+            # Printed on the way out of every solve, success or failure — a
+            # solve that FAILED is exactly the one whose time you want itemised.
+            if timings_enabled() and self._budget is not None:
+                print(self._budget.report(), file=sys.stderr)
             self._deadline_ms = None
             if previous_session is None:
                 os.environ.pop(_SESSION_ENV, None)
@@ -2249,9 +2601,23 @@ class PageSolver:
         stale_element_retries = 0
         has_interacted = False
         render_waits = 0
-        max_render_waits = 6
+        # Strictly FEWER than the solve loops. A render wait consumes an
+        # attempt, so at parity the loop runs out first and the branch below
+        # never fires — "no interactive captcha widget", which is the correct
+        # and benign answer for a reCAPTCHA v3 / invisible page, is reported
+        # instead as "still detected after N solve loops". That is a hard error
+        # for a caller who catches NoCaptchaFoundError to mean "nothing here",
+        # and it appeared the moment max_solve_loops came down from 10 to 6.
+        max_render_waits = min(6, cfg.max_solve_loops - 1)
 
         for attempt in range(1, cfg.max_solve_loops + 1):
+            # Round 1 did not finish the challenge. Before spending another
+            # still inference on it, let this round's settle check probe whether
+            # the widget is animated — the settle rule alone cannot tell, and
+            # answering an animated puzzle from one still is how a solve burns
+            # all ten loops without ever being able to succeed.
+            if attempt >= 2:
+                self._arm_animated_probe()
             if (time.monotonic() * 1000.0) - start > cfg.overall_solve_timeout_ms:
                 raise CaptchaSolveError(
                     f"captcha solve timed out after {cfg.overall_solve_timeout_ms}ms "
@@ -2274,7 +2640,8 @@ class PageSolver:
                 _log("captcha reports solved; finishing.")
                 return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
 
-            element = self.detect_captcha(page)
+            with self._phase("detect"):
+                element = self.detect_captcha(page)
             if not element:
                 # Two-stage. A null detection splits into two very different
                 # cases and treating them alike is how you either hang on a
@@ -2320,7 +2687,9 @@ class PageSolver:
                 if has_interacted and unsupported_retries < cfg.max_unsupported_resolves:
                     unsupported_retries += 1
                     current = self.detect_captcha(page)
-                    if current and self._wait_for_element_settled(current) == "animated":
+                    with self._phase("settle"):
+                        _settled = self._wait_for_element_settled(current)
+                    if current and _settled == "animated":
                         # Used to be terminal. Now it just means the next round is an
                         # animated puzzle: retry the loop and `_solve_single` takes the
                         # recording path. `unsupported_retries` still bounds it, so a
@@ -2398,6 +2767,18 @@ class PageSolver:
                 raise
 
             has_interacted = has_interacted or did_interact
+
+            # Give up on a solve that is repeating itself, rather than letting
+            # the clock do it. The alternative is not "one more chance" — it is
+            # the same click, again, until `overall_solve_timeout_ms`, which is
+            # how a hopeless captcha came to cost 66s and how half of Tier 3's
+            # wall-clock was being spent on attempts that could not succeed.
+            if self._no_progress_rounds >= cfg.max_no_progress_rounds:
+                raise CaptchaSolveError(
+                    f"no progress: the model returned the same answer "
+                    f"{self._no_progress_rounds + 1} times running and the challenge "
+                    f"is still up (attempt {attempt}/{cfg.max_solve_loops})"
+                )
             render_waits = 0
             cumulative_usage.extend(usage)
 
@@ -2410,6 +2791,7 @@ class PageSolver:
                 deadline = time.monotonic() * 1000.0 + cfg.post_solve_outcome_timeout_ms
                 solved = False
                 widget_gone = 0
+                _verdict_t0 = time.perf_counter()
                 while time.monotonic() * 1000.0 < deadline:
                     if self.is_captcha_solved(page):
                         solved = True
@@ -2436,11 +2818,24 @@ class PageSolver:
                         widget_gone = 0
                     if self._is_challenge_freshly_rendered(page):
                         break  # next round is up; go solve it now
-                    _delay(200)
+                    _delay(cfg.post_solve_outcome_poll_ms)
+                _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0
+                if self._budget is not None:
+                    self._budget.add("await-verdict", _verdict_ms)
+                # How long a SUCCESS actually took to show itself. This is the
+                # only number that can size `post_solve_outcome_timeout_ms`: the
+                # window exists to catch a late success, so it needs to cover
+                # the slowest real one and nothing beyond it. A round that ends
+                # any other way spends the whole window by construction — there
+                # is no signal on a wrong answer — so its duration says nothing
+                # about how long the window ought to be.
+                if solved:
+                    _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
                 if solved:
                     return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
             else:
-                _delay(cfg.post_solve_delay_ms + random.random() * 300)
+                with self._phase("post-submit-delay"):
+                    _delay(cfg.post_solve_delay_ms + random.random() * 300)
 
             if self._has_recaptcha_underselect_error(page):
                 if already_retried_underselect:
@@ -2477,6 +2872,20 @@ def _bbox_center(bbox: Sequence[float]) -> Tuple[float, float]:
     around the model's point, so the centre recovers that point exactly."""
     x1, y1, x2, y2 = (float(v) for v in bbox)
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def _round_pts(value: Any, places: int = 3) -> Any:
+    """Coordinates rounded, for comparing two answers for sameness.
+
+    Rounded rather than compared exactly because the same tile chosen twice can
+    differ in the last float digit after the normalise/clamp round-trip, and a
+    repeat that reads as "different" is a repeat that costs a round.
+    """
+    if isinstance(value, (int, float)):
+        return round(float(value), places)
+    if isinstance(value, (list, tuple)):
+        return [_round_pts(v, places) for v in value]
+    return value
 
 
 def _as_dict(action: Any) -> Dict[str, Any]:

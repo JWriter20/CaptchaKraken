@@ -2,7 +2,7 @@
  * The tools.
  *
  * WHAT THIS SERVER IS FOR: letting an agent provision and watch its own captcha
- * solving. Sign the human in, mint a key for the Abyss model, report what has
+ * solving. Sign the human in, mint a key for the hosted endpoint, report what has
  * been spent, and hand over a payment link when the balance runs low. It does
  * not solve captchas — that is the gateway's OpenAI-compatible endpoint, and
  * the key minted here is what talks to it.
@@ -494,7 +494,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     {
       title: 'Create an API key',
       description:
-        'Mint a key for the captcha-solving endpoint (the Abyss model) and save it to disk where ' +
+        'Mint a key for the captcha-solving endpoint and save it to disk where ' +
         'the solver will find it. THE SECRET IS NEVER RETURNED — it is written straight to a ' +
         '0600 file and only the path is reported back, so it cannot leak through this ' +
         'conversation. After this runs, a solve works with no environment variables set.',
@@ -710,6 +710,8 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
             hosted: boolean;
             hugging_face_id: string | null;
             published: boolean;
+            coming_soon: boolean;
+            base_model: string;
             min_vram: string | null;
             weights_gb: number | null;
             accuracy: number | null;
@@ -721,13 +723,25 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
         for (const model of listing.models) {
           lines.push(`${model.name} — ${model.zone}`);
           lines.push(`  ${model.tagline}`);
-          lines.push(
-            model.hosted
-              ? '  Hosted only; not downloadable.'
-              : model.published
-                ? `  Weights: ${model.hugging_face_id} (~${model.weights_gb} GB, needs ${model.min_vram})`
-                : `  Weights: ${model.hugging_face_id} — reserved, not uploaded yet`,
-          );
+          lines.push(`  Base: ${model.base_model}`);
+          /*
+           * `hosted` and "downloadable" are SEPARATE facts, and deriving one
+           * from the other is what made this listing wrong in both directions
+           * at once: it announced the unreleased model as "what the hosted API
+           * runs" and reported the model actually taking requests as "reserved,
+           * not uploaded yet". Twilight is downloadable AND serving; Abyss is
+           * neither. Read each flag for what it says.
+           */
+          if (model.coming_soon) {
+            lines.push('  Coming soon — not serving, nothing to download.');
+          } else if (model.published) {
+            lines.push(
+              `  Weights: ${model.hugging_face_id} (~${model.weights_gb} GB, needs ${model.min_vram})`,
+            );
+          } else {
+            lines.push(`  Weights: ${model.hugging_face_id} — reserved, not uploaded yet`);
+          }
+          if (model.hosted) lines.push('  This is what the hosted API answers with.');
           if (model.accuracy !== null) {
             lines.push(`  Measured: ${(model.accuracy * 100).toFixed(1)}% exact match`);
           }

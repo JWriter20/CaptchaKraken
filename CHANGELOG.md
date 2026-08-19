@@ -3,6 +3,97 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [Unreleased]
+
+A solve-timing release. Nothing here changes what the model answers; it changes
+how much of a solve is spent waiting for things that cannot happen. The measured
+end of it: a `recaptcha_grid_4x4` attempt that used to run 66.1s and fail now
+gives up at round 4, and Tier 3 stops spending half its wall-clock on attempts
+that had no way to succeed.
+
+### Changed
+
+- **The solve budget is 45s over 6 rounds**, down from 120s over 10
+  (`overallSolveTimeoutMs` / `overall_solve_timeout_ms`, `maxSolveLoops` /
+  `max_solve_loops`). A round costs ~4-7s once the waits below are paid, so six
+  rounds is what fits; ten never did, and only ever expressed itself as a
+  timeout. The cap is now a BACKSTOP — reaching it is a bug report, not a normal
+  outcome.
+
+- **The post-submit outcome window is 1000ms, polled every 75ms**
+  (`postSolveOutcomeTimeoutMs` / `post_solve_outcome_timeout_ms`, and the new
+  `postSolveOutcomePollMs` / `post_solve_outcome_poll_ms`). A WRONG answer spends
+  the whole window by construction — the vendors emit nothing on a wrong answer,
+  they just re-deal — so the only number that can size it is how late a real
+  SUCCESS arrives: p50 360ms, max 528ms over 34 successful rounds across 20
+  puzzle types. 2500ms was being spent in full on every unsuccessful round,
+  25.5s of one 66.1s solve.
+
+- **hCaptcha's image wait is bounded at 3s**, not 8 (`hcaptchaImagesTimeoutMs` /
+  `hcaptcha_images_timeout_ms`). It is best-effort — the screenshot happens
+  either way — so it should cost what a loading tile plausibly costs, not
+  two-thirds of a whole solve.
+
+### Added
+
+- **A solve that repeats itself is abandoned** (`maxNoProgressRounds` /
+  `max_no_progress_rounds`, default 2). At temperature 0 the model is a function
+  of the picture, and every answer this driver produces is EXECUTED — so the same
+  answer twice means the previous one already ran and the page is still asking
+  the same question. Measured: nine identical click sets, each clicked, each
+  rejected, ending at the round cap. 2 rather than 1 because the first repeat
+  also escalates to a RECORDING, which is the one recovery still worth trying:
+  a board that cycles reads as a still and answers the same way every round.
+
+- **A per-solve phase budget**, printed to stderr under `CAPTCHA_TIMINGS=1`
+  (Python). "The solve took 77s" is not actionable; "the settle monitor spent
+  31s of it" is. Always accumulated, only printed under the flag, and printed on
+  the way out of a FAILED solve too — that is the one whose time you want
+  itemised.
+
+### Fixed
+
+- **GeeTest's OK button was never pressed.** It ships as
+  `<div class="geetest_submit geetest_disable">OK</div>` — invisible to both
+  shapes the button finder knew, because a bare div carries no `role="button"`
+  and "OK" is on none of the four word lists. A GeeTest board does not grade
+  until you press it, so the loop re-read the same unchanged panel and
+  re-answered it identically until the round cap: ordered icon-click scored
+  0/31 and 0/13 while the model was answering CORRECTLY. Matched by CLASS, not
+  by the word — `geetest_submit_tips` sits beside it, also reads "OK", and does
+  nothing when pressed.
+
+- **A readiness gate with nothing to check no longer reads as "not ready".**
+  The last clause asked whether hCaptcha's example image had loaded and returned
+  false when there was no example image at all, so a challenge with no tile
+  grid, no canvas and no example polled out the full timeout and carried on
+  regardless — 24.0s of a 45.2s solve, three times over. A gate can only report
+  on what it can see; with nothing to check it has no opinion, and no opinion
+  must not read as "not ready".
+
+- **An `even` clip no longer waits 6s per click for a state that never
+  recurs.** The slicer picks that mode precisely when the clip never revisits a
+  picture it has already shown, so the keyframe gate can only run out its full
+  window before clicking the coordinates it already had. It is also the normal
+  case, not a corner: all 116 real clips are `even` and `cycle` has never fired
+  on real footage. The gate stays for `cycle`/`static`, where a state does come
+  back and waiting is the difference between the sprite and the background.
+
+- **The Python port recorded CSS-animated widgets frozen.** Its burst took every
+  frame with `animations="disabled"`, which fast-forwards finite animations and
+  FREEZES infinite ones — right for a model-facing still, fatal for a recording.
+  GeeTest's svg board came back as forty copies of one picture, the slicer
+  honestly reported `mode=static`, and the solve went back to answering a single
+  still. The TS port has passed `allow` since it hit this first; hCaptcha hid it
+  there, because it animates in canvas and the flag does not touch canvas.
+
+- **A widget that never renders reports "no captcha" again, not "still detected
+  after N loops".** The render-wait cap was a flat 6 and a render wait consumes
+  an attempt, so at `maxSolveLoops` 6 the loop ran out first and the branch never
+  fired — turning the correct, benign answer for a reCAPTCHA v3 / invisible page
+  into a hard error for anyone catching `NoCaptchaFoundError`. It is now tied to
+  the loop count in both ports.
+
 ## [2.5.0] - 2026-08-18
 
 ### Added

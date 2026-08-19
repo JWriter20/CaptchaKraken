@@ -79,19 +79,20 @@ def _driver(states: Optional[Dict[str, List[int]]], answers: List[Dict[str, Any]
     answer per round. The returned log counts the two things this file is about:
     how many inferences the board cost, and whether it was submitted.
     """
-    solver = PageSolver.__new__(PageSolver)
-    solver.config = PageSolverConfig(
-        # The real windows are seconds long and this test has no browser to wait
-        # for; the decisions under test are unaffected by how long the poll takes.
-        recaptcha_fade_onset_grace_ms=60,
-        recaptcha_dynamic_fade_poll_ms=1,
-        recaptcha_dynamic_fade_wait_ms=20,
+    # The REAL __init__ (a truthy sentinel keeps it from building a live
+    # CaptchaSolver), so per-solve state added there cannot go missing here.
+    solver = PageSolver(
+        config=PageSolverConfig(
+            # The real windows are seconds long and this test has no browser to
+            # wait for; the decisions under test are unaffected by how long the
+            # poll takes.
+            recaptcha_fade_onset_grace_ms=60,
+            recaptcha_dynamic_fade_poll_ms=1,
+            recaptcha_dynamic_fade_wait_ms=20,
+        ),
+        solver=object(),
     )
     solver._solver = None
-    solver._last_mouse = (0.0, 0.0)
-    solver._last_submit_frame_hash = None
-    solver._deadline_ms = None
-    solver._viewport_cache = None
     solver._cursor_seeded = True
 
     log: Dict[str, Any] = {"rounds": 0, "clicked": [], "waits": 0, "submits": 0}
