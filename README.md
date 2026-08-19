@@ -233,6 +233,8 @@ Prosopo — and it is the first generation to handle **animated challenges** and
 | 🟦 **Twilight** | 8-bit (FP8) | 13 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
 | 🟦 **Sunlight** | 4-bit (AWQ) | 11 GB | ~14 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
 
+All three are **Qwen3.5-9B** — the adapter, and the two merges made from it.
+
 `./setup.sh` installs the LoRA adapter. **Twilight v1.2 is what the hosted API
 answers with** — the same LoRA on the same base, merged.
 
@@ -251,9 +253,10 @@ all you face and you want the smaller stack.
 
 ### ⬛ Abyss — not published, not serving yet
 
-**In training.** Trained against the failures of the open weights, and
-**hosted-only** when it lands — it is not a bigger quantisation of the public
-models. Every puzzle the open model gets wrong on the held-out set is a
+**In training**, on a **different and larger base: Qwen3.8-27B**, where every
+public model above is Qwen3.5-9B. Trained against the failures of the open
+weights, and **hosted-only** when it lands — it is not a bigger quantisation of
+the public models, and nothing about its size or VRAM follows from theirs. Every puzzle the open model gets wrong on the held-out set is a
 labelled example of a weakness, and Abyss is trained specifically to close
 them, starting with the non-grid hCaptcha puzzles. Keeping it on our own fleet
 is what lets it keep learning from production failures without shipping a

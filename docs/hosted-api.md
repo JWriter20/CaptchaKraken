@@ -7,7 +7,8 @@ The hosted API answers with **Twilight v1.2**, running on our fleet — the same
 weights we publish, merged from the same LoRA on the same base. You are paying
 for the hardware and the uptime, not for weights you cannot get.
 
-**Abyss** — the next model, trained against the failures of the open weights —
+**Abyss** — the next model, trained against the failures of the open weights,
+on a larger base (**Qwen3.8-27B**, where Twilight and Sunlight are Qwen3.5-9B) —
 is still in training. It is not serving yet, and when it lands it will be
 hosted-only. Do not plan around it today.
 
