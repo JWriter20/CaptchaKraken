@@ -28,8 +28,8 @@ wire up.
 
 | | Release | Precision | Size | Min VRAM | Hub |
 |---|---|---|---|---|---|
-| 🟦 **Sunlight v1.2** | current | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
-| 🟦 **Twilight v1.2** | current | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
+| 🟦 **Sunlight v1.2** | current | 4-bit (AWQ) | 11 GB | ~14 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
+| 🟦 **Twilight v1.2** | current | 8-bit (FP8) | 13 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
 | ⬜ Sunlight v1.1 | previous | 4-bit (AWQ) | ~9.1 GB | ~11 GB | [`Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
 | ⬜ Twilight v1.1 | previous | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
 

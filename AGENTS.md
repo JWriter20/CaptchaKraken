@@ -134,8 +134,8 @@ a **merged** model instead. Both are public:
 
 | Model | Precision | Size | Min VRAM | Hub id |
 |---|---|---|---|---|
-| **Sunlight v1.2** | 4-bit (AWQ) | ~9 GB | ~11 GB | `CaptchaKraken/Sunlight-v1.2-AWQ-4bit` |
-| **Twilight v1.2** | 8-bit (FP8) | ~14 GB | ~22 GB | `CaptchaKraken/Twilight-v1.2-FP8` |
+| **Sunlight v1.2** | 4-bit (AWQ) | 11 GB | ~14 GB | `CaptchaKraken/Sunlight-v1.2-AWQ-4bit` |
+| **Twilight v1.2** | 8-bit (FP8) | 13 GB | ~22 GB | `CaptchaKraken/Twilight-v1.2-FP8` |
 
 ```bash
 vllm serve CaptchaKraken/Twilight-v1.2-FP8 \
