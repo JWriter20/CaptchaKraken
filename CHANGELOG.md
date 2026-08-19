@@ -3,7 +3,7 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [Unreleased]
+## [2.6.0] - 2026-08-19
 
 A solve-timing release. Nothing here changes what the model answers; it changes
 how much of a solve is spent waiting for things that cannot happen. The measured
