@@ -27,6 +27,56 @@ semantic versioning; v2 is a major, **breaking** release.
   be driven from a worker thread, so a background watcher is not available to it.
 
 ### Fixed
+- **Only a FADING reCAPTCHA is worth a second look.** The 3x3 driver re-solved
+  every board until the model said `done`, so an ordinary "select all images
+  with X" cost two inferences: one to answer it, and one to be told there was
+  nothing left. Only the board that SWAPS a clicked tile out needs that, because
+  only there does a click deal a photo nobody has read yet.
+
+  The widget says which kind it is, in the reply it gives a click. A tile it
+  KEEPS gets the small blue chip in its top-left corner; a tile it is REPLACING
+  gets a large blue check across the middle and dissolves to white under it. A
+  widget that swaps one clicked cell swaps them all, so the two are never on one
+  board and one look at the tiles we just clicked settles it — and the chip is
+  already what `detect_selected_cells` reports as `selected`, from the same
+  per-poll CV call the driver was making anyway. Chip on every tile we clicked →
+  press Verify, same as a 4x4.
+
+  Ordering matters: a chip landing ZOOMS the photo out, which reads as
+  `changing` on the very frame that shows the chip. Testing for the swap first —
+  which is all the driver used to do — makes a chipped board look like a
+  swapping one for as long as that animation runs, which is how the wasted round
+  got spent. The verdict also needs EVERY clicked tile, because the two mistakes
+  do not cost the same: calling a swapping board finished submits half an answer
+  and burns the attempt, while calling a chipped board unfinished costs one
+  inference, which is what the old code paid every time.
+
+- **A photograph is not a selection badge.** `detect_selected_cells` runs BOTH
+  vendors' badge tests on every tile, so hCaptcha's — a small blue-teal disc
+  with a white glyph, top-right — was applied to reCAPTCHA boards too, and it
+  was two pixel COUNTS and nothing else: >=8 teal-ish pixels anywhere in the
+  corner patch, >=2 near-white pixels anywhere in the same patch. Blue sky with
+  a white pole in it satisfies both. The tile is then reported as already
+  selected, `solver._solve_grid` drops it from the model's answer, and it is
+  never clicked — a correct answer thrown away on a board where nothing was
+  selected at all. On the synthetic corpus that cost a target tile on 9% of
+  clean boards; on the real reCAPTCHA eval captures it fired on 3 boards of 39.
+
+  What a badge has and a photograph does not is that the white BELONGS TO the
+  teal mark — inside the disc, or hugging its rim. The counts stay as a cheap
+  gate and the verdict now needs >=2 white pixels within 2px of the teal blob's
+  convex hull. Phantom selections over 3051 tile corners of boards with nothing
+  selected: 74 -> 15. Rendered badges found: 1200/1200, both the filled-disc and
+  white-ringed renderings, 9-16px, colour-jittered and JPEG'd.
+
+  Two pixels of slack, not zero, because the ringed rendering draws the white ON
+  the rim and fragments the teal under it — a strict inside-the-hull test finds
+  a quarter of those. Nor a delta-E on the badge's colour, which is the obvious
+  tightening and the wrong one: pinning the hue drops recall to 40% under
+  jitter, because we do not know that colour to a delta-E's precision. The
+  reCAPTCHA corner chip was measured at the same time and is clean — 0 false
+  positives on those same corners — and is unchanged.
+
 - **The Puppeteer adapter was never actually verified.** Its header claimed it
   was "verified against Puppeteer 24.x" while nothing in the package touched it:
   there was no test for it, and Tier 3 drives camoufox on both ports. It is now

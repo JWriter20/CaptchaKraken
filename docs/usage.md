@@ -3,6 +3,10 @@
 Install a port, hand the solver a browser page (or a screenshot), and it does
 detect → grid → click → verify.
 
+> **Set up the model first.** Everything below assumes the solver knows where to
+> send inference requests: [Hosted API](./hosted-api.md) (no GPU, ~1 minute) or
+> [Self-hosting](./self-hosting.md) (your own card).
+
 ## Install
 
 Two ports, pick your language. The **TypeScript** port (npm) is the browser
@@ -105,10 +109,11 @@ The first three are Playwright-compatible (they return a standard Playwright
 wrap its page once with `fromPuppeteer()`. All four are tested end-to-end against
 the live reCAPTCHA demo.
 
-In every example the solver reads `VLLM_BASE_URL` + `CAPTCHA_KRAKEN_API_KEY` from
-the environment (run `setup.sh`, then `source captchakraken.env` — see
-[Self-hosting → Configuration](./self-hosting.md#configuration)), defaults to
-the unified captcha LoRA, and `solve()` does detect → grid → click → verify.
+In every example the solver reads `VLLM_BASE_URL` + `CAPTCHA_KRAKEN_API_KEY`
+from the environment, or from `~/.captchakraken/credentials` if they are unset.
+Set them up either way first — [Hosted API](./hosted-api.md) (no GPU) or
+[Self-hosting](./self-hosting.md#configuration) (`setup.sh`, then
+`source captchakraken.env`). Then `solve()` does detect → grid → click → verify.
 
 ### Playwright (vanilla)
 
@@ -276,8 +281,8 @@ npm install        # builds the solver + a local CLI venv (postinstall)
 
 - The `apiProvider` / `model` / `apiKey` options for Gemini/OpenRouter/Ollama are
   **removed**. v2 talks only to a vLLM server.
-- Set **`VLLM_BASE_URL`** and **`CAPTCHA_KRAKEN_API_KEY`** (or run `setup.sh`)
-  instead of provider API keys.
+- Set **`VLLM_BASE_URL`** and **`CAPTCHA_KRAKEN_API_KEY`** (or run `setup.sh`,
+  or point them at the [hosted API](./hosted-api.md)) instead of provider keys.
 - `new CaptchaKrakenSolver()` now needs no model/provider — it defaults to the
   grid LoRA.
 - v1's `transformers` / `torch` / SAM3 dependencies are gone from the solver venv.

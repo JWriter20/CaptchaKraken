@@ -137,7 +137,7 @@ model — 4070 and below, older Apple **Max** chips (fine on the 4-bit model), A
 **Pro**/base laptops, and older mid-range AMD.
 
 > ⏳ **Below ~30 tokens/sec, self-hosting feels sluggish.** If that is your card,
-> use the **hosted API** instead — it runs Abyss on our fleet with no GPU of
+> use the **hosted API** instead — it runs the production adapter on our fleet with no GPU of
 > yours involved, and the 240 requests measured above returned in a median
 > 1.6 s end to end including the network. Sign in at
 > [captchakraken.com](https://captchakraken.com/signin). `setup.sh` estimates

@@ -22,6 +22,20 @@ if you want to run the model yourself. The one-command
 [`setup.sh`](https://github.com/JWriter20/CaptchaKraken) installs `[serve]`,
 downloads the weights, and writes an env file for you.
 
+## No GPU? Use the hosted API
+
+Point the client at `https://api.captchakraken.com/v1` and run no model at all.
+Sign in at [captchakraken.com/signin](https://captchakraken.com/signin) for a
+`ck_live_…` key, or let the MCP server write one for you:
+
+```bash
+claude mcp add captchakraken -- npx -y captchakraken-mcp
+# then call sign_in, then create_api_key
+```
+
+`create_api_key` writes the key and the endpoint to `~/.captchakraken/credentials`,
+which the client reads on its own — **no environment variables needed**.
+
 ## Hands-off server
 
 The vLLM server is managed for you. On your first solve, if the configured
@@ -59,11 +73,11 @@ Everything model-specific lives in `captchakraken.config` and is env-overridable
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `VLLM_BASE_URL` | Inference endpoint | `http://localhost:8000/v1` |
-| `CAPTCHA_KRAKEN_API_KEY` | Bearer token (`VLLM_API_KEY` also accepted) | `EMPTY` |
-| `CAPTCHA_BASE_MODEL` | Base weights vLLM loads | `Qwen/Qwen3.5-9B` |
-| `CAPTCHA_LORA_ADAPTER` | Captcha adapter (HF id or path) | `CaptchaKraken/CaptchaKraken_v1` |
-| `CAPTCHA_LORA_NAME` | Served adapter name the client requests | `captcha` |
+| `VLLM_BASE_URL` | Inference endpoint | `~/.captchakraken/credentials`, else `http://localhost:8000/v1` |
+| `CAPTCHA_KRAKEN_API_KEY` | Bearer token (`VLLM_API_KEY` also accepted) | `~/.captchakraken/credentials`, else `EMPTY` |
+| `CAPTCHA_BASE_MODEL` | Base weights vLLM loads | `RedHatAI/Qwen3.5-9B-FP8-dynamic` |
+| `CAPTCHA_LORA_ADAPTER` | Captcha adapter (HF id or path) | `CaptchaKraken/CaptchaKraken-Lora-v1.2` |
+| `CAPTCHA_LORA_NAME` | Served adapter name the client requests | `captcha-v12` |
 | `CAPTCHA_KRAKEN_AUTOSTART` | `0` disables local auto-start | `1` |
 
 ## License

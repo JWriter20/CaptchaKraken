@@ -1961,19 +1961,37 @@ def is_cell_selected(image_path, grid_boxes, cell_number, debug_manager=None):
     selected, _ = detect_selected_cells(image_path, grid_boxes, debug_manager)
     return cell_number in selected
 
+# How far outside the teal blob a white pixel may sit and still be read as part
+# of the mark. Two pixels, because the ringed rendering draws the white ON the
+# disc's rim and fragments the teal underneath it, so a strict inside-the-hull
+# test finds only a quarter of those. Wider does not pay: at 4px the phantom
+# rate doubles for ~1 point of recall.
+_HCAPTCHA_GLYPH_SLACK_PX = 2.0
+
+
 def _has_hcaptcha_check(roi):
     """Detect hCaptcha's selected-state blue circle in the top-right corner.
 
-    The badge is a small filled cyan-teal circle (~10-14 px) with a white
-    checkmark glyph inside. Naively counting blue-dominant pixels matches
-    sky tiles, so we require BOTH:
-      - >=8 cyan-teal pixels (B high, G mid-high, R low)
-      - >=2 near-white pixels (the checkmark) in the same patch
+    The badge is a small cyan-teal circle (~10-14 px) carrying a white glyph.
+    Counting pixels is not enough on its own and never was: >=8 teal pixels
+    ANYWHERE in the corner plus >=2 near-white pixels ANYWHERE in the same patch
+    is satisfied by blue sky with a white pole in it, and that tile is then
+    reported as already selected — so the solver drops it from the model's
+    answer and never clicks it. Measured at 74 phantom selections over 3051
+    corners of boards with nothing selected on them.
+
+    What a badge has and a photograph does not is that the white BELONGS TO the
+    teal mark: it sits inside the disc, or hugs its rim. So the counts stay as a
+    cheap gate, and the verdict is that >=2 of the white pixels lie within
+    `_HCAPTCHA_GLYPH_SLACK_PX` of the largest teal blob's convex hull. A photo
+    puts the teal in one place and the white in another, and fails that.
     """
     if roi is None or roi.size == 0:
         return False
     flat = roi.reshape(-1, 3).astype(np.int32)
-    # Teal/cyan: B>120, G>80, R<80, AND B-R gap > 60.
+    # Teal/cyan: B>120, G>80, R<80, AND B-R gap > 60. Deliberately loose — the
+    # badge's exact colour is not known to a delta-E's precision, and pinning it
+    # to one costs more real badges than it saves phantoms.
     teal = (
         (flat[:, 0] > 120)
         & (flat[:, 1] > 80)
@@ -1982,7 +2000,27 @@ def _has_hcaptcha_check(roi):
     )
     # Bright white check mark inside the circle.
     white = (flat[:, 0] > 220) & (flat[:, 1] > 220) & (flat[:, 2] > 220)
-    return int(teal.sum()) >= 8 and int(white.sum()) >= 2
+    if int(teal.sum()) < 8 or int(white.sum()) < 2:
+        return False
+
+    h, w = roi.shape[:2]
+    # Close first: the glyph cuts the disc into pieces, and the mark is one
+    # blob, so the pieces have to be put back together before the largest is
+    # taken.
+    mask = cv2.morphologyEx(
+        teal.reshape(h, w).astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
+    )
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return False
+    hull = cv2.convexHull(max(contours, key=cv2.contourArea))
+    ys, xs = np.nonzero(white.reshape(h, w))
+    inside = sum(
+        1
+        for y, x in zip(ys, xs)
+        if cv2.pointPolygonTest(hull, (float(x), float(y)), True) >= -_HCAPTCHA_GLYPH_SLACK_PX
+    )
+    return inside >= 2
 
 
 def _has_badge(roi, rgb):

@@ -23,6 +23,20 @@ Playwright-compatible launcher.
 - To **self-host** the model, run the repo's `setup.sh` (installs vLLM + weights).
   Otherwise point `VLLM_BASE_URL` at a server you already run.
 
+## No GPU? Use the hosted API
+
+Point the client at `https://api.captchakraken.com/v1` and run no model at all.
+Sign in at [captchakraken.com/signin](https://captchakraken.com/signin) for a
+`ck_live_…` key, or let the MCP server write one for you:
+
+```bash
+claude mcp add captchakraken -- npx -y captchakraken-mcp
+# then call sign_in, then create_api_key
+```
+
+`create_api_key` writes the key and the endpoint to `~/.captchakraken/credentials`,
+which the client reads on its own — **no environment variables needed**.
+
 ## Usage
 
 ```typescript
@@ -46,8 +60,11 @@ Puppeteer users wrap the page once with `fromPuppeteer(page)`.
 
 | Variable | Meaning |
 |---|---|
-| `VLLM_BASE_URL` | Inference endpoint (local vLLM, or a server you run) |
+| `VLLM_BASE_URL` | Inference endpoint (local vLLM, a server you run, or `https://api.captchakraken.com/v1`) |
 | `CAPTCHA_KRAKEN_API_KEY` | Bearer token (`VLLM_API_KEY` also accepted) |
+
+Both fall back to `~/.captchakraken/credentials` when unset, so the hosted API
+needs no environment variables at all.
 
 ## License
 
