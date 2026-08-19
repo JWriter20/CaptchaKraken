@@ -1651,11 +1651,35 @@ class PageSolver:
         ordered.extend(sorted(remaining))
         return ordered
 
-    def _current_loading_cells(
+    def _watch_clicked_tiles(
         self, page: Any, element: Any, session: _GridSession, priority: Sequence[int] = ()
-    ) -> List[int]:
+    ) -> Tuple[List[int], bool]:
         """
-        Watch for the ONSET of the refresh over a grace window.
+        Watch the just-clicked tiles until the widget says what it did with them.
+
+        Returns `(loading, chipped)`. Two answers because reCAPTCHA gives a click
+        one of exactly two replies, and they are the two kinds of board:
+
+          * the small blue CHIP in the tile's top-left corner — the photo was
+            KEPT. Nothing is on its way in, the selection is the answer, and the
+            caller should press Verify (`chipped`).
+          * the photo blanking or dissolving under a large centred check — the
+            tile is being SWAPPED, and what lands may match too, so the board has
+            to be read again (`loading`).
+
+        A widget that swaps one clicked cell swaps them all, so the two never
+        share a board and one look at the tiles we just clicked settles it. The
+        chip is what `detect_selected_cells` reports as `selected` — it looks for
+        it in the top-left corner only, behind a circularity and a centroid test
+        a centred check fails — and we already read it every poll.
+
+        `chipped` needs EVERY watched tile, because a partial reading is a
+        misread and the two mistakes do not cost the same: calling a swapping
+        board finished submits half an answer and burns the attempt, while
+        calling a chipped board unfinished costs one inference. It is also only
+        ever OUR click that a chip can be reporting: tiles already wearing one
+        are filtered out of the model's answer before we click, so a chip on a
+        watched tile arrived in response to this round.
 
         The blank/fade transition LAGS the click by a beat: reCAPTCHA holds a
         clicked tile selected (old image visible) for ~1-3s and only then blanks
@@ -1694,17 +1718,23 @@ class PageSolver:
                 frames.append(path)
 
                 states = self._grid_cell_states(frames[-2], frames[-1], session.grid_boxes)
+                # Chip first: a chip landing on a tile ZOOMS its photo out, which
+                # reads as `changing` on the same frame that shows the chip. Test
+                # the swap first and every chipped board looks like a swapping
+                # one for as long as the animation runs.
+                if priority and set((states or {}).get("selected", [])).issuperset(priority):
+                    return [], True
                 in_scope = lambda c: watch is None or c in watch  # noqa: E731
                 empty = [c for c in (states or {}).get("empty", []) if in_scope(c)]
                 changing = [c for c in (states or {}).get("changing", []) if in_scope(c)]
                 loading = sorted(set(empty) | set(changing))
                 if loading:
-                    return self._order_by_priority(loading, priority)
+                    return self._order_by_priority(loading, priority), False
                 _unlink(frames.pop(0))
-            return []
+            return [], False
         except Exception as exc:
             _debug(f"fade-onset error: {exc}")
-            return []
+            return [], False
         finally:
             for path in frames:
                 _unlink(path)
@@ -1771,8 +1801,14 @@ class PageSolver:
         tiles and waits for at least one to finish reloading before re-solving,
         so we never burn a model call on a grid that is still mid-fade.
 
-        Submits ONLY on `done` — never on a round-cap exit, which is left to the
-        outer loop to re-detect and decide.
+        Only a board that SWAPS a clicked tile out is worth those extra rounds.
+        One that ticks the tile and keeps the photo has been fully answered by
+        the round that clicked it — same as the 4x4 — so `_watch_clicked_tiles`
+        reports the chip and this submits there and then. Rounds 2..N exist for
+        the fading board and nothing else.
+
+        Submits on `done`, and on a board that ticked our clicks — never on a
+        round-cap exit, which is left to the outer loop to re-detect and decide.
         """
         cfg = self.config
         session = _GridSession(
@@ -1818,7 +1854,7 @@ class PageSolver:
 
             if action.get("action") == "wait":
                 _log(f"[recaptcha-grid] round {round_index}: waiting for tiles.")
-                loading = self._current_loading_cells(page, element, session, clicked_order)
+                loading, _ = self._watch_clicked_tiles(page, element, session, clicked_order)
                 self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
                 continue
 
@@ -1849,11 +1885,18 @@ class PageSolver:
                     f"-> cells {clicked_this_round}."
                 )
 
-                loading = self._current_loading_cells(page, element, session, clicked_this_round)
-                if not loading:
-                    # Nothing faded within the grace window → the model fully
-                    # solved it; submit rather than burning another round.
-                    _log(f"[recaptcha-grid] round {round_index}: nothing loading; submitting.")
+                loading, chipped = self._watch_clicked_tiles(
+                    page, element, session, clicked_this_round
+                )
+                if chipped or not loading:
+                    # Either the widget ticked our clicks and kept the photos
+                    # (a board that does that is answered), or nothing faded
+                    # within the grace window. Submit rather than paying for
+                    # another round to be told the same thing.
+                    _log(
+                        f"[recaptcha-grid] round {round_index}: "
+                        f"{'tiles chipped' if chipped else 'nothing loading'}; submitting."
+                    )
                     should_submit = True
                     break
                 self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
@@ -1947,20 +1990,20 @@ class PageSolver:
         # Only the image-challenge frame holds a grid. Running grid detection on
         # the anchor checkbox just burns an 8s timeout before the click.
         is_recaptcha_challenge = puzzle_source == "recaptcha" and "recaptcha/api2/bframe" in src
-        is_recaptcha_one_shot = False
         if is_recaptcha_challenge:
             self._wait_for_grid_cells_loaded(element)
             grid = self._get_grid_boxes(element)
             if grid and grid["size"] == 3:
-                # 3x3 refreshes tiles in place, so it needs the multi-round
-                # driver. 4x4 only ever returns `checked` and is one-shot.
+                # Only a 3x3 ever refreshes its tiles in place, so only a 3x3
+                # can need more than one round — and whether THIS one does is
+                # decided inside the driver, by what the widget does with the
+                # first click. A 4x4 never refreshes: it falls through to the
+                # ordinary click-then-submit path below.
                 element_box = element.bounding_box()
                 if element_box:
                     return self._solve_recaptcha_grid(
                         page, element, retry_mode, grid, element_box
                     )
-            elif grid and grid["size"] == 4:
-                is_recaptcha_one_shot = True
 
         shot = _tmp_png("captcha")
         performed_action = False
