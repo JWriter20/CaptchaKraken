@@ -56,6 +56,13 @@ export interface PlaywrightElementHandle {
   isVisible(): Promise<boolean>;
   /** The element's text content, or null. */
   textContent(): Promise<string | null>;
+  /**
+   * First matching element WITHIN this element's subtree, or null. The vendors
+   * that render into the host page rather than an iframe (GeeTest, Yidun,
+   * BotDetect, …) have no Frame to scope against, so the widget element is the
+   * boundary that keeps a generic selector off the rest of the document.
+   */
+  $(selector: string): Promise<PlaywrightElementHandle | null>;
 }
 
 /**
@@ -88,6 +95,15 @@ export interface PlaywrightPage {
     down(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
     up(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
   };
+  /**
+   * Key input. Used to type a distorted-text captcha's answer character by
+   * character — `fill()` would set the value with no keystrokes at all, and
+   * these are the vendors that score typing cadence.
+   */
+  keyboard: {
+    type(text: string, options?: { delay?: number }): Promise<void>;
+    press(key: string, options?: { delay?: number }): Promise<void>;
+  };
   /** Sleep `timeout` ms (Playwright's own timer). */
   waitForTimeout(timeout: number): Promise<void>;
   /** Wait for a selector to reach the given state; resolves to the handle (or null). */
@@ -101,6 +117,14 @@ export interface PlaywrightPage {
   $(selector: string): Promise<PlaywrightElementHandle | null>;
   /** All matching element handles. */
   $$(selector: string): Promise<PlaywrightElementHandle[]>;
+  /**
+   * Whether the page has been closed. OPTIONAL because it is the one member
+   * here the solver itself never needs — the auto-solve watcher uses it to end
+   * its loop when the caller closes the browser out from under it, and falls
+   * back to treating the page as open when a launcher does not expose it.
+   * Playwright and Puppeteer both do.
+   */
+  isClosed?(): boolean;
   /** Run `pageFunction` against the first matching element, in the page context. */
   $eval<R>(
     selector: string,

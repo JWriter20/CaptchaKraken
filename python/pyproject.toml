@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "captchakraken"
-version = "2.4.0"
+version = "2.6.0"
 description = "Self-hosted captcha solver: OpenCV grid detection + a fine-tuned Qwen3.5-9B vision LoRA served on vLLM."
 readme = "README.md"
 requires-python = ">=3.10"
 # Source-available, NOT GPL. The CaptchaKraken Source-Available License permits
-# commercial use as an internal component but prohibits selling the solve itself
-# or thin-wrapper resale — see LICENSE. (GPL-3.0 would wrongly permit reselling.)
+# commercial use as an internal component but prohibits selling the solve itself,
+# thin-wrapper resale, and bundling it into a stealth browser someone else ships
+# — see LICENSE. (GPL-3.0 would wrongly permit all three.)
 license = { file = "LICENSE" }
 authors = [{ name = "Jake Writer" }]
 keywords = ["captcha", "recaptcha", "hcaptcha", "vllm", "qwen", "computer-vision", "automation"]

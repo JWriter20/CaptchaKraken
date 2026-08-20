@@ -8,7 +8,9 @@ planner with detect/segment/drag-refine; that code is preserved on the
 """
 
 import base64
+import io
 import json
+import math
 import os
 import re
 import sys
@@ -16,12 +18,79 @@ from mimetypes import guess_type
 from typing import Any, Dict, List, Optional
 
 import requests
+from PIL import Image
 
 from . import config, errors, prompts
 from .server_manager import ensure_server
 from .timing import timed
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+
+# The pixel floor the adapters are TRAINED at, and therefore the floor an image
+# has to clear before it is worth sending.
+#
+# Training exports `MIN_PIXELS=200704` (448², in the finetune repo's
+# scripts/train_unified.sh), so anything smaller is enlarged before the vision
+# encoder sees it. Serving did none of that: vLLM runs with no
+# `--mm-processor-kwargs` and this client used to re-encode the file unchanged,
+# so a small captcha arrived at a geometry the model was never tuned on. It
+# fails as plausible-but-wrong coordinates, never as an error — measured on real
+# geetest_v3_slide captures (277x285), predictions landed 80-105 px from the
+# hand label at native size and 1-4 px away once upscaled.
+#
+# A FLOOR, NOT A RESIZE. Images already above it are passed through byte-for-byte;
+# re-encoding every screenshot would spend time and fidelity on the types that
+# were never affected.
+#
+# Unconditional as a DEFAULT, because the deployed v1.1 adapter improves under
+# it too (mean error ~40 px native vs ~4 px upscaled). But it is no longer a
+# constant: `models.json` may declare a `pixel_budget` per model, because the
+# band an adapter TRAINED under is a property of that adapter, exactly like its
+# prompt generation. See prompts.pixel_budget.
+MIN_PIXELS = 448 * 448
+
+
+def _encode_image(path: str,
+                  budget: "Optional[prompts.PixelBudget]" = None) -> tuple:
+    """`(mime, base64)` for one image, fitted into `budget`'s pixel band.
+
+    Area is clamped, never dimensions: aspect ratio is the geometry of a grid
+    puzzle, and squashing it moves every tile centre — fatal when the answer is
+    a coordinate on a normalized 0-1000 scale.
+
+    Anything Pillow cannot open is passed through untouched — this is a
+    preprocessing nicety, and it must never be the reason a solve fails.
+    """
+    budget = budget or prompts.pixel_budget(None)
+    with open(path, "rb") as f:
+        raw = f.read()
+    mime = guess_type(path)[0] or "image/png"
+    try:
+        im = Image.open(io.BytesIO(raw))
+        width, height = im.size
+    except Exception:  # noqa: BLE001 — unreadable/animated: send it as-is
+        return mime, base64.b64encode(raw).decode()
+    cap = budget.maximum
+    if cap and width * height > cap:
+        # floor, not ceil: rounding up here can land back OVER the cap, which
+        # is the mirror of the bug the floor branch below guards against.
+        scale = math.sqrt(cap / (width * height))
+        im = im.convert("RGB").resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.BICUBIC)
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+        return "image/png", base64.b64encode(buf.getvalue()).decode()
+    if width * height >= budget.minimum:
+        return mime, base64.b64encode(raw).decode()
+    # ceil, not round: rounding both sides down lands just under the floor
+    # (442x454 = 200,668 for a 277x285 capture) and defeats the whole point.
+    scale = math.sqrt(budget.minimum / (width * height))
+    im = im.convert("RGB").resize(
+        (math.ceil(width * scale), math.ceil(height * scale)), Image.BICUBIC)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return "image/png", base64.b64encode(buf.getvalue()).decode()
 
 # Header the fleet's haproxy front (on the reverse-proxy EC2) routes on. When a
 # caller sets CAPTCHA_REQUEST_PRIORITY to a positive int, every request carries
@@ -233,10 +302,13 @@ class ActionPlanner:
         # Doing this ONCE per planner rather than per request: resolution can
         # touch the Hub, and a per-request lookup would put a network call in
         # front of every round of every solve.
-        self.prompts = prompts.resolve(
-            self.model if prompts.canonical_model_id(self.model)
-            else config.lora_adapter()
-        )
+        _prompt_key = (self.model if prompts.canonical_model_id(self.model)
+                       else config.lora_adapter())
+        self.prompts = prompts.resolve(_prompt_key)
+        # Resolution follows the MODEL for the same reason prompts do, and off
+        # the same key: an adapter reads a puzzle at the pixel band it trained
+        # under. Resolved once per planner — see the note above.
+        self.pixel_budget = prompts.pixel_budget(_prompt_key)
         # Auto-start a local vLLM server on the first request if one isn't up
         # (no-op for a healthy or remote endpoint). Guarded so we only try once.
         self._server_ensured = False
@@ -268,11 +340,9 @@ class ActionPlanner:
 
         parts: List[Dict[str, Any]] = []
         for p in image_paths:
-            with open(p, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            mime, _ = guess_type(p)
+            mime, b64 = _encode_image(p, self.pixel_budget)
             parts.append({"type": "image_url",
-                          "image_url": {"url": f"data:{mime or 'image/png'};base64,{b64}"}})
+                          "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
         messages = [
             {
@@ -500,8 +570,8 @@ class ActionPlanner:
                 out.append(iv)
         return out
 
-    def get_pixel_actions(self, image_path: str) -> List[Dict[str, Any]]:
-        """Solve a non-grid click/drag puzzle.
+    def get_pixel_actions(self, image_path: str, text_mode: bool = False) -> List[Dict[str, Any]]:
+        """Solve a non-grid click/drag/slide/text puzzle.
 
         Sends the trained action prompt + image, parses the model's JSON, and
         returns a list of normalized actions with all coordinates on a 0–1
@@ -509,11 +579,20 @@ class ActionPlanner:
 
           {"kind": "click", "points": [(x, y), ...]}
           {"kind": "drag",  "src": (x, y), "dst": (x, y)}
+          {"kind": "slide", "dst": (x, y)}          — puzzle-piece slider
+          {"kind": "type",  "text": "<the code>"}   — distorted text
+
+        `text_mode` swaps in the distorted-text prompt. It is chosen by the
+        DRIVER, from the widget's DOM (a visible text box in the challenge),
+        because nothing about the picture reliably says "this one is typed" —
+        BotDetect's warped letters and hCaptcha's "click the matching letter"
+        look alike to a pixel classifier, and the two want opposite answers.
 
         Returns [] if the model produced nothing usable. The solver turns these
-        into ClickAction / DragAction bboxes.
+        into ClickAction / DragAction / TypeAction.
         """
-        raw = self._chat_with_image(self.prompts.action_prompt, image_path, max_tokens=512)
+        prompt = self.prompts.text_prompt() if text_mode else self.prompts.action_prompt
+        raw = self._chat_with_image(prompt, image_path, max_tokens=512)
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         self._log(f"pixel actions -> {actions}")
@@ -635,6 +714,23 @@ class ActionPlanner:
         if not isinstance(data, dict):
             return out
 
+        # ---- type (CANONICAL — the schema TEXT_INSTRUCTION asks for on the
+        #      distorted-text captchas: {"action": "type", "text": "<the code>"}).
+        # First, because it is the one answer family with NO coordinate in it:
+        # every branch below keys off a number, so a typed answer that fell
+        # through reached the end and normalized to nothing.
+        # The code is passed through VERBATIM — case and spacing are part of what
+        # the model read off the image, and "tidying" them submits a different
+        # answer than the one it gave.
+        act = data.get("action")
+        if isinstance(act, dict) and act.get("action") == "type":
+            act = act.get("action")  # unwrap {"action": {"action": "type", ...}}
+        if act == "type" or (isinstance(data.get("text"), str) and "drags" not in data):
+            container = data if isinstance(data.get("text"), str) else data.get("action")
+            text = container.get("text") if isinstance(container, dict) else None
+            if isinstance(text, str) and text:
+                return [{"kind": "type", "text": text}]
+
         # ---- drag (CANONICAL — the schema PIXEL_ACTION_PROMPT asks for and the
         #      LoRA is trained on, see instructions.py::ACTION_INSTRUCTION):
         #      {"action":"drag","drags":[{"source","from":[x,y],"destination","to":[x,y]}]}
@@ -652,11 +748,24 @@ class ActionPlanner:
                     continue
                 snums = flat_numbers(d.get("from"))
                 dnums = flat_numbers(d.get("to"))
-                if len(snums) >= 2 and len(dnums) >= 2:
+                if len(dnums) < 2:
+                    continue  # a piece with nowhere to go is not actionable
+                dst = norm_xy(dnums[0], dnums[1])
+                if not dst:
+                    continue
+                if len(snums) >= 2:
                     src = norm_xy(snums[0], snums[1])
-                    dst = norm_xy(dnums[0], dnums[1])
-                    if src and dst:
+                    if src:
                         out.append({"kind": "drag", "src": src, "dst": dst})
+                else:
+                    # SOURCELESS — a puzzle-piece slider. The prompt's "FOR
+                    # PUZZLE PIECE SLIDER PUZZLES" clause tells the model to
+                    # leave the source empty precisely because the piece is not
+                    # what you pick up: the handle is, somewhere else entirely,
+                    # and how far it has to travel is not knowable from the
+                    # picture. Requiring both ends here dropped the one answer
+                    # shape the prompt asks for on every slide puzzle.
+                    out.append({"kind": "slide", "dst": dst})
             if out:
                 return out
 

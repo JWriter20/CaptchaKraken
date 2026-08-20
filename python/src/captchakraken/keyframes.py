@@ -29,8 +29,9 @@ import cv2
 import numpy as np
 
 # ── extraction parameters ───────────────────────────────────────────────────
-# Defaults are tuned against the collector's burst geometry (4 s @ 10 fps = 40
-# frames, `_collect_common.BURST_DURATION_MS` / `BURST_FPS`). They are all
+# Defaults are tuned against the collector's burst geometry (10 fps; 4 s by
+# default, but `Source.burst_duration_ms` raises it per vendor so a burst covers
+# a full animation cycle, so clip length varies). They are all
 # fractions or frame counts, so they survive a change of clip length; only
 # MIN_HOLD_FRAMES is absolute, and it is deliberately a wall-clock idea (~0.3 s).
 

@@ -1,6 +1,6 @@
 {
   "name": "captchakraken-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for CaptchaKraken: sign in with GitHub, mint API keys for the Abyss model, and read your usage and spending.",
   "type": "module",
   "author": "Jake Writer",

@@ -14,6 +14,7 @@
  *   - `handle.getAttribute(name)`      → `handle.evaluate((el,n)=>el.getAttribute(n), name)`
  *   - `handle.textContent()`           → `handle.evaluate(el=>el.textContent)`
  *   - `handle.scrollIntoViewIfNeeded()`→ `handle.scrollIntoView()`
+ *   - `page.isClosed()`                → same, but must be forwarded explicitly
  * Everything else (`$`, `$$`, `$eval`, `waitForFunction`, `mouse.*`,
  * `screenshot({path})`, `boundingBox`, `contentFrame`, `isVisible`) is
  * call-compatible and passed straight through.
@@ -57,6 +58,7 @@ interface PuppeteerElementHandle {
   scrollIntoView(): Promise<void>;
   isVisible(): Promise<boolean>;
   evaluate(pageFunction: (el: any, ...args: any[]) => any, ...args: any[]): Promise<any>;
+  $(selector: string): Promise<PuppeteerElementHandle | null>;
 }
 interface PuppeteerFrame {
   $(selector: string): Promise<PuppeteerElementHandle | null>;
@@ -69,11 +71,18 @@ interface PuppeteerPage {
     down(options?: any): Promise<void>;
     up(options?: any): Promise<void>;
   };
+  keyboard: {
+    type(text: string, options?: { delay?: number }): Promise<void>;
+    press(key: string, options?: any): Promise<void>;
+    down(key: string, options?: any): Promise<void>;
+    up(key: string): Promise<void>;
+  };
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   viewport(): ViewportSize | null;
   $(selector: string): Promise<PuppeteerElementHandle | null>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
   $eval(selector: string, pageFunction: (element: Element) => any, ...args: any[]): Promise<any>;
+  isClosed(): boolean;
 }
 
 /** Translate Playwright `{state}` selector options to Puppeteer `{visible}/{hidden}`. */
@@ -99,6 +108,7 @@ function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle |
     getAttribute: (name) => h.evaluate((el: Element, n: string) => el.getAttribute(n), name),
     isVisible: () => h.isVisible(),
     textContent: () => h.evaluate((el: Element) => el.textContent),
+    $: async (selector) => wrapHandle(await h.$(selector)),
   };
 }
 
@@ -125,6 +135,19 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
       down: (options) => page.mouse.down(options),
       up: (options) => page.mouse.up(options),
     },
+    keyboard: {
+      type: (text, options) => page.keyboard.type(text, options),
+      // Puppeteer has no combo syntax: 'Control+A' must be held, pressed,
+      // released. Playwright accepts the combo string directly, which is why
+      // the solver speaks Playwright and this adapter translates.
+      press: async (key) => {
+        const parts = key.split('+');
+        const target = parts.pop() as string;
+        for (const mod of parts) await page.keyboard.down(mod);
+        await page.keyboard.press(target);
+        for (const mod of parts.reverse()) await page.keyboard.up(mod);
+      },
+    },
     waitForTimeout: (timeout) => new Promise<void>((resolve) => setTimeout(resolve, timeout)),
     waitForSelector: async (selector, options) =>
       wrapHandle(await page.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
@@ -132,5 +155,11 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     $: async (selector) => wrapHandle(await page.$(selector)),
     $$: async (selector) => (await page.$$(selector)).map((h) => wrapHandle(h)!).filter(Boolean),
     $eval: (selector, pageFunction, arg) => page.$eval(selector, pageFunction as any, arg),
+    // Same name and shape on both libraries, but it still has to be forwarded:
+    // the wrapper is a fresh object literal, so anything not listed here is
+    // simply absent. The auto-solve watcher reads it to end its loop when the
+    // caller closes the browser, and an undefined `isClosed` reads as "still
+    // open" — a watcher that polls a dead page forever.
+    isClosed: () => page.isClosed(),
   };
 }

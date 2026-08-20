@@ -40,6 +40,7 @@ from .action_types import (
     ClickAction,
     DoneAction,
     DragAction,
+    TypeAction,
     WaitAction,
 )
 from .image_processor import ImageProcessor
@@ -148,6 +149,7 @@ class CaptchaSolver:
         instruction: str = "",
         puzzle_source: str = "unknown",
         retry_mode: Optional[str] = None,
+        text_mode: bool = False,
     ) -> Union[CaptchaAction, List[CaptchaAction]]:
         media_path = str(Path(media_path).resolve())
         if not os.path.exists(media_path):
@@ -157,6 +159,27 @@ class CaptchaSolver:
         self.debug.save_image(cv_image_path, "00_base_image.png")
         assert self._image_size is not None
         img_w, img_h = self._image_size
+
+        if text_mode:
+            # The driver saw a text box in the widget, so the answer is a string
+            # and there is nothing on the picture to find. Grid and checkbox
+            # detection are skipped rather than merely ignored: BotDetect's
+            # boxed, evenly-spaced glyphs are exactly the lattice find_grid
+            # looks for, and a false grid here would answer a typing puzzle
+            # with a list of cell numbers.
+            try:
+                actions = self._solve_pixel(cv_image_path, text_mode=True)
+            except ValueError as exc:
+                # The served model predates the distorted-text family, so there
+                # is no prompt to send it. Surfaced as UNSUPPORTED rather than
+                # crashing: it is the same class of outcome as "this LoRA only
+                # does grids", the driver already knows how to report it, and
+                # the message names the real fix (a generation-2 model) instead
+                # of a stack trace in prompts.py.
+                raise UnsupportedCaptchaError(str(exc)) from exc
+            if actions:
+                return actions
+            raise UnsupportedCaptchaError("Could not read the text captcha")
 
         with timed("solver.find_grid"):
             grid_boxes = find_grid(cv_image_path)
@@ -230,12 +253,12 @@ class CaptchaSolver:
         raise UnsupportedCaptchaError("Cannot solve this animated captcha")
 
     def _solve_pixel(
-        self, image_path: str
+        self, image_path: str, text_mode: bool = False
     ) -> List[Union[ClickAction, DragAction]]:
         """Turn the model's normalized 0–1 click/drag actions into ClickAction /
         DragAction bboxes. Each point becomes a small box centered on it (the TS
         solver clicks the box center)."""
-        return self._to_actions(self.planner.get_pixel_actions(image_path))
+        return self._to_actions(self.planner.get_pixel_actions(image_path, text_mode=text_mode))
 
     def _to_actions(
         self,
@@ -290,6 +313,24 @@ class CaptchaSolver:
                         **wait_for(a),
                     )
                 )
+            elif a.get("kind") == "slide":
+                # A puzzle-piece slider, carried as a drag with NO source. That
+                # is not a lossy encoding of a normal drag — it is the whole
+                # shape of the answer: the thing you grab (the handle) is not
+                # the thing that has to arrive (the piece), and only the page
+                # knows where the handle is. The driver reads a null source as
+                # "find the slider and close the loop on the piece".
+                dx, dy = a["dst"]
+                out.append(
+                    DragAction(
+                        action="drag",
+                        source_bounding_box=None,
+                        target_bounding_box=box(dx, dy),
+                        **wait_for(a),
+                    )
+                )
+            elif a.get("kind") == "type":
+                out.append(TypeAction(action="type", text=a["text"]))
         return out
 
     # Back-compat alias. Kept pointing at `solve` (a single still), NOT at
@@ -370,6 +411,42 @@ class CaptchaSolver:
             self.debug.log(
                 f"_is_real_grid: per-cell stddev = {[round(s, 1) for s in stds]}"
             )
+
+            # A SPRITE BOARD is not a tile grid, however grid-shaped it is.
+            #
+            # GeeTest's iconcrush and gobang are lattices of sprites drawn on
+            # ONE flat board, so find_grid finds them and every cell is
+            # colourful enough (mean stddev ~52) to clear every check below.
+            # iconcrush was routed to `_solve_grid` on every capture, which
+            # asks the model to "choose the cell numbers that match the
+            # description" — the wrong question for a board you answer by
+            # tapping two tiles to swap them. Nothing errors: the reply comes
+            # back as `[3, 6, 9]`, is re-encoded as clicks on those cell
+            # centres, and is graded against a two-click gold. The type scored
+            # 0.089 that way and read as the model's weakest.
+            #
+            # The discriminator is the BACKGROUND, not the content. A real
+            # captcha grid is independent photographs, so each tile's median
+            # colour is its own; a sprite board shares one board colour behind
+            # every cell, so the medians collapse onto a single value.
+            # Measured over the real captures: iconcrush and gobang 0.0-0.8,
+            # against 14.9 (recaptcha_grid_4x4) up to 93.0 (geetest_v4_nine)
+            # for the five true grid families. The threshold sits in an 18x
+            # gap, which is why it is a fixed number rather than a tuned one.
+            medians = []
+            for (x1, y1, x2, y2) in grid_boxes:
+                roi = img[y1:y2, x1:x2]
+                if roi.size:
+                    medians.append(np.median(roi.reshape(-1, 3), axis=0))
+            if len(medians) >= 4:
+                spread = float(np.mean(np.std(np.array(medians), axis=0)))
+                self.debug.log(f"_is_real_grid: median-colour spread = {spread:.1f}")
+                if spread < 6.0:
+                    self.debug.log(
+                        f"_is_real_grid: every cell shares one background colour "
+                        f"({spread:.1f} < 6.0) → reject (sprite board, not tiles)."
+                    )
+                    return False
 
             # If the *whole* image is mostly flat (e.g. screenshotting the
             # tiny hCaptcha anchor iframe with just the "I'm not a robot"
@@ -502,5 +579,27 @@ class CaptchaSolver:
         return ClickAction(action="click", target_bounding_boxes=bboxes)
 
 
-def solve_captcha(media_path: str, instruction: str = "", **kwargs) -> Any:
-    return CaptchaSolver(**kwargs).solve(media_path, instruction)
+def solve_captcha(
+    media_path: str,
+    instruction: str = "",
+    *,
+    puzzle_source: str = "unknown",
+    retry_mode: Optional[str] = None,
+    text_mode: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Solve one captcha image. `kwargs` configure the solver; the arguments
+    named above are forwarded to `CaptchaSolver.solve`.
+
+    They are spelled out rather than left in `**kwargs` because everything in
+    `kwargs` goes to the CONSTRUCTOR. A caller passing `text_mode=True` — the
+    only way this one-shot API can say "the answer is a typed string, not a
+    place on the picture" — got `TypeError: __init__() got an unexpected keyword
+    argument`, so a static distorted-text image was unsolvable through the
+    public entry point. Only the `PageSolver` path could reach the text prompt,
+    and it decides `text_mode` from the DOM, which a bare image does not have.
+    """
+    return CaptchaSolver(**kwargs).solve(
+        media_path, instruction,
+        puzzle_source=puzzle_source, retry_mode=retry_mode, text_mode=text_mode,
+    )

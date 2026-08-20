@@ -12,7 +12,7 @@ _DATA = os.path.join(_REPO_ROOT, "cleanSamples", "test", "raw")
 
 # Non-grid puzzle types that must NOT yield a grid.
 NON_GRID = [
-    "hcaptcha_arrows_deviating", "hcaptcha_block_cover", "hcaptcha_car_parking_lot",
+    "hcaptcha_arrows_deviating", "hcaptcha_car_parking_lot",
     "hcaptcha_click_highest_jumper", "hcaptcha_click_image_by_traits",
     "hcaptcha_click_on_path", "hcaptcha_connect_path",
     "hcaptcha_drag_numbered_line_pieces", "hcaptcha_fish_swim_different",

@@ -62,12 +62,13 @@ LATEST_PROMPT_VERSION = "2"
 # going quiet is how prompt drift got shipped last time.
 #
 #   1 — CaptchaKrakenV1_Lora, Sunlight-AWQ-4bit, Twilight-FP8, CaptchaKraken_v1.1.
-#       985-char action prompt. No slider clause. No animated ("video") family:
-#       a v1 model cannot answer a keyframe request, which is why `video` is
-#       null rather than a copy of v2's.
-#   2 — adds the PUZZLE PIECE SLIDER clause and the animated family. Byte-
-#       identical to src/synthetic/reasoning/instructions.py::ACTION_INSTRUCTION
-#       and ::VIDEO_INSTRUCTION_TEMPLATE in the finetune repo at PROMPT_VERSION 2.
+#       985-char action prompt. No slider clause. No animated ("video") family
+#       and no distorted-text ("text") family: a v1 model cannot answer either
+#       request, which is why both are null rather than a copy of v2's.
+#   2 — adds the PUZZLE PIECE SLIDER clause and the animated + text families.
+#       Byte-identical to src/synthetic/reasoning/instructions.py
+#       ::PIXEL_INSTRUCTION_TEMPLATE, ::VIDEO_INSTRUCTION_TEMPLATE and
+#       ::TEXT_INSTRUCTION in the finetune repo at PROMPT_VERSION 2.
 #
 # Do not edit a published generation's text. Ever. Those models are frozen and
 # so are their prompts; a change here is a change to what an already-shipped
@@ -104,8 +105,15 @@ BUILTIN_PROMPTS = {
             "Return JSON Array: [list of cell numbers (1-{total})]"
         ),
         "video": None,
+        "text": None,
     },
     "2": {
+        # UNPUBLISHED as of 2026-08-03: no entry in models.json names generation
+        # 2, `latest` is a generation-1 model, and no training run has produced
+        # a deployable one. That is the ONLY reason its text may still move —
+        # the freeze protects models that exist, and none exists here. The
+        # moment a model registers against "2", this text is frozen with it and
+        # a change means generation 3.
         "action_pixel": (
             "Your task is to solve the captcha. Read the instruction at the top of the image carefully.\n\n"
             "Look at the puzzle and decide what action solves it. All coordinates you return must be on a "
@@ -136,8 +144,12 @@ BUILTIN_PROMPTS = {
         "grid": (
             "Solve the captcha grid by choosing the cell numbers that match the description "
             "from the captcha image prompt.\n\nGrid: {rows}x{cols} ({total} cells)\n{grid_hint}\n\n"
-            "If no tiles match the description (e.g., they have all been cleared or none were "
-            "present), return an empty list for target_ids: [].\n\n"
+            "A cell that is already selected — small checkmark badge, border or highlight — "
+            "still counts. Include it if it matches.\n\n"
+            "A cell being REPLACED does not: a large checkmark over the middle of the picture, "
+            "a picture fading to white, or a new picture fading in. That cell is on its way to "
+            "showing something else, so leave it out however well it matches.\n\n"
+            "If no cells match the description, return an empty list for target_ids: [].\n\n"
             "Return JSON Array: [list of cell numbers (1-{total})]"
         ),
         "video": (
@@ -172,6 +184,17 @@ BUILTIN_PROMPTS = {
             "  \"action\": \"click\", \"subjects\": [ ... ], \"points\": [ ... ]\n"
             "  // OR \"action\": \"drag\", \"drags\": [ ... ]\n"
             "}}"
+        ),
+        "text": (
+            "Your task is to solve the captcha. The image shows a short code drawn in distorted, "
+            "overlapping or warped characters, sometimes over a busy background.\n\n"
+            "Read the code exactly as printed. Preserve letter case when the characters clearly "
+            "show it, and do not add spaces the image does not show. Decoration — strike-through "
+            "lines, dots, blobs, background texture — is not part of the code.\n\n"
+            "Respond ONLY with JSON:\n"
+            "{\n"
+            "  \"action\": \"type\", \"text\": \"<the code>\"\n"
+            "}"
         ),
     },
 }
@@ -234,6 +257,7 @@ class PromptSet:
     action_prompt: str
     grid_template: str
     video_template: Optional[str]
+    text_template: Optional[str]
     grid_by_type: Dict[str, str]
     source: str
 
@@ -267,6 +291,25 @@ class PromptSet:
         listing = ", ".join(f"frame {i}" for i in range(1, n + 1))
         return self.video_template.format(n=n, listing=listing)
 
+    def text_prompt(self) -> str:
+        """The prompt for a DISTORTED-TEXT captcha — one where the answer is a
+        string typed into the widget's box, not a point on the picture.
+
+        Asking for this when the generation has no such family is a hard error
+        rather than a silent fall back to the click/drag prompt: that prompt
+        asks for coordinates the puzzle has no use for, so a v1 model handed a
+        BotDetect image answers with a point, the driver clicks a random spot on
+        the letters, and the box stays empty. Failing loudly here names the
+        actual problem — the model predates the family.
+        """
+        if self.text_template is None:
+            raise ValueError(
+                f"prompt generation {self.version} has no distorted-text prompt — "
+                f"model was trained before the text family existed. Use a model on "
+                f"generation 2 or later for BotDetect/MTCaptcha/Yandex text captchas."
+            )
+        return self.text_template
+
 
 def builtin(version: str) -> Optional[PromptSet]:
     """The built-in PromptSet for a generation, or None if we don't ship it."""
@@ -278,6 +321,7 @@ def builtin(version: str) -> Optional[PromptSet]:
         action_prompt=spec["action_pixel"],
         grid_template=spec["grid"],
         video_template=spec["video"],
+        text_template=spec["text"],
         grid_by_type={},
         source=f"built-in v{version}",
     )
@@ -297,6 +341,7 @@ def _from_doc(doc: Dict[str, Any], source: str) -> PromptSet:
         action_prompt=templates.get("action_pixel") or base.action_prompt,
         grid_template=templates.get("grid") or base.grid_template,
         video_template=templates.get("video") or base.video_template,
+        text_template=templates.get("text") or base.text_template,
         grid_by_type=grid_by_type,
         source=source,
     )
@@ -368,6 +413,70 @@ def resolve(model: Optional[str]) -> PromptSet:
 
     _cache[key] = ps
     return ps
+
+
+# ─── training pixel budget ──────────────────────────────────────────────────
+# Same registry, same reason, different axis. See models.json's header comment:
+# an adapter learns to read a puzzle at whatever MIN_PIXELS/MAX_PIXELS band its
+# training exported, and serving it under a different band is the prompt bug
+# wearing a different hat — silent, and wrong on every puzzle.
+
+MIN_PIXELS_ENV = "CAPTCHA_MIN_PIXELS"
+MAX_PIXELS_ENV = "CAPTCHA_MAX_PIXELS"
+
+
+@dataclass(frozen=True)
+class PixelBudget:
+    """The image-area band a model was trained under, in pixels.
+
+    `minimum` is a floor: smaller images are upscaled to it. `maximum` is a
+    ceiling, or None for "send it as-is and let the server decide" — which is
+    what every model published before this field existed did.
+    """
+    minimum: int
+    maximum: Optional[int]
+    source: str
+
+
+#: What the client did before models.json carried a budget. 448² is Qwen's own
+#: ViT floor; there was never a ceiling. Anything unregistered keeps this, so
+#: adding the field cannot change an existing deployment.
+DEFAULT_PIXEL_BUDGET = PixelBudget(minimum=448 * 448, maximum=None,
+                                   source="client-default")
+
+
+def _env_int(name: str) -> Optional[int]:
+    try:
+        value = int(os.environ.get(name) or 0)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def pixel_budget(model: Optional[str]) -> PixelBudget:
+    """The budget to send `model` images at. Never raises.
+
+    Order mirrors `resolve`: an explicit env pin wins, then the registry, then
+    the historical default. There is deliberately no Hub fetch — a wrong budget
+    degrades quality silently, so it may only come from a source we can verify
+    offline.
+    """
+    env_min, env_max = _env_int(MIN_PIXELS_ENV), _env_int(MAX_PIXELS_ENV)
+    if env_min or env_max:
+        return PixelBudget(
+            minimum=env_min or DEFAULT_PIXEL_BUDGET.minimum,
+            maximum=env_max if env_max else DEFAULT_PIXEL_BUDGET.maximum,
+            source="env")
+
+    repo_id = canonical_model_id(model)
+    entry = (registered_models().get(repo_id) or {}) if repo_id else {}
+    budget = entry.get("pixel_budget") or {}
+    if budget:
+        return PixelBudget(
+            minimum=int(budget.get("min") or DEFAULT_PIXEL_BUDGET.minimum),
+            maximum=int(budget["max"]) if budget.get("max") else None,
+            source=f"registry:{repo_id}")
+    return DEFAULT_PIXEL_BUDGET
 
 
 def clear_cache() -> None:

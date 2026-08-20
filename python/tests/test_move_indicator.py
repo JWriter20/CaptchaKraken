@@ -72,8 +72,8 @@ EXPECTED_COUNTS = [
 NO_INDICATOR = [
     "recaptcha_grid_4x4/numbered_overlay/recaptcha_1767563318182_sieip.png",
     "hcaptcha_grid_3x3_property/standard_text_prompt/hcaptcha_1773140411302_zfp1d.png",
-    "recaptcha_grid_3x3/numbered_overlay/recaptcha_1775386820986_maqn5.png",
-    "recaptcha_grid_3x3/numbered_overlay/recaptcha_1778929254320_dcpk5.png",
+    "recaptcha_grid_3x3/numbered_overlay/standard/recaptcha_1775386820986_maqn5.png",
+    "recaptcha_grid_3x3/numbered_overlay/standard/recaptcha_1778929254320_dcpk5.png",
     "recaptcha_grid_4x4/recaptcha_1772884814225_9amok.png",
     "recaptcha_grid_4x4/recaptcha_1777978807781_po3pp.png",
 ]
