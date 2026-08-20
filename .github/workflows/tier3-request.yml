@@ -46,8 +46,26 @@ jobs:
           GH_TOKEN: ${{ secrets.PRIVATE_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
-          gh workflow run public-pr-gate.yml \
-            --repo JWriter20/CaptchaKrakenFinetune \
-            -f pr="${{ github.event.pull_request.number }}" \
-            -f sha="${{ github.event.pull_request.head.sha }}"
+          # The REST dispatch endpoint directly, NOT `gh workflow run`.
+          #
+          # `gh workflow run` looks the repository's default branch up over
+          # GraphQL first, purely to pick a ref for you. That lookup reads
+          # repository METADATA, so the convenience costs a permission the
+          # dispatch itself does not need, and the token failed on exactly that:
+          #   Resource not accessible by personal access token
+          #     (repository.defaultBranchRef)
+          # PRIVATE_DISPATCH_TOKEN is meant to carry `Actions: write` on the
+          # private repo and nothing more, so the smaller-scope call is the
+          # correct one rather than a workaround.
+          #
+          # Naming ref=main explicitly is also the more honest statement:
+          # workflow_dispatch can ONLY target a workflow file on the default
+          # branch, so this is a fact about the dispatch, not a default to be
+          # discovered at run time.
+          jq -n \
+            --arg pr  "${{ github.event.pull_request.number }}" \
+            --arg sha "${{ github.event.pull_request.head.sha }}" \
+            '{ref: "main", inputs: {pr: $pr, sha: $sha}}' \
+          | gh api --input - -X POST \
+              repos/JWriter20/CaptchaKrakenFinetune/actions/workflows/public-pr-gate.yml/dispatches
           echo "Dispatched. The private repo verifies this PR's head via the API before running anything — see public-pr-gate.yml. Status arrives as the 'tier3/driver-gate' check on this PR shortly after."
