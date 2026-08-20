@@ -3,9 +3,223 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [Unreleased]
+## [2.6.0] - 2026-08-19
+
+A solve-timing release. Nothing here changes what the model answers; it changes
+how much of a solve is spent waiting for things that cannot happen. The measured
+end of it: a `recaptcha_grid_4x4` attempt that used to run 66.1s and fail now
+gives up at round 4, and Tier 3 stops spending half its wall-clock on attempts
+that had no way to succeed.
+
+### Changed
+
+- **The solve budget is 45s over 6 rounds**, down from 120s over 10
+  (`overallSolveTimeoutMs` / `overall_solve_timeout_ms`, `maxSolveLoops` /
+  `max_solve_loops`). A round costs ~4-7s once the waits below are paid, so six
+  rounds is what fits; ten never did, and only ever expressed itself as a
+  timeout. The cap is now a BACKSTOP — reaching it is a bug report, not a normal
+  outcome.
+
+- **The post-submit outcome window is 1000ms, polled every 75ms**
+  (`postSolveOutcomeTimeoutMs` / `post_solve_outcome_timeout_ms`, and the new
+  `postSolveOutcomePollMs` / `post_solve_outcome_poll_ms`). A WRONG answer spends
+  the whole window by construction — the vendors emit nothing on a wrong answer,
+  they just re-deal — so the only number that can size it is how late a real
+  SUCCESS arrives: p50 360ms, max 528ms over 34 successful rounds across 20
+  puzzle types. 2500ms was being spent in full on every unsuccessful round,
+  25.5s of one 66.1s solve.
+
+- **hCaptcha's image wait is bounded at 3s**, not 8 (`hcaptchaImagesTimeoutMs` /
+  `hcaptcha_images_timeout_ms`). It is best-effort — the screenshot happens
+  either way — so it should cost what a loading tile plausibly costs, not
+  two-thirds of a whole solve.
 
 ### Added
+
+- **A solve that repeats itself is abandoned** (`maxNoProgressRounds` /
+  `max_no_progress_rounds`, default 2). At temperature 0 the model is a function
+  of the picture, and every answer this driver produces is EXECUTED — so the same
+  answer twice means the previous one already ran and the page is still asking
+  the same question. Measured: nine identical click sets, each clicked, each
+  rejected, ending at the round cap. 2 rather than 1 because the first repeat
+  also escalates to a RECORDING, which is the one recovery still worth trying:
+  a board that cycles reads as a still and answers the same way every round.
+
+- **A per-solve phase budget**, printed to stderr under `CAPTCHA_TIMINGS=1`
+  (Python). "The solve took 77s" is not actionable; "the settle monitor spent
+  31s of it" is. Always accumulated, only printed under the flag, and printed on
+  the way out of a FAILED solve too — that is the one whose time you want
+  itemised.
+
+### Fixed
+
+- **GeeTest's OK button was never pressed.** It ships as
+  `<div class="geetest_submit geetest_disable">OK</div>` — invisible to both
+  shapes the button finder knew, because a bare div carries no `role="button"`
+  and "OK" is on none of the four word lists. A GeeTest board does not grade
+  until you press it, so the loop re-read the same unchanged panel and
+  re-answered it identically until the round cap: ordered icon-click scored
+  0/31 and 0/13 while the model was answering CORRECTLY. Matched by CLASS, not
+  by the word — `geetest_submit_tips` sits beside it, also reads "OK", and does
+  nothing when pressed.
+
+- **A readiness gate with nothing to check no longer reads as "not ready".**
+  The last clause asked whether hCaptcha's example image had loaded and returned
+  false when there was no example image at all, so a challenge with no tile
+  grid, no canvas and no example polled out the full timeout and carried on
+  regardless — 24.0s of a 45.2s solve, three times over. A gate can only report
+  on what it can see; with nothing to check it has no opinion, and no opinion
+  must not read as "not ready".
+
+- **An `even` clip no longer waits 6s per click for a state that never
+  recurs.** The slicer picks that mode precisely when the clip never revisits a
+  picture it has already shown, so the keyframe gate can only run out its full
+  window before clicking the coordinates it already had. It is also the normal
+  case, not a corner: all 116 real clips are `even` and `cycle` has never fired
+  on real footage. The gate stays for `cycle`/`static`, where a state does come
+  back and waiting is the difference between the sprite and the background.
+
+- **The Python port recorded CSS-animated widgets frozen.** Its burst took every
+  frame with `animations="disabled"`, which fast-forwards finite animations and
+  FREEZES infinite ones — right for a model-facing still, fatal for a recording.
+  GeeTest's svg board came back as forty copies of one picture, the slicer
+  honestly reported `mode=static`, and the solve went back to answering a single
+  still. The TS port has passed `allow` since it hit this first; hCaptcha hid it
+  there, because it animates in canvas and the flag does not touch canvas.
+
+- **A widget that never renders reports "no captcha" again, not "still detected
+  after N loops".** The render-wait cap was a flat 6 and a render wait consumes
+  an attempt, so at `maxSolveLoops` 6 the loop ran out first and the branch never
+  fired — turning the correct, benign answer for a reCAPTCHA v3 / invisible page
+  into a hard error for anyone catching `NoCaptchaFoundError`. It is now tied to
+  the loop count in both ports.
+
+## [2.5.0] - 2026-08-18
+
+### Added
+- **Solve captchas as they appear.** `solver.watch(page)` (TS) and
+  `PageSolver.watch(page)` (Python) install a watcher that probes the page and
+  solves any challenge that becomes visible, so a script no longer has to know
+  where a captcha might interrupt it. Exposed through camoufox as
+  `watchCaptcha` / `watch_captcha`.
+
+  It injects **nothing** into the page. The obvious build — a `MutationObserver`
+  signalling out through an exposed binding — reacts faster and is the one
+  design that cannot be stealthy everywhere, because a binding is a function on
+  `window` and an observer is script a vendor can enumerate. Instead it drives
+  the existing `detectCaptcha()` from the driver side on a timer, so there is no
+  new detection surface on any launcher; under camoufox those DOM reads land in
+  the sandboxed Juggler world for free, since that is camoufox's default for all
+  Playwright evaluation. The cost is reaction time bounded by `interval_ms`
+  rather than by the mutation.
+
+  Python's blocks (`run()`) where TypeScript's returns a handle, and offers
+  `poll_once()` for callers with their own loop: a sync Playwright handle cannot
+  be driven from a worker thread, so a background watcher is not available to it.
+
+### Fixed
+- **Only a FADING reCAPTCHA is worth a second look.** The 3x3 driver re-solved
+  every board until the model said `done`, so an ordinary "select all images
+  with X" cost two inferences: one to answer it, and one to be told there was
+  nothing left. Only the board that SWAPS a clicked tile out needs that, because
+  only there does a click deal a photo nobody has read yet.
+
+  The widget says which kind it is, in the reply it gives a click. A tile it
+  KEEPS gets the small blue chip in its top-left corner; a tile it is REPLACING
+  gets a large blue check across the middle and dissolves to white under it. A
+  widget that swaps one clicked cell swaps them all, so the two are never on one
+  board and one look at the tiles we just clicked settles it — and the chip is
+  already what `detect_selected_cells` reports as `selected`, from the same
+  per-poll CV call the driver was making anyway. Chip on every tile we clicked →
+  press Verify, same as a 4x4.
+
+  Ordering matters: a chip landing ZOOMS the photo out, which reads as
+  `changing` on the very frame that shows the chip. Testing for the swap first —
+  which is all the driver used to do — makes a chipped board look like a
+  swapping one for as long as that animation runs, which is how the wasted round
+  got spent. The verdict also needs EVERY clicked tile, because the two mistakes
+  do not cost the same: calling a swapping board finished submits half an answer
+  and burns the attempt, while calling a chipped board unfinished costs one
+  inference, which is what the old code paid every time.
+
+- **A photograph is not a selection badge.** `detect_selected_cells` runs BOTH
+  vendors' badge tests on every tile, so hCaptcha's — a small blue-teal disc
+  with a white glyph, top-right — was applied to reCAPTCHA boards too, and it
+  was two pixel COUNTS and nothing else: >=8 teal-ish pixels anywhere in the
+  corner patch, >=2 near-white pixels anywhere in the same patch. Blue sky with
+  a white pole in it satisfies both. The tile is then reported as already
+  selected, `solver._solve_grid` drops it from the model's answer, and it is
+  never clicked — a correct answer thrown away on a board where nothing was
+  selected at all. On the synthetic corpus that cost a target tile on 9% of
+  clean boards; on the real reCAPTCHA eval captures it fired on 3 boards of 39.
+
+  What a badge has and a photograph does not is that the white BELONGS TO the
+  teal mark — inside the disc, or hugging its rim. The counts stay as a cheap
+  gate and the verdict now needs >=2 white pixels within 2px of the teal blob's
+  convex hull. Phantom selections over 3051 tile corners of boards with nothing
+  selected: 74 -> 15. Rendered badges found: 1200/1200, both the filled-disc and
+  white-ringed renderings, 9-16px, colour-jittered and JPEG'd.
+
+  Two pixels of slack, not zero, because the ringed rendering draws the white ON
+  the rim and fragments the teal under it — a strict inside-the-hull test finds
+  a quarter of those. Nor a delta-E on the badge's colour, which is the obvious
+  tightening and the wrong one: pinning the hue drops recall to 40% under
+  jitter, because we do not know that colour to a delta-E's precision. The
+  reCAPTCHA corner chip was measured at the same time and is clean — 0 false
+  positives on those same corners — and is unchanged.
+
+- **The Puppeteer adapter was never actually verified.** Its header claimed it
+  was "verified against Puppeteer 24.x" while nothing in the package touched it:
+  there was no test for it, and Tier 3 drives camoufox on both ports. It is now
+  covered by unit tests for every API delta it bridges, plus a live check that
+  launches real Puppeteer and real Playwright and drives every member of the
+  structural page surface through them (skipped when those libraries are not
+  installed — this package still ships with zero browser dependencies).
+
+  That verification found a real gap: `fromPuppeteer` did not forward
+  `isClosed`, which the new watcher reads to end its loop. A Puppeteer-driven
+  watcher would have polled a closed page forever.
+
+- **Distorted-text captchas are typed, and puzzle-piece sliders are dragged.**
+  Two answer families the model was already trained to produce and the driver
+  silently threw away. `ActionPlanner._normalize_pixel` dropped both — a
+  `{"action": "type", "text": …}` answer has no coordinate for any branch to key
+  off, and the drag branch required BOTH ends, so the sourceless drag the
+  "FOR PUZZLE PIECE SLIDER PUZZLES" clause explicitly asks for parsed to
+  nothing. A perfectly correct answer became "unsupported".
+
+  **Text.** The driver decides from the DOM, not the picture: a visible text box
+  in the challenge selects the distorted-text prompt (`--text-mode` on the CLI)
+  and skips grid detection, because BotDetect's boxed glyphs are exactly the
+  lattice `find_grid` looks for. The answer is typed character by character with
+  jittered gaps, after a real pointer move and click — `fill()` would set the
+  value with no keystrokes at all, and these are the vendors that score cadence.
+  A retry clears the box first, so round 2 cannot append to round 1.
+
+  **Sliders.** Closed-loop, not a calculation. The model gives the centre of the
+  gap — all the picture can tell it — but not how far the handle must travel to
+  put the piece there, which is a ratio several vendors deliberately vary. So the
+  driver presses the handle, nudges it twice by known amounts, and watches:
+  `union(before, after)` spans the piece's original left edge to its current
+  right edge, so its width is `piece_width + ratio x nudge`. Two nudges, two
+  unknowns, solved; then it steers the remainder and re-measures. The mouse is
+  not released until the piece is home, because on every one of these puzzles
+  **releasing is the submit** — which is also why a completed slide is never
+  followed by a Verify click.
+
+  New surface: `TypeAction` (JS), a nullable `DragAction.source_bounding_box`
+  (null = slider), `TEXT_INPUT_SELECTORS` / `SLIDER_HANDLE_SELECTORS` /
+  `DRAGGABLE_PIECE_SELECTORS` (vendor-first, generic-last — the generic tail is
+  what fires on most real pages), the `slide_*` knobs on `PageSolverConfig`,
+  `tool_calls/track_piece.py`, and CLI `track-piece` (also a `serve` cmd, since
+  it runs several times per drag with the button held). `prompts.py` gained the
+  generation-2 `text` family, which the client had been missing since the
+  finetune repo defined it.
+
+  **Requires a generation-2 model.** Generation 1 — including the currently
+  served `CaptchaKraken_v1.1` — has no text prompt and no slider clause, so a v1
+  model is never asked for either answer. Text captchas now report
+  `UnsupportedCaptchaError` naming that reason rather than clicking at random.
 - **Animated challenges are solved instead of skipped.** hCaptcha's "select the
   odd animal" (sprites cross-fading on independent cycles) and "unique motion
   pattern" (identical meshes, only the rotation differs) carry none of their
@@ -40,6 +254,28 @@ semantic versioning; v2 is a major, **breaking** release.
   trained on the keyframe format is what makes the answers good.
 
 ### Changed
+- **License bumped to CaptchaKraken Source-Available License v1.1.** One new
+  restriction and one new clarification, both about stealth browsers.
+
+  v1.0 listed "stealth / anti-detection browsers and browser automation
+  frameworks" as an illustrative *permitted* commercial use. That gave away the
+  thing worth keeping: any antidetect browser vendor could ship CaptchaKraken as
+  a built-in feature and market the solve as theirs. **§3(d)** now requires a
+  commercial license to embed, bundle, preinstall, fetch on demand, or advertise
+  the Software as a captcha-solving capability of a stealth/antidetect browser,
+  profile manager, or automation platform **distributed to third parties**.
+
+  It is a restriction on **distribution, not use**, and **§2(c)** says so
+  explicitly, because the ambiguity would otherwise land on exactly the people
+  this project is for: pointing the solver at Camoufox, Puppeteer, Playwright, or
+  any stealth browser to automate *your own* work stays unrestricted, commercial
+  or not. If you are the one clicking "run", nothing changed for you.
+
+  **Forward-only.** v1.1 governs releases distributed under it. Copies obtained
+  under v1.0 — including the already-published `CaptchaKrakenV1_Lora`,
+  `Sunlight-AWQ-4bit`, and `Twilight-FP8` weights — remain governed by v1.0; a
+  grant already made cannot be revoked by editing a file. `docs/licensing.md`
+  carries the plain-English version and a using-vs-shipping table.
 - **`AnimatedChallengeError` / `.animated` narrowed.** It used to mean "the
   challenge never settles, give up". It now means "an animated challenge we could
   not RECORD" — the element refused to screenshot, or `video_solve_enabled` is
@@ -294,7 +530,7 @@ unless you deliberately set it.
 
 ### Added
 - **Bring-your-own browser — zero browser dependency.** The package no longer
-  depends on any browser library in any form: `@jobharvest/camoufox-js`,
+  depends on any browser library in any form: the vendored `camoufox-js`,
   `patchright`, and `patchright-core` are gone (not even devDependencies). The
   public API types `solve(page)` against an implementation-neutral, self-contained
   structural Playwright `Page` interface defined by the package itself (not
@@ -326,7 +562,7 @@ unless you deliberately set it.
   per-type solve-rate summary.
 
 ### Solver / model
-- Grid LoRA (`JobHarvest/qwen3.5-9b-grid-lora`) exact-tile accuracy on held-out
+- Grid LoRA (CaptchaKraken's grid adapter) exact-tile accuracy on held-out
   real data: reCAPTCHA 3×3 **94.7%**, hCaptcha 3×3 property **86.7%**,
   reCAPTCHA 4×4 **76.2%** (overall **85.8%**).
 - reCAPTCHA dynamic 3×3 (multi-round in-place refresh) and 4×4 one-shot grids,

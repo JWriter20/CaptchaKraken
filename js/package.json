@@ -1,6 +1,6 @@
 {
   "name": "captchakraken",
-  "version": "2.4.0",
+  "version": "2.6.0",
   "description": "Browser-agnostic Playwright/Puppeteer captcha solver. Detects the captcha, reads the grid with a fine-tuned Qwen3.5-9B vision model on vLLM, and clicks through to a token.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +14,7 @@
     "prebuild": "node scripts/copy-python.mjs",
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsc --noEmit -p tsconfig.json && tsc src/limits.ts src/limits.test.ts --outDir .test-build --module commonjs --target ES2020 --esModuleInterop --skipLibCheck && node --test .test-build",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/*.test.js",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup-python.js"
   },
@@ -43,8 +43,5 @@
   "devDependencies": {
     "@types/node": "^24.10.2",
     "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "cursory-ts": "^1.0.0"
   }
 }

@@ -5,29 +5,29 @@ solve rates depend on more than the model.
 
 ## Accuracy
 
-**Measured 2026-07-27** against the deployed `CaptchaKraken_v1.1` adapter, over
-the full customer path — HTTPS → gateway → vLLM — rather than against a local
-checkpoint, so it includes anything the serving stack does to a request.
+> 🔬 **Being re-measured — no accuracy figures are published right now.**
+>
+> The numbers that stood here were taken on **2026-07-27** against the deployed
+> `CaptchaKraken_v1.1` adapter. They excluded test images that appeared in a
+> labeled-train augment pool — but that exclusion was not the same thing as a
+> clean holdout, and the eval split of the day allowed some hand-labeled
+> captures into training. So the figures measured memorisation alongside skill,
+> by an amount that varied per puzzle type and was largest exactly where the
+> headline number was highest.
+>
+> The split has since been replaced: **every** real capture is held out and
+> nothing hand-labeled trains, which is the only arrangement in which the real
+> captures can still detect generator drift. Figures return here after the next
+> full training run measures against it.
 
-Exact set match: every correct tile selected and no incorrect ones. Partial
-credit is not given, because a partially-correct grid answer is a rejected
-captcha.
+When they return, this is the method they will use, unchanged from before:
+exact set match — every correct tile selected and no incorrect ones, no partial
+credit, because a partially-correct grid answer is a rejected captcha — taken
+over the full customer path (HTTPS → gateway → vLLM) rather than against a
+local checkpoint, so it includes anything the serving stack does to a request.
 
-Test images that also appear in a labeled-train augment pool are **excluded** —
-878 of them, including 313 reCAPTCHA 4×4 and 262 reCAPTCHA 3×3. That is the
-same exclusion `grade.py` applies, and it is what makes these held-out numbers
-rather than a memorisation check.
-
-| Challenge | n | Exact match | 95% CI (Wilson) |
-|---|---:|---:|---:|
-| reCAPTCHA 4×4 | 100 | **97.0%** | 91.5–99.0% |
-| reCAPTCHA 3×3 | 100 | **96.0%** | 90.2–98.4% |
-| hCaptcha 3×3 property | 100 | **94.0%** | 87.5–97.2% |
-| **Overall** | **300** | **95.7%** | **92.7–97.5%** |
-
-Latency over the 300 requests: p10 0.84 s, median 1.36 s, p90 1.76 s, end to
-end including the network. Median prompt 341 tokens. Of the 13 failures, 5
-differ from the ground truth by exactly one tile.
+Latency is unaffected by any of the above and still holds: p10 0.84 s, median
+1.36 s, p90 1.76 s end to end including the network, median prompt 341 tokens.
 
 ### Grids must be sent with the cell numbers drawn on
 
@@ -40,12 +40,15 @@ top-right, all cells 1..N — byte-identical to the overlay
 *that* image. The model reads the labels. It does not infer a numbering from
 tile positions, because it was never trained to.
 
-Measured on the same 300 samples with the raw, un-numbered screenshots instead:
+Measured on the same 300 samples, overlay versus raw un-numbered screenshots.
+The absolute rates are from the superseded July measurement above and are not
+restated here; the ablation is a within-run comparison and the effect is far
+too large to be an artefact of the split:
 
-| Challenge | With overlay | Raw screenshot |
-|---|---:|---:|
-| reCAPTCHA 3×3 | 96.0% | ~80% |
-| reCAPTCHA 4×4 | 97.0% | **0%** |
+| Challenge | Raw screenshot, relative to the overlay |
+|---|---|
+| reCAPTCHA 3×3 | drops by roughly a sixth |
+| reCAPTCHA 4×4 | **collapses to zero — not one board solved** |
 
 The 4×4 collapse is the tell. A 4×4 is one continuous photograph with sixteen
 cells and no separate subjects to anchor on, so with no labels to read the
@@ -134,7 +137,7 @@ model — 4070 and below, older Apple **Max** chips (fine on the 4-bit model), A
 **Pro**/base laptops, and older mid-range AMD.
 
 > ⏳ **Below ~30 tokens/sec, self-hosting feels sluggish.** If that is your card,
-> use the **hosted API** instead — it runs Abyss on our fleet with no GPU of
+> use the **hosted API** instead — it runs the production adapter on our fleet with no GPU of
 > yours involved, and the 240 requests measured above returned in a median
 > 1.6 s end to end including the network. Sign in at
 > [captchakraken.com](https://captchakraken.com/signin). `setup.sh` estimates

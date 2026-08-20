@@ -66,3 +66,39 @@ HEADLESS=0 python examples/demoRecaptcha.py    # watch the browser
 `gen speed` = model output tokens ÷ solve seconds. Failure reasons the harness
 reports: unreachable vLLM server, an unsupported hCaptcha puzzle (drag/video),
 the challenge iframe never appearing, or the model returning no matching tiles.
+
+## Playwright, and the auto-solver
+
+| File | What it shows |
+|---|---|
+| `with_playwright.py` | Vanilla Playwright — no adapter, 2 added lines |
+| `watch_playwright.py` | The auto-solver: install once, solves as they appear |
+
+```bash
+pip install playwright && playwright install chromium
+
+export VLLM_BASE_URL=https://api.captchakraken.com/v1
+export CAPTCHA_KRAKEN_API_KEY=ck_live_...
+
+python examples/with_playwright.py
+python examples/watch_playwright.py https://your.site/page 60
+```
+
+Use `sync_playwright`, not `async_playwright`: `PageSolver` mirrors the
+synchronous API, and a sync handle cannot be driven from inside an event loop.
+
+## There is no Puppeteer path in Python
+
+The TypeScript port ships `fromPuppeteer()` because Puppeteer is a first-class
+Node library. Python has no equivalent worth pointing you at:
+
+- **pyppeteer** last released 2.0.0 in **February 2024**, and pins
+  `urllib3 <2.0.0` and `websockets <11.0` — which conflicts directly with
+  CaptchaKraken's own `requests` dependency, so the two cannot co-install
+  cleanly.
+- It is **async-only**, and this driver is synchronous. Even resolving the
+  dependency conflict, a sync `PageSolver` cannot be driven from asyncio.
+
+Playwright *is* the Python answer, and `patchright` and `camoufox` are the
+stealth-patched builds of it — all three duck-type identically, so the examples
+above work unchanged with any of them.

@@ -1,0 +1,71 @@
+name: Request Tier 3 driver gate
+
+# Every PR here triggers a TIER 3 gate: both shipped solver ports driven
+# end to end through a real browser against the fixture suite. The fixtures,
+# generators and adapter live in the PRIVATE CaptchaKrakenFinetune repo, not
+# here, so this workflow does not run the gate itself — it asks the private repo
+# to run it and post a redacted result back (a commit status + a PR comment; see
+# that repo's public-pr-gate.yml and scripts/post_public_check.py for exactly
+# what does and does not leave it).
+#
+# TIER 3, NOT TIER 2. This repo ships the DRIVER. A pull request here cannot
+# change the model, so a Tier 2 solve-rate measurement gated on the one thing
+# the PR could not move. What a PR here CAN break is driving — a selector, a
+# click landing off-widget, one port asking for a different adapter than the
+# other — and Tier 3 is the only gate that exercises both ports end to end.
+# On 2026-08-20 that last failure cost the JS port 22 of its 44 puzzle types
+# while every check here stayed green.
+#
+# workflow_dispatch, not repository_dispatch: dispatching a workflow needs
+# only `Actions: write` on the private repo. repository_dispatch would need a
+# token with `Contents: write` there instead — a strictly bigger blast radius,
+# and this (public) repo is the more exposed place for that token to live.
+#
+# Runs on ubuntu-latest — public repos get free Actions minutes, so this has
+# no dependency on the private repo's runner/billing state.
+#
+# Fork PRs: `pull_request` (not `pull_request_target`) never exposes secrets to
+# a fork's own workflow run, so PRIVATE_DISPATCH_TOKEN simply isn't available
+# there — this step no-ops rather than leaking a token to untrusted code. The
+# `if:` guard below makes that explicit instead of relying on the implicit
+# secret absence alone. A fork PR shows the check as "Expected"/pending; the
+# maintainer path is to push the branch into this repo directly.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  request:
+    name: Dispatch Tier 3 gate
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Dispatch public-pr-gate.yml on the private repo
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The REST dispatch endpoint directly, NOT `gh workflow run`.
+          #
+          # `gh workflow run` looks the repository's default branch up over
+          # GraphQL first, purely to pick a ref for you. That lookup reads
+          # repository METADATA, so the convenience costs a permission the
+          # dispatch itself does not need, and the token failed on exactly that:
+          #   Resource not accessible by personal access token
+          #     (repository.defaultBranchRef)
+          # PRIVATE_DISPATCH_TOKEN is meant to carry `Actions: write` on the
+          # private repo and nothing more, so the smaller-scope call is the
+          # correct one rather than a workaround.
+          #
+          # Naming ref=main explicitly is also the more honest statement:
+          # workflow_dispatch can ONLY target a workflow file on the default
+          # branch, so this is a fact about the dispatch, not a default to be
+          # discovered at run time.
+          jq -n \
+            --arg pr  "${{ github.event.pull_request.number }}" \
+            --arg sha "${{ github.event.pull_request.head.sha }}" \
+            '{ref: "main", inputs: {pr: $pr, sha: $sha}}' \
+          | gh api --input - -X POST \
+              repos/JWriter20/CaptchaKrakenFinetune/actions/workflows/public-pr-gate.yml/dispatches
+          echo "Dispatched. The private repo verifies this PR's head via the API before running anything — see public-pr-gate.yml. Status arrives as the 'tier3/driver-gate' check on this PR shortly after."

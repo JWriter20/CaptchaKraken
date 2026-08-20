@@ -39,8 +39,8 @@ from captchakraken.planner import ActionPlanner
 # exercises is how a whole puzzle class regresses unnoticed.
 #
 # NOTE: five of these are absent from eval_unified.py's GRID/CLICK/*_DRAG sets.
-# For the two with real held-out samples (hcaptcha_click_described_item, n=12;
-# hcaptcha_block_cover, n=1) that is a live scoring bug — they fall through
+# For the one with real held-out samples (hcaptcha_click_described_item, n=12)
+# that is a live scoring bug — they fall through
 # every branch in evaluate(), so `ok` stays False and they score a permanent 0%
 # no matter what the model returns. Kinds below were read off their labeled
 # answers in test_solutions.json, not guessed.
@@ -63,7 +63,6 @@ CLICK_TYPES = {
     "hcaptcha_silhouette_match",
 }
 DRAG_TYPES = {
-    "hcaptcha_block_cover",            # untaxonomized in eval_unified (n=1)
     "hcaptcha_connect_path",
     "hcaptcha_drag_fruit_to_plate",    # stub generator, no samples yet
     "hcaptcha_drag_missing_slot",
@@ -133,7 +132,7 @@ DRAG_SHAPES = [
      '{"action": "drag", "drags": [{"source": "piece", "from": [200, 300], '
      '"destination": "slot", "to": [700, 800]}]}'),
     # Legacy PascalCase output[] schema — pre-content-schema adapters, and the
-    # shape the hand-labeled block_cover answers are stored in.
+    # shape the older hand-labeled drag answers are stored in.
     ("legacy_output_pascalcase",
      '{"output": [{"Action": "simulate_drag", '
      '"SourcePosition": {"x": 200, "y": 300}, '
@@ -220,8 +219,8 @@ def test_unusable_response_yields_no_action_rather_than_a_wrong_one():
 
 def test_every_shipping_puzzle_type_is_covered():
     """Guard against adding a puzzle type without adding contract coverage."""
-    assert len(ALL_TYPES) == 26, (
-        f"the shipping puzzle-type set changed ({len(ALL_TYPES)} types, expected 26). "
+    assert len(ALL_TYPES) == 25, (
+        f"the shipping puzzle-type set changed ({len(ALL_TYPES)} types, expected 25). "
         "Add the new type to GRID_TYPES / CLICK_TYPES / DRAG_TYPES above so it gets "
         "contract coverage, then update this count."
     )

@@ -42,14 +42,17 @@ import os
 import random
 import re
 import shutil
+import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .action_types import CaptchaAction
 from .solver import CaptchaSolver, UnsupportedCaptchaError
+from .timing import PhaseBudget, timings_enabled
 from .trajectory import generate_trajectory
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
@@ -123,10 +126,32 @@ class NoCaptchaFoundError(CaptchaSolveError):
     """No interactive widget — reCAPTCHA v3/invisible, or a click-triggered challenge."""
 
 
+class PageClosedError(CaptchaSolveError):
+    """The page, context or browser went away mid-solve.
+
+    Split out from staleness deliberately. These two used to share one pattern,
+    which meant a DEAD target was retried three times as if it were a live one
+    mid-transition, and the error that finally escaped named whichever call ran
+    last — `ElementHandle.screenshot`, usually — instead of saying the page had
+    closed. That cost a real debugging session on the headed reCAPTCHA run.
+    """
+
+
 # Playwright surfaces these as messages, not types, so both drivers match on
 # text. Kept as one pattern so the two lists can be diffed against each other.
+#
+# "Target closed" is NOT here on purpose — see `_CLOSED_TARGET_RE`. Everything in
+# this list describes a handle that went stale while the PAGE IS STILL ALIVE, so
+# re-detecting next round is the right response.
 _STALE_HANDLE_RE = re.compile(
-    r"Timeout .*exceeded|not visible|not attached|detached|Target closed",
+    r"Timeout .*exceeded|not visible|not attached|detached",
+    re.IGNORECASE,
+)
+
+# A target that no longer exists. Nothing can be re-detected on it, so this is
+# terminal rather than retryable.
+_CLOSED_TARGET_RE = re.compile(
+    r"Target (?:page, context or browser )?(?:has been )?closed|Session closed",
     re.IGNORECASE,
 )
 
@@ -152,6 +177,31 @@ class _GridSession:
     screenshot_h: int
 
 
+def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int) -> str:
+    """The pixel-settle rule, over `(elapsed_ms, moved)` polls.
+
+    Split out of the polling loop so the RULE can be tested against recorded
+    timelines without a browser — see `tests/test_animated_is_detected.py`,
+    which pins what it does to each shipped animated puzzle.
+
+    Note what it cannot do: 'animated' needs a poll that MOVED at or after
+    `animated_after_ms`, so any `settle_frames` run of stillness before then
+    ends the wait as 'settled' first. Every animated puzzle we ship rests
+    between screens for longer than that, which is why the caller also probes.
+    """
+    still_streak = 0
+    for elapsed_ms, moved in samples:
+        if moved:
+            still_streak = 0
+            if elapsed_ms >= animated_after_ms:
+                return "animated"
+        else:
+            still_streak += 1
+            if still_streak >= settle_frames:
+                return "settled"
+    return "timeout"
+
+
 @dataclass
 class PageSolverConfig:
     """
@@ -159,10 +209,65 @@ class PageSolverConfig:
     value tuned on one driver can be found on the other.
     """
 
-    max_solve_loops: int = 10
-    overall_solve_timeout_ms: int = 120_000
+    # 45s, and the loop count that fits inside it rather than one that needs
+    # policing by the clock. A round costs ~4-7s once the waits below are paid,
+    # so six rounds is the budget; ten never fitted and only ever expressed
+    # itself as a timeout. The cap is a BACKSTOP — `max_no_progress_rounds` is
+    # what is supposed to end a hopeless solve, and a solve that reaches this
+    # number is a bug report, not a normal outcome.
+    max_solve_loops: int = 6
+    overall_solve_timeout_ms: int = 45_000
+    #: Consecutive rounds producing the SAME answer before the solve is
+    #: abandoned.
+    #:
+    #: At temperature 0 the model is a function of the picture, so an identical
+    #: answer means an identical picture — and every answer this driver produces
+    #: is EXECUTED, so the previous one already ran and moved nothing. Repeating
+    #: it cannot do better; it just spends a round.
+    #:
+    #: Measured on recaptcha_grid_4x4 (fixture seed 20260730): the model answers
+    #: `[2,6,7,9,10]` on round 1 and then `[2,6,7,10]` on rounds 2 THROUGH 10 —
+    #: nine identical click sets, each one clicked, each one rejected, ending in
+    #: "still detected after 10 solve loops" at 66.1s. Of that, 39.0s was pure
+    #: waiting. Stopping on the second repeat ends it at round 4.
+    #:
+    #: 2 rather than 1: the first repeat also ARMS the animated probe, which is
+    #: the one recovery worth trying (a cycling board reads as a still and
+    #: answers the same way every round). One more round buys that chance.
+    max_no_progress_rounds: int = 2
     post_solve_delay_ms: int = 1_200
-    post_solve_outcome_timeout_ms: int = 2_500
+    # How long to keep watching for a SUCCESS after submitting.
+    #
+    # That is the window's whole job, and it is why a wrong answer spends all of
+    # it: the vendors emit nothing on a wrong answer, they just re-deal. Sizing
+    # it therefore means asking how late a real success can arrive.
+    #
+    # MEASURED over 34 successful rounds across 20 puzzle types (fixture server,
+    # two seeds each): min 3ms, p50 360ms, p90 378ms, max 528ms.
+    #
+    # Read that with care — those values are quantized by `..._poll_ms`, not by
+    # any vendor. The clusters sit at one poll (~200ms), two polls (~370ms, the
+    # `widget_gone >= 2` confirmation) and three (~520ms). So the measurement
+    # mostly describes THIS loop, and the fixture's verdict is a local fetch,
+    # which means real hCaptcha/reCAPTCHA round-trips are absent from it
+    # entirely.
+    #
+    # 1000ms is therefore the measured worst case (528ms, ~264ms once the poll
+    # below is halved) plus deliberate headroom for a vendor round-trip nobody
+    # has measured yet. Down from 2500ms, which was spent in full on every
+    # unsuccessful round — 25.5s of one 66.1s recaptcha_grid_4x4 solve.
+    #
+    # To replace the headroom with a number: drive the real vendor pages via
+    # `tests/live-solve/src/demo-targets.ts` and re-read this distribution.
+    post_solve_outcome_timeout_ms: int = 1_000
+    #: Poll interval inside that window.
+    #:
+    #: The success signals are polled, so detection latency is a MULTIPLE of
+    #: this — and the one that matters most, "the widget is gone", needs two
+    #: consecutive polls to confirm, so it cannot be seen in less than 2x. At
+    #: 150ms that put a 300ms floor under every inline vendor's success. 75ms
+    #: halves it, and the poll is cheap: `detect_captcha` measures ~3ms.
+    post_solve_outcome_poll_ms: int = 75
     element_screenshot_timeout_ms: int = 8_000
     max_unsupported_resolves: int = 3
     max_stale_element_retries: int = 3
@@ -186,6 +291,19 @@ class PageSolverConfig:
     # than abandoned. Off switch for callers who would rather fail fast than spend
     # the recording time.
     video_solve_enabled: bool = True
+    # Whether a repeated answer may escalate to a RECORDING of the widget.
+    #
+    # A board that cycles reads as static to `_wait_for_element_settled` (it
+    # rests between screens for far longer than the 440ms that rule stops at),
+    # gets answered from whichever screen the screenshot caught, and then
+    # answers identically every round. That repeat is the signal, and the
+    # response is to record a burst and let the SLICER decide: a widget that
+    # really is static slices to one keyframe and is solved as the still it is,
+    # so the escalation costs one burst and can never produce a worse answer.
+    #
+    # Off restores the old behaviour for a caller who would rather re-read a
+    # still than spend `video_burst_duration_ms` finding out.
+    animated_probe_enabled: bool = True
     # Burst geometry. Deliberately identical to the collector's
     # (`_collect_common.BURST_DURATION_MS` / `BURST_FPS` in the finetune repo), so a
     # challenge recorded here is the same shape of artifact the model trained on —
@@ -201,6 +319,12 @@ class PageSolverConfig:
     keyframe_wait_poll_ms: int = 120
 
     # Grid load / dynamic-refresh timing.
+    # How long to wait for hCaptcha's task images to paint before screenshotting
+    # anyway. Best-effort by design — the screenshot happens either way — so it
+    # is bounded by what a loading tile plausibly costs, not by a generous
+    # default. 8s was two-thirds of what a whole solve is now allowed to take.
+    hcaptcha_images_timeout_ms: int = 3_000
+
     grid_load_poll_interval_ms: int = 250
     grid_load_timeout_ms: int = 8_000
     recaptcha_max_dynamic_rounds: int = 8
@@ -208,6 +332,20 @@ class PageSolverConfig:
     recaptcha_dynamic_fade_poll_ms: int = 250
     recaptcha_dynamic_fade_wait_ms: int = 6_000
     recaptcha_tile_hover_enabled: bool = True
+
+    # ── puzzle-piece sliders (see _execute_slide) ──────────────────────────
+    # How far to nudge the handle, in px, to learn the piece's width and how
+    # fast it follows. Two probes because two unknowns; far enough apart that
+    # the difference between the two widths is signal rather than rounding, and
+    # both small enough to stay on the shortest track observed (~250px).
+    slide_probe_offsets_px: Tuple[float, ...] = (24.0, 64.0)
+    # Stop steering once the piece is this close. Tighter than any vendor's
+    # accept window, so the limit on solving is the model's slot estimate.
+    slide_tolerance_px: float = 2.0
+    # Corrections after the probes. Each costs a screenshot with the mouse held
+    # down; two is enough for a linear system, and the third would only be
+    # chasing a measurement that is not going to converge.
+    slide_max_corrections: int = 2
 
 
 # Vendors with no checkbox/challenge split — one container, one interactive
@@ -225,6 +363,93 @@ VENDOR_WIDGET_LOCATORS = [
     {"puzzle_source": "prosopo", "selectors": [".prosopo-modalInner", ".procaptcha-checkbox"]},
     {"puzzle_source": "mtcaptcha", "selectors": [".mtcap"]},
     {"puzzle_source": "botdetect", "selectors": [".BDC_CaptchaDiv"]},
+]
+
+
+# ── where the answer goes, when it is not a click ───────────────────────────
+#
+# Both tables are ordered VENDOR-FIRST, GENERIC-LAST, and the driver takes the
+# first visible match. That order is the whole design: a named vendor selector
+# is unambiguous, while the generic patterns are guesses that happen to be right
+# most of the time. Trying the guess first would, on a page that hosts a captcha
+# *and* a login form, type the captcha's answer into the username box.
+#
+# The generic tail is not a nicety either — it is what actually fires on most
+# pages. Vendors rename these classes without notice (they are anti-bot
+# surfaces, so churn is the point), and our own Tier 3 fixtures render neither
+# vendor's DOM. Anything that only worked via the vendor list would be a feature
+# that passes review and fails in the field.
+
+# A distorted-text captcha's answer box. The three vendor entries are the three
+# types in instructions.py::TEXT_TYPES.
+TEXT_INPUT_SELECTORS = [
+    # BotDetect — the input is application-defined, so match the id fragment its
+    # own docs and samples use. These three are what the nightly collector
+    # already drives (src/captchaCollection/sources.py).
+    "input[id*=captchaCode]",
+    "input#captchaCode",
+    "input[id*=validateCaptcha]",
+    ".BDC_CaptchaDiv input[type=text]",
+    # MTCaptcha
+    "input.mtcap-inputtext",
+    ".mtcap input[type=text]",
+    # Yandex SmartCaptcha
+    ".AdvancedCaptcha-Input input",
+    "input.Textinput-Control",
+    'input[name="rep"]',
+    # Generic — an input the page itself labels as the captcha answer.
+    'input[name*="captcha" i]',
+    'input[id*="captcha" i]',
+    'input[aria-label*="captcha" i]',
+    'input[placeholder*="code" i]',
+    'input[autocomplete="off"][type=text]',
+    # Last resort: the only text box in the widget. Scoped to the challenge
+    # frame/container by the caller, never to the whole page — see _find_control.
+    "input[type=text]",
+    "input:not([type])",
+    "input[type=tel]",
+    "textarea",
+]
+
+# The handle you drag on a puzzle-piece slider. NOT the piece: on every one of
+# these vendors the piece is inert decoration that the handle carries, so a
+# drag starting on the piece moves nothing at all.
+SLIDER_HANDLE_SELECTORS = [
+    # GeeTest v3 / v4
+    ".geetest_slider_button",
+    ".geetest_btn",
+    ".geetest_slider .geetest_arrow",
+    # Tencent
+    "#tcaptcha_drag_thumb",
+    ".tc-slider-normal",
+    "[id*=slideBlock]",
+    # Yidun (NetEase)
+    ".yidun_slider",
+    ".yidun_jigsaw",
+    # Lemin
+    ".lemin-slider-handle",
+    "#lemin-cropped-captcha .slider",
+    # Generic — an ARIA slider, or a class that says handle/thumb/button on a
+    # track. `[draggable=true]` is deliberately absent: it is the HTML5
+    # drag-and-drop opt-in, which fires dragstart rather than pointermove, and
+    # no slider captcha uses it.
+    '[role="slider"]',
+    "[aria-valuenow]",
+    '[class*="slider"][class*="btn"]',
+    '[class*="slider"][class*="button"]',
+    '[class*="slide"][class*="handle"]',
+    '[class*="drag"][class*="thumb"]',
+]
+
+# Fallback for the sliderless members of the family. Lemin's "cropped" puzzle
+# has no track at all — you drag the piece itself onto the gap — and the model
+# answers it with the same sourceless drag, because from the picture the two are
+# indistinguishable. Tried only after SLIDER_HANDLE_SELECTORS finds nothing.
+DRAGGABLE_PIECE_SELECTORS = [
+    ".lemin-cropped-puzzle-piece",
+    "#lemin-cropped-captcha canvas + canvas",
+    '[class*="puzzle"][class*="piece"]',
+    '[class*="jigsaw"]',
 ]
 
 
@@ -262,6 +487,84 @@ class PageSolver:
         self._deadline_ms: Optional[float] = None
         # Window size for clamping, resolved once per solve. See _viewport.
         self._viewport_cache: Optional[Dict[str, float]] = None
+        # Animation detection, all reset per solve by `_reset_animated_state`.
+        # `_known_animated` latches: once a widget has been SEEN to animate,
+        # every later round takes the keyframe path without re-probing.
+        self._known_animated = False
+        self._animated_probe_armed = False
+        self._animated_probe_done = False
+        self._keyframe_mode: Optional[str] = None
+        # Repeat detection; see `max_no_progress_rounds`.
+        self._last_answer_sig: Optional[str] = None
+        self._no_progress_rounds = 0
+        # Per-solve phase accounting; see `_phase`.
+        self._budget: Optional[PhaseBudget] = None
+
+    @contextmanager
+    def _phase(self, name: str):
+        """Attribute the enclosed wall-clock to `name` for this solve's budget.
+
+        A no-op outside a solve, so helpers stay callable from tests and from
+        the CLI without a budget having been opened.
+        """
+        if self._budget is None:
+            yield
+            return
+        with self._budget.phase(name):
+            yield
+
+    @staticmethod
+    def _answer_signature(actions: Sequence[Any], retry_mode: Optional[str]) -> Optional[str]:
+        """A stable identity for "the answer this round is about to execute".
+
+        Keyed on the retry mode too: the missed-tiles retry deliberately re-asks
+        about the same board and its answer legitimately overlaps the previous
+        one, so counting that as a repeat would abandon the one path built to
+        recover from an under-selection.
+
+        Returns None when the actions cannot be summarised, which is treated as
+        "not a repeat" — an unreadable answer must never be the reason a solve
+        is abandoned.
+        """
+        try:
+            parts = []
+            for raw in actions:
+                a = _as_dict(raw)
+                parts.append((
+                    a.get("action"),
+                    _round_pts(a.get("target_bounding_boxes")),
+                    _round_pts(a.get("target_bounding_box")),
+                    _round_pts(a.get("target_coordinates")),
+                    _round_pts(a.get("source_bounding_box")),
+                    a.get("text"),
+                ))
+            return repr((retry_mode, parts))
+        except Exception:  # noqa: BLE001 — a signature is an optimisation, not a contract
+            return None
+
+    def _note_answer(self, actions: Sequence[Any], retry_mode: Optional[str]) -> None:
+        """Count consecutive identical answers; see `max_no_progress_rounds`."""
+        sig = self._answer_signature(actions, retry_mode)
+        if sig is not None and sig == self._last_answer_sig:
+            self._no_progress_rounds += 1
+            _log(f"[no-progress] the model returned the same answer again "
+                 f"({self._no_progress_rounds}/{self.config.max_no_progress_rounds}) — "
+                 f"the previous one already ran and changed nothing")
+            # A board that reads the same every round is the signature of a
+            # CYCLING challenge answered as a still. Give the recording path a
+            # chance before giving up on the solve entirely.
+            self._arm_animated_probe()
+        else:
+            self._no_progress_rounds = 0
+            self._last_answer_sig = sig
+
+    def _reset_animated_state(self) -> None:
+        self._known_animated = False
+        self._animated_probe_armed = False
+        self._animated_probe_done = False
+        self._keyframe_mode = None
+        self._last_answer_sig: Optional[str] = None
+        self._no_progress_rounds = 0
 
     def _check_deadline(self, where: str) -> None:
         """
@@ -331,7 +634,8 @@ class PageSolver:
             return None
 
     def _get_solution(
-        self, image_path: str, puzzle_source: str, retry_mode: Optional[str]
+        self, image_path: str, puzzle_source: str, retry_mode: Optional[str],
+        text_mode: bool = False,
     ) -> Tuple[List[CaptchaAction], List[Dict[str, Any]]]:
         """
         The model query. In-process where TS spawns the CLI.
@@ -343,7 +647,8 @@ class PageSolver:
         planner = self._solver.planner
         before = len(planner.token_usage)
         actions = self._solver.solve(
-            image_path, puzzle_source=puzzle_source, retry_mode=retry_mode
+            image_path, puzzle_source=puzzle_source, retry_mode=retry_mode,
+            text_mode=text_mode,
         )
         usage = [dict(u) for u in planner.token_usage[before:]]
         if not isinstance(actions, list):
@@ -496,7 +801,8 @@ class PageSolver:
     def _smooth_move(self, page: Any, x: float, y: float) -> None:
         self._seed_cursor(page)
         points, timings = generate_trajectory(self._last_mouse, (x, y), 60)
-        self._trace_path(page, points, timings)
+        with self._phase("mouse"):
+            self._trace_path(page, points, timings)
 
     def _move_to_element(self, page: Any, element: Any, padding_percentage: float = 25.0) -> None:
         # BOUNDED. Playwright's default timeout is 30s, and this is called once
@@ -577,6 +883,256 @@ class PageSolver:
         self._smooth_move(page, *dst)
         _delay(random.random() * 50 + 50)
         page.mouse.up()
+
+    # ------------------------------------------------------------------
+    # Typing and sliding
+    # ------------------------------------------------------------------
+
+    def _find_control(self, scope: Any, selectors: Sequence[str]) -> Optional[Any]:
+        """First VISIBLE match for `selectors`, tried in order.
+
+        `scope` is the challenge frame, or — for the vendors that render into
+        the host page rather than an iframe — the widget element itself. Never
+        the page: the generic tail of both selector tables would otherwise
+        happily match a login form's text box or a carousel's drag handle
+        somewhere else on the document, and the answer would go there.
+        """
+        for selector in selectors:
+            try:
+                element = scope.query_selector(selector)
+            except Exception:
+                continue  # a selector this adapter can't parse must not end the search
+            if self._visible(element):
+                return element
+        return None
+
+    def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any]) -> bool:
+        """Put the model's reading of a distorted-text captcha into its box."""
+        text = str(action.get("text") or "")
+        if not text:
+            return False
+        field = self._find_control(scope, TEXT_INPUT_SELECTORS)
+        if field is None:
+            _log("type action, but no text box in the widget; skipping")
+            return False
+
+        self._move_and_click(page, field)  # travel there, then press to focus
+        # A retry round arrives with the previous attempt still in the box, and
+        # typing would APPEND to it — submitting a string the model never read.
+        try:
+            page.keyboard.press("Control+A")
+        except Exception:
+            pass
+        # Per character rather than one `type(text, delay=…)` call: a constant
+        # inter-key delay is itself a signal, and these are the vendors that
+        # score typing cadence.
+        for ch in text:
+            try:
+                page.keyboard.type(ch)
+            except Exception as exc:
+                _log(f"could not type into the captcha field: {exc}")
+                return False
+            _delay(random.random() * 90 + 45)
+        _log(f"typed {len(text)} character(s) into the captcha field")
+        return True
+
+    def _track_piece(
+        self, element: Any, before: str, after: str, exclude: Sequence[float]
+    ) -> Optional[Sequence[int]]:
+        """`captchakraken track-piece` — box of what moved, handle masked out."""
+        from .tool_calls.track_piece import changed_bbox
+
+        try:
+            self._screenshot(element, after, timeout_ms=self.config.element_screenshot_timeout_ms)
+            return changed_bbox(before, after, exclude)
+        except Exception as exc:
+            _debug(f"track_piece failed: {exc}")
+            return None
+
+    def _execute_slide(
+        self,
+        page: Any,
+        element: Any,
+        scope: Any,
+        action: Dict[str, Any],
+        element_box: Dict[str, float],
+    ) -> bool:
+        """Drive a puzzle-piece slider until the PIECE reaches the model's slot.
+
+        The model is asked for one thing here — the centre of the gap — because
+        it is the only thing the picture can tell it. What it cannot know is how
+        far the handle must travel to put the piece there: the handle is
+        elsewhere on the widget, and the ratio between the two is a vendor
+        implementation detail that several of them deliberately vary.
+
+        So this is closed-loop, not a calculation. Press the handle, nudge it
+        twice by known amounts, and watch the screen:
+
+            union(before, after) spans the piece's ORIGINAL left edge to its
+            CURRENT right edge, so its width is  piece_width + ratio × nudge.
+
+        Two nudges, two widths, two unknowns — solve for both, then steer the
+        remaining distance and re-measure. The mouse is not released until the
+        piece is home, because on every one of these puzzles releasing IS the
+        submit; there is no Verify button to reconsider at.
+
+        Returns False if there is nothing here to drag, leaving the caller's
+        normal no-op handling to deal with it.
+        """
+        target_x = (
+            (float(action["target_bounding_box"][0]) + float(action["target_bounding_box"][2])) / 2
+        ) * element_box["width"]
+
+        handle = self._find_control(scope, SLIDER_HANDLE_SELECTORS)
+        if handle is None:
+            # No track — the sliderless members of the family (Lemin's
+            # "cropped") want the piece dragged directly. Same answer from the
+            # model, because the two look identical; different gesture. Nothing
+            # to close a loop on, since the piece is under the cursor and moves
+            # with it one for one.
+            piece = self._find_control(scope, DRAGGABLE_PIECE_SELECTORS)
+            if piece is None:
+                _log("slide action, but the widget has neither a slider nor a draggable piece")
+                return False
+            box = piece.bounding_box()
+            if not box:
+                return False
+            # BOTH axes. The rail members travel horizontally and nothing else,
+            # so the handle's own y is the only y there is — but a free drag
+            # carries the piece across the card, and holding the piece's row
+            # here slid it along the TRAY and released it there, 250 px below
+            # the slot, on every attempt.
+            target_y = (
+                (float(action["target_bounding_box"][1])
+                 + float(action["target_bounding_box"][3])) / 2
+            ) * element_box["height"]
+            _log("no slider track; dragging the piece to the slot directly")
+            self._smooth_move(page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.down()
+            _delay(random.random() * 50 + 50)
+            self._smooth_move(page, element_box["x"] + target_x, element_box["y"] + target_y)
+            _delay(random.random() * 50 + 50)
+            page.mouse.up()
+            return True
+
+        hbox = handle.bounding_box()
+        if not hbox:
+            return False
+        start_x = hbox["x"] + hbox["width"] / 2
+        hold_y = hbox["y"] + hbox["height"] / 2
+
+        # Mask the whole horizontal BAND the handle runs in, not just where it
+        # is now: it is about to move across that band, and most vendors fill
+        # the track behind it as it goes. Either would otherwise be the largest
+        # moving thing in frame, and we would track the handle instead of the
+        # piece.
+        pad = max(4.0, hbox["height"] * 0.35)
+        exclude = [
+            0.0,
+            hbox["y"] - element_box["y"] - pad,
+            element_box["width"],
+            hbox["y"] + hbox["height"] - element_box["y"] + pad,
+        ]
+
+        shots = [_tmp_png("slide") for _ in range(4)]
+        try:
+            self._move_to_element(page, handle, padding_percentage=30.0)
+            page.mouse.down()
+            _delay(random.random() * 60 + 60)
+            self._screenshot(element, shots[0],
+                             timeout_ms=self.config.element_screenshot_timeout_ms)
+
+            probes = self.config.slide_probe_offsets_px
+            widths: List[Tuple[float, float]] = []
+            last_box = None
+            for offset, shot in zip(probes, shots[1:]):
+                self._smooth_move(page, start_x + offset, hold_y)
+                _delay(random.random() * 40 + 40)
+                box = self._track_piece(element, shots[0], shot, exclude)
+                if box is not None:
+                    widths.append((float(offset), float(box[2] - box[0])))
+                    last_box = box
+
+            piece_w, ratio = self._solve_slide_geometry(widths, element_box["width"])
+            if last_box is None or piece_w is None:
+                # Never saw the piece — a canvas the screenshot cannot separate,
+                # a widget that redraws wholesale, or a press the handle refused.
+                # Fall back on the geometry every one of these puzzles shares:
+                # piece and handle both start flush left, so the handle's travel
+                # is the piece's travel.
+                _log("slider: piece never resolved on screen; steering by handle travel alone")
+                self._smooth_move(page, start_x + (target_x - (start_x - element_box["x"])), hold_y)
+            else:
+                # The offset `last_box` was MEASURED at — not `probes[-1]`, and
+                # not indexed by how many measurements succeeded. If the first
+                # probe failed to resolve and the second worked, those two
+                # disagree, and steering from a base the reading does not belong
+                # to sends the piece somewhere neither the model nor the screen
+                # asked for.
+                offset = float(widths[-1][0])
+                for _ in range(self.config.slide_max_corrections):
+                    piece_center = (last_box[2] - piece_w / 2.0)
+                    error = target_x - piece_center
+                    if abs(error) <= self.config.slide_tolerance_px:
+                        break
+                    offset += error / ratio
+                    self._smooth_move(page, start_x + offset, hold_y)
+                    _delay(random.random() * 40 + 40)
+                    box = self._track_piece(element, shots[0], shots[3], exclude)
+                    if box is None:
+                        break  # ran out of track; release where we are
+                    last_box = box
+                _debug(f"slider: piece_w={piece_w:.1f} ratio={ratio:.3f} "
+                       f"final_center={last_box[2] - piece_w / 2.0:.1f} target={target_x:.1f}")
+
+            # Settle before letting go. A release in the same tick as the last
+            # move reads as a machine, and some vendors sample the final
+            # milliseconds of the gesture.
+            _delay(random.random() * 120 + 90)
+        finally:
+            try:
+                page.mouse.up()
+            except Exception:
+                pass
+            for shot in shots:
+                _unlink(shot)
+        return True
+
+    @staticmethod
+    def _solve_slide_geometry(
+        widths: Sequence[Tuple[float, float]], widget_width: float
+    ) -> Tuple[Optional[float], float]:
+        """Piece width and handle-to-piece travel ratio, from probe measurements.
+
+        Each measurement is (handle offset, width of what changed), and
+        width = piece_width + ratio × offset. Two of them determine both.
+
+        With only one usable measurement the system is underdetermined, so ratio
+        is ASSUMED to be 1 — true of every vendor observed, and the assumption
+        is stated here rather than buried as a default. A ratio solved from
+        implausible measurements (a redraw, a piece that hit the wall between
+        probes) is rejected the same way: better a 1:1 guess that overshoots and
+        gets corrected than a ratio of 0.02 that sends the handle off the track.
+        """
+        if not widths:
+            return None, 1.0
+        piece_w: Optional[float] = None
+        ratio = 1.0
+        if len(widths) >= 2:
+            (o1, w1), (o2, w2) = widths[0], widths[-1]
+            if o2 != o1:
+                candidate = (w2 - w1) / (o2 - o1)
+                if 0.2 <= candidate <= 3.0:
+                    ratio = candidate
+                    piece_w = w1 - ratio * o1
+        if piece_w is None:
+            o, w = widths[-1]
+            piece_w = w - ratio * o
+        # A piece narrower than a few pixels, or wider than half the widget, is
+        # a measurement of something else.
+        if not 3.0 <= piece_w <= widget_width * 0.6:
+            return None, ratio
+        return piece_w, ratio
 
     # ------------------------------------------------------------------
     # Detection
@@ -705,18 +1261,35 @@ class PageSolver:
         a fresh puzzle burns ~18s re-running the pipeline on a closing frame.
         """
         try:
+            # The token FIRST, and unconditionally. It is a hidden field on the
+            # PAGE, not inside the widget, so it never needed the anchor iframe
+            # to be on screen — and the moment it matters most is precisely when
+            # the anchor is NOT on screen, because hCaptcha keeps its challenge
+            # overlay up for a couple of seconds after the winning submit.
+            # Gating this on `_visible(anchor)` meant the one signal that was
+            # already true went unread, and the loop ground on against a frame
+            # being torn down. See tests/test_solved_detection.py.
+            if self._has_non_empty_field_value(page, '[name="h-captcha-response"]'):
+                return True
+            if self._has_non_empty_field_value(page, '[name="g-recaptcha-response"]'):
+                return True
+            # Turnstile. `detect_captcha` already reads this exact field to
+            # decide a Turnstile widget is UNSOLVED, so the signal was known to
+            # one half of the driver and ignored by the other: a solved
+            # Turnstile reported unsolved here and the loop ground through the
+            # readiness waits and a wasted inference until the widget happened
+            # to disappear. Same defect the hCaptcha token had.
+            if self._has_non_empty_field_value(page, '[name="cf-turnstile-response"]'):
+                return True
+
+            # Anchor state is the fallback, and this one DOES need the iframe:
+            # it is read out of the anchor's own document.
             hc = page.query_selector('iframe[src*="hcaptcha"][src*="frame=checkbox"]')
-            if self._visible(hc):
-                if self._has_non_empty_field_value(page, '[name="h-captcha-response"]'):
-                    return True
-                if self._is_hcaptcha_anchor_checked(hc):
-                    return True
+            if self._visible(hc) and self._is_hcaptcha_anchor_checked(hc):
+                return True
             rc = page.query_selector('iframe[src*="recaptcha/api2/anchor"]')
-            if self._visible(rc):
-                if self._has_non_empty_field_value(page, '[name="g-recaptcha-response"]'):
-                    return True
-                if self._is_recaptcha_anchor_checked(rc):
-                    return True
+            if self._visible(rc) and self._is_recaptcha_anchor_checked(rc):
+                return True
         except Exception:
             pass
         return False
@@ -730,6 +1303,18 @@ class PageSolver:
         try:
             hc = page.query_selector('iframe[src*="hcaptcha"][src*="frame=challenge"]')
             if self._visible(hc):
+                # "Prompt painted" alone does NOT mean a next round. hCaptcha
+                # leaves the round you just answered on screen while it
+                # verifies, so this fired on the CLOSING frame and broke the
+                # post-submit poll out of its solved-check after ~0ms — which
+                # then committed the solver to ~21s of readiness waits and a
+                # full inference against a frame that was about to be destroyed.
+                # The frame must have actually CHANGED since the submit; we
+                # already snapshot exactly that at submit time.
+                if self._last_submit_frame_hash:
+                    current = self._element_frame_hash(hc)
+                    if current and current == self._last_submit_frame_hash:
+                        return False
                 frame = hc.content_frame()
                 prompt = frame.query_selector(".prompt-text") if frame else None
                 if self._visible(prompt):
@@ -786,13 +1371,20 @@ class PageSolver:
         return False
 
     def _get_verify_button(self, frame: Any) -> Optional[Any]:
+        # `.//` — RELATIVE. `scope` is an ElementHandle whenever the widget is
+        # markup on the host page rather than a vendor iframe (every
+        # distorted-text captcha), and a document-rooted `//button` does not
+        # resolve against an element handle: the query returned None even with
+        # the button sitting inside that very element, so a typed code was never
+        # submitted. On a Frame the context node is the document, where `.//` and
+        # `//` mean the same thing, so the vendor paths are unaffected.
         for text in ("Verify", "Next", "Submit", "Skip"):
             lowered = text.lower()
             try:
                 button = frame.query_selector(
-                    f"xpath=//button[contains(translate(., "
+                    f"xpath=.//button[contains(translate(., "
                     f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{lowered}')]"
-                    f" | //div[@role='button' and contains(translate(., "
+                    f" | .//div[@role='button' and contains(translate(., "
                     f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{lowered}')]"
                 )
                 if self._visible(button):
@@ -806,6 +1398,26 @@ class PageSolver:
             hcaptcha_verify = frame.query_selector(".button-submit")
             if self._visible(hcaptcha_verify):
                 return hcaptcha_verify
+            # GeeTest: `<div class="geetest_submit geetest_disable">OK</div>`.
+            #
+            # Invisible to BOTH shapes above — a bare div carries no
+            # role="button", and "OK" is on none of the four word lists. So
+            # nothing was ever pressed on the puzzles that need pressing, and a
+            # GeeTest board does not grade until you do: the solve loop re-read
+            # the same unchanged panel and re-answered it identically until the
+            # round cap. Ordered icon-click scored 0/31 and 0/13 that way while
+            # the model was answering CORRECTLY (measured 2026-08-19). A driver
+            # that discards a right answer is indistinguishable from a model
+            # that cannot solve the puzzle, which is how this hid.
+            #
+            # Matched by CLASS, not by the word: `geetest_submit_tips` sits
+            # beside it and also reads "OK", and pressing the tooltip does
+            # nothing. `.geetest_submit` is a distinct token, so it cannot
+            # match it. Mirrors getVerifyButton in js/src/solver.ts — CLAUDE.md
+            # 1c, the two ports must behave the same.
+            geetest_submit = frame.query_selector(".geetest_submit")
+            if self._visible(geetest_submit):
+                return geetest_submit
         except Exception:
             pass
         return None
@@ -814,18 +1426,30 @@ class PageSolver:
     # Frame readiness
     # ------------------------------------------------------------------
 
-    def _screenshot(self, element: Any, path: str, timeout_ms: Optional[int] = None) -> None:
+    def _screenshot(self, element: Any, path: str, timeout_ms: Optional[int] = None,
+                    animations: str = "disabled") -> None:
         """
-        Short timeout + animations disabled, always.
+        Short timeout, and animations disabled unless the caller needs the motion.
 
         Playwright's default 30s stability wait hangs per-screenshot on a
         closing/animating challenge element; that alone made a multi-round solve
         take ~115s. Failing fast and skipping a frame is strictly better.
+
+        `animations` is 'disabled' everywhere the goal is a STABLE STILL, which
+        is almost everywhere. It is not a formality: the flag fast-forwards
+        finite animations and FREEZES infinite ones, which is exactly what a
+        model-facing screenshot wants and exactly what a recording must not do.
+        The burst and the animation probe pass 'allow' — see `solver.ts`
+        `recordKeyframeBurst`, which learned this first: GeeTest's svg board
+        cycles in CSS, so a burst taken with animations disabled captured the
+        same picture forty times, the slicer honestly reported `mode=static`,
+        and the solve went back to answering a single still. hCaptcha hid it,
+        because it animates in canvas and the flag does not touch canvas.
         """
         element.screenshot(
             path=path,
             timeout=timeout_ms if timeout_ms is not None else 2_500,
-            animations="disabled",
+            animations=animations,
         )
 
     def _element_frame_hash(self, element: Any) -> Optional[str]:
@@ -851,8 +1475,11 @@ class PageSolver:
         cfg = self.config
         start = time.monotonic() * 1000.0
         previous: Optional[str] = None
-        still_streak = 0
         frames: List[str] = []
+        # This loop only COLLECTS polls; the verdict is `settle_verdict`'s, so
+        # the recorded timelines in tests/test_animated_is_detected.py exercise
+        # the same rule that runs here rather than a copy of it that can drift.
+        samples: List[Tuple[float, bool]] = []
         try:
             while (time.monotonic() * 1000.0) - start < cfg.settle_timeout_ms:
                 self._check_deadline("waiting for the challenge to settle")
@@ -866,14 +1493,16 @@ class PageSolver:
                 frames.append(path)
                 if previous:
                     moved = self._has_movement(previous, path, cfg.settle_diff_threshold)
-                    still_streak = 0 if moved else still_streak + 1
                     if len(frames) > 1:
                         _unlink(frames.pop(0))
-                    if still_streak >= cfg.settle_frames:
-                        return "settled"
-                    # Still moving this late means it is not merely loading.
-                    if moved and (time.monotonic() * 1000.0) - start >= cfg.animated_challenge_after_ms:
-                        return "animated"
+                    samples.append(((time.monotonic() * 1000.0) - start, moved))
+                    verdict = settle_verdict(
+                        samples,
+                        settle_frames=cfg.settle_frames,
+                        animated_after_ms=cfg.animated_challenge_after_ms,
+                    )
+                    if verdict != "timeout":
+                        return verdict
                 previous = frames[-1]
                 _delay(cfg.settle_poll_ms)
             return "timeout"
@@ -897,14 +1526,55 @@ class PageSolver:
         `video_solve_enabled=False` restores the old behaviour for callers who would
         rather fail fast than spend the recording time.
         """
-        if self._wait_for_element_settled(element) != "animated":
-            return False
+        # Already established for this widget — don't re-probe every round.
+        if self._known_animated:
+            return True
+
+        with self._phase("settle"):
+            verdict = self._wait_for_element_settled(element)
+        if verdict != "animated":
+            # 'settled' is not proof of static. The settle rule stops at the
+            # first `settle_frames` of stillness, and every animated puzzle we
+            # ship rests between screens for longer than that, so it calls all
+            # of them settled (tests/test_animated_is_detected.py has the
+            # measured timelines).
+            #
+            # What decides it instead is a RECORDING, taken once a round has
+            # already answered the same thing twice — the signature of a
+            # cycling board read as a still. The recording is self-checking: if
+            # the widget really is static it slices to one keyframe and the
+            # caller solves that frame as the still it is. So there is nothing
+            # to be careful about here, and nothing to observe first.
+            if not self._animated_probe_armed or self._animated_probe_done:
+                return False
+            self._animated_probe_done = True
+            self._animated_probe_armed = False
+            _log("[animated] the same answer came back twice — recording the "
+                 "challenge to see whether it is cycling")
+
+        # Latch either route. Re-deciding every round would re-record a widget
+        # we have already SEEN animate, and on a puzzle that rests between
+        # screens a later recording can land inside a hold, slice to one frame,
+        # and flip the solve back onto the still path halfway through.
+        self._known_animated = True
+
         if not self.config.video_solve_enabled:
             raise AnimatedChallengeError(
                 "the challenge never settles and video_solve_enabled is off"
             )
-        _log("[animated] challenge never settles — recording it")
+        _log("[animated] challenge is animated — solving it from keyframes")
         return True
+
+    def _arm_animated_probe(self) -> None:
+        """Round N finished without finishing the CHALLENGE — probe next round.
+
+        Deliberately not armed for round 1. A static puzzle solves there and
+        never pays anything, which is what keeps the common case at the ~530ms
+        settle it has today. Only a widget that survived a round is worth
+        spending a cycle of observation on.
+        """
+        if self.config.animated_probe_enabled and not self._animated_probe_done:
+            self._animated_probe_armed = True
 
     def _record_keyframes(self, element: Any) -> Tuple[List[str], str]:
         """Record the widget and return `(keyframe_paths, temp_dir)`.
@@ -933,14 +1603,20 @@ class PageSolver:
         total = max(1, round(cfg.video_burst_duration_ms / (1000.0 / fps)))
         interval = 1.0 / fps
 
+        frames: List[Any] = []
+
+        remaining = max(0, total - len(frames))
         shot = _tmp_png("burst")
-        frames = []
         try:
-            for i in range(total):
+            for i in range(remaining):
                 self._check_deadline("recording the animated challenge")
                 start = time.monotonic()
                 try:
-                    self._screenshot(element, shot)
+                    # animations ALLOWED — see `_screenshot`. The JS port has
+                    # done this since the GeeTest svg burst came back as 40
+                    # copies of one picture; this port never did, so every
+                    # CSS-animated vendor was recorded frozen.
+                    self._screenshot(element, shot, animations="allow")
                 except Exception as exc:  # noqa: BLE001 — a dropped frame is not fatal
                     _debug(f"burst frame {i} failed: {exc}")
                 else:
@@ -953,7 +1629,7 @@ class PageSolver:
                 # the recording covers more wall-clock than the model trained on and
                 # a cycle's period lands differently across the frames.
                 wait = interval - (time.monotonic() - start)
-                if wait > 0 and i < total - 1:
+                if wait > 0 and i < remaining - 1:
                     time.sleep(wait)
         finally:
             _unlink(shot)
@@ -968,6 +1644,9 @@ class PageSolver:
         temp_dir = tempfile.mkdtemp(prefix="ck_keyframes_")
         paths = write_keyframes(kfset, temp_dir, stem="challenge")
         _log(f"[animated] sliced to {len(paths)} keyframe(s) (mode={kfset.mode})")
+        # The wait gate consults this: `even` means the extractor found no state
+        # that RECURS, so there is nothing for the page to come back to.
+        self._keyframe_mode = kfset.mode
         return [str(p) for p in paths], temp_dir
 
     def _wait_for_keyframe(self, element: Any, keyframe_path: str,
@@ -988,10 +1667,34 @@ class PageSolver:
 
         Returns whether the state was reached. On timeout the caller clicks anyway
         — see `keyframe_wait_timeout_ms`.
+
+        NOT ATTEMPTED on an `even` clip. `keyframes.py` picks that mode precisely
+        when the clip never revisits a picture it has already shown — a slow
+        one-way change, a rotation, a cross-fade — so there is no state for the
+        page to come BACK to and the wait can only ever run out. It is not a
+        cheap failure: the gate polls the full `keyframe_wait_timeout_ms` (6s)
+        PER CLICK before giving up and clicking anyway.
+        And `even` is not the rare case. All 116 real clips under
+        `cleanSamples/test/raw/**/keyframes/` are `even`; `cycle` has never once
+        fired on real footage, which keyframes.py itself records ("real state
+        separations top out around 0.007, well under this"). So on real traffic
+        this gate was 6s of dead time on every animated click, always followed by
+        the same click it would have made immediately. Measured on
+        `hcaptcha_rotating_obj_video`: 6.0s of a 28.8s solve, closest region diff
+        0.0721 against a 0.05 tolerance, then it clicked and solved.
+
+        The gate stays for `cycle`/`static`, where a state genuinely does recur
+        and waiting is the difference between clicking the sprite and clicking
+        the background.
         """
         import cv2
 
         from .keyframes import MATCH_REGION_TOLERANCE, region_box, region_diff_ratio
+
+        if self._keyframe_mode == "even":
+            _log("[animated] clip is mode=even (no state recurs); "
+                 "acting on the model's frame without waiting")
+            return False
 
         ref = cv2.imread(keyframe_path)
         if ref is None:
@@ -1045,12 +1748,24 @@ class PageSolver:
         ships an empty `url("")` placeholder before it arrives. Best-effort: a
         timeout falls through to the screenshot, where the existing fail-fast
         path still covers a genuinely unsupported puzzle.
+
+        "NOTHING TO WAIT FOR" IS READY. The last clause used to be
+        `return !!(example && ...)`, which is false when there is no example
+        image — so a challenge with no tile grid, no canvas and no example
+        polled until the timeout and then carried on regardless. Measured on
+        `hcaptcha_number_with_highest_value_video`: 24.0s of a 45.2s solve, the
+        full 8s three times over, more than half the budget spent asking a
+        question about elements that were not on the page. A readiness gate can
+        only report on what it can see; with nothing to check it has no opinion,
+        and "no opinion" must not read as "not ready".
         """
+        cfg = self.config
         try:
             frame = challenge_iframe.content_frame()
             if not frame:
                 return
-            frame.wait_for_selector(".prompt-text", state="visible", timeout=8_000)
+            frame.wait_for_selector(".prompt-text", state="visible",
+                                    timeout=cfg.hcaptcha_images_timeout_ms)
             frame.wait_for_function(
                 """() => {
                     const tiles = Array.from(
@@ -1065,9 +1780,10 @@ class PageSolver:
                     if (canvas && canvas.width > 0 && canvas.height > 0) return true;
                     const example = document.querySelector(
                         '.challenge-example img, .image-wrapper img');
-                    return !!(example && example.complete && example.naturalWidth > 0);
+                    if (example) return example.complete && example.naturalWidth > 0;
+                    return true;   // nothing here to be waited for
                 }""",
-                timeout=8_000,
+                timeout=cfg.hcaptcha_images_timeout_ms,
             )
         except Exception:
             pass  # timed out or detached mid-load; screenshot anyway
@@ -1240,11 +1956,35 @@ class PageSolver:
         ordered.extend(sorted(remaining))
         return ordered
 
-    def _current_loading_cells(
+    def _watch_clicked_tiles(
         self, page: Any, element: Any, session: _GridSession, priority: Sequence[int] = ()
-    ) -> List[int]:
+    ) -> Tuple[List[int], bool]:
         """
-        Watch for the ONSET of the refresh over a grace window.
+        Watch the just-clicked tiles until the widget says what it did with them.
+
+        Returns `(loading, chipped)`. Two answers because reCAPTCHA gives a click
+        one of exactly two replies, and they are the two kinds of board:
+
+          * the small blue CHIP in the tile's top-left corner — the photo was
+            KEPT. Nothing is on its way in, the selection is the answer, and the
+            caller should press Verify (`chipped`).
+          * the photo blanking or dissolving under a large centred check — the
+            tile is being SWAPPED, and what lands may match too, so the board has
+            to be read again (`loading`).
+
+        A widget that swaps one clicked cell swaps them all, so the two never
+        share a board and one look at the tiles we just clicked settles it. The
+        chip is what `detect_selected_cells` reports as `selected` — it looks for
+        it in the top-left corner only, behind a circularity and a centroid test
+        a centred check fails — and we already read it every poll.
+
+        `chipped` needs EVERY watched tile, because a partial reading is a
+        misread and the two mistakes do not cost the same: calling a swapping
+        board finished submits half an answer and burns the attempt, while
+        calling a chipped board unfinished costs one inference. It is also only
+        ever OUR click that a chip can be reporting: tiles already wearing one
+        are filtered out of the model's answer before we click, so a chip on a
+        watched tile arrived in response to this round.
 
         The blank/fade transition LAGS the click by a beat: reCAPTCHA holds a
         clicked tile selected (old image visible) for ~1-3s and only then blanks
@@ -1283,17 +2023,23 @@ class PageSolver:
                 frames.append(path)
 
                 states = self._grid_cell_states(frames[-2], frames[-1], session.grid_boxes)
+                # Chip first: a chip landing on a tile ZOOMS its photo out, which
+                # reads as `changing` on the same frame that shows the chip. Test
+                # the swap first and every chipped board looks like a swapping
+                # one for as long as the animation runs.
+                if priority and set((states or {}).get("selected", [])).issuperset(priority):
+                    return [], True
                 in_scope = lambda c: watch is None or c in watch  # noqa: E731
                 empty = [c for c in (states or {}).get("empty", []) if in_scope(c)]
                 changing = [c for c in (states or {}).get("changing", []) if in_scope(c)]
                 loading = sorted(set(empty) | set(changing))
                 if loading:
-                    return self._order_by_priority(loading, priority)
+                    return self._order_by_priority(loading, priority), False
                 _unlink(frames.pop(0))
-            return []
+            return [], False
         except Exception as exc:
             _debug(f"fade-onset error: {exc}")
-            return []
+            return [], False
         finally:
             for path in frames:
                 _unlink(path)
@@ -1360,8 +2106,14 @@ class PageSolver:
         tiles and waits for at least one to finish reloading before re-solving,
         so we never burn a model call on a grid that is still mid-fade.
 
-        Submits ONLY on `done` — never on a round-cap exit, which is left to the
-        outer loop to re-detect and decide.
+        Only a board that SWAPS a clicked tile out is worth those extra rounds.
+        One that ticks the tile and keeps the photo has been fully answered by
+        the round that clicked it — same as the 4x4 — so `_watch_clicked_tiles`
+        reports the chip and this submits there and then. Rounds 2..N exist for
+        the fading board and nothing else.
+
+        Submits on `done`, and on a board that ticked our clicks — never on a
+        round-cap exit, which is left to the outer loop to re-detect and decide.
         """
         cfg = self.config
         session = _GridSession(
@@ -1383,7 +2135,8 @@ class PageSolver:
             # Each round can legitimately spend ~10s waiting on fades, so eight
             # of them plus the model calls can outlast the whole solve budget.
             self._check_deadline(f"recaptcha grid round {round_index}")
-            self._wait_for_grid_cells_loaded(element)
+            with self._phase("grid-load"):
+                self._wait_for_grid_cells_loaded(element)
             shot = _tmp_png("recap")
             action: Optional[Dict[str, Any]] = None
             try:
@@ -1407,7 +2160,7 @@ class PageSolver:
 
             if action.get("action") == "wait":
                 _log(f"[recaptcha-grid] round {round_index}: waiting for tiles.")
-                loading = self._current_loading_cells(page, element, session, clicked_order)
+                loading, _ = self._watch_clicked_tiles(page, element, session, clicked_order)
                 self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
                 continue
 
@@ -1438,11 +2191,18 @@ class PageSolver:
                     f"-> cells {clicked_this_round}."
                 )
 
-                loading = self._current_loading_cells(page, element, session, clicked_this_round)
-                if not loading:
-                    # Nothing faded within the grace window → the model fully
-                    # solved it; submit rather than burning another round.
-                    _log(f"[recaptcha-grid] round {round_index}: nothing loading; submitting.")
+                loading, chipped = self._watch_clicked_tiles(
+                    page, element, session, clicked_this_round
+                )
+                if chipped or not loading:
+                    # Either the widget ticked our clicks and kept the photos
+                    # (a board that does that is answered), or nothing faded
+                    # within the grace window. Submit rather than paying for
+                    # another round to be told the same thing.
+                    _log(
+                        f"[recaptcha-grid] round {round_index}: "
+                        f"{'tiles chipped' if chipped else 'nothing loading'}; submitting."
+                    )
                     should_submit = True
                     break
                 self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
@@ -1484,6 +2244,25 @@ class PageSolver:
         else:
             puzzle_source = "unknown"
 
+        # Everything the answer might have to be delivered INTO — a text box, a
+        # slider handle — is looked up against this, never against the page.
+        # For the iframed vendors it is the challenge document; for the ones
+        # that render into the host page (GeeTest, Yidun, BotDetect, …) it is
+        # the widget element, whose subtree is the same boundary.
+        scope = element.content_frame() or element
+
+        # Does this puzzle want a STRING rather than a place to click? Only the
+        # DOM can say. The picture cannot: BotDetect's warped code and
+        # hCaptcha's "click the matching character" are the same genre of image
+        # and want opposite answers. Restricted to `unknown` because neither
+        # hCaptcha nor reCAPTCHA has ever served a typed challenge, so a match
+        # inside one of their frames would be a false positive by definition.
+        text_mode = puzzle_source == "unknown" and self._find_control(
+            scope, TEXT_INPUT_SELECTORS
+        ) is not None
+        if text_mode:
+            _log("widget has a text box; solving as a distorted-text captcha")
+
         # hCaptcha REUSES the challenge iframe across rounds: after a submit it
         # briefly shows the previous round, then a spinner, then the next one.
         # Screenshotting any of those transitional frames feeds the model a
@@ -1492,10 +2271,20 @@ class PageSolver:
         is_animated = False
         if puzzle_source == "hcaptcha" and "frame=challenge" in src:
             if self._last_submit_frame_hash:
-                self._wait_for_change_since(element, self._last_submit_frame_hash)
+                with self._phase("await-next-round"):
+                    self._wait_for_change_since(element, self._last_submit_frame_hash)
                 self._last_submit_frame_hash = None
-            self._wait_for_hcaptcha_challenge_images(element)
+            with self._phase("hcaptcha-images"):
+                self._wait_for_hcaptcha_challenge_images(element)
             is_animated = self._settle_or_animated(element)
+            # Those three waits total up to ~21s and none of them watches for
+            # success, so the vendor's token routinely lands DURING them. Ask
+            # once more before spending an inference: this is the last free
+            # moment to notice the captcha is already accepted, and the
+            # inference is the single most expensive thing in the loop.
+            if self.is_captcha_solved(page):
+                _log("solved while waiting for the next round; skipping inference.")
+                return False, []
         elif puzzle_source == "unknown":
             # Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle
             # probe was never run for these, so an animated one — GeeTest's svg board
@@ -1509,25 +2298,31 @@ class PageSolver:
         # Only the image-challenge frame holds a grid. Running grid detection on
         # the anchor checkbox just burns an 8s timeout before the click.
         is_recaptcha_challenge = puzzle_source == "recaptcha" and "recaptcha/api2/bframe" in src
-        is_recaptcha_one_shot = False
         if is_recaptcha_challenge:
-            self._wait_for_grid_cells_loaded(element)
+            with self._phase("grid-load"):
+                self._wait_for_grid_cells_loaded(element)
             grid = self._get_grid_boxes(element)
             if grid and grid["size"] == 3:
-                # 3x3 refreshes tiles in place, so it needs the multi-round
-                # driver. 4x4 only ever returns `checked` and is one-shot.
+                # Only a 3x3 ever refreshes its tiles in place, so only a 3x3
+                # can need more than one round — and whether THIS one does is
+                # decided inside the driver, by what the widget does with the
+                # first click. A 4x4 never refreshes: it falls through to the
+                # ordinary click-then-submit path below.
                 element_box = element.bounding_box()
                 if element_box:
                     return self._solve_recaptcha_grid(
                         page, element, retry_mode, grid, element_box
                     )
-            elif grid and grid["size"] == 4:
-                is_recaptcha_one_shot = True
 
         shot = _tmp_png("captcha")
         performed_action = False
+        slid = False
+        placed = False
+        clicked = False
+        typed = False
         all_usage: List[Dict[str, Any]] = []
         keyframe_dir: Optional[str] = None
+        have_shot = False
         try:
             if is_animated:
                 # The freshness guard is deliberately SKIPPED here. It re-solves when
@@ -1536,20 +2331,58 @@ class PageSolver:
                 # whole re-solve budget would burn without ever acting. The frame
                 # number in the answer is the real guard: it names the state to act
                 # in, and `_execute_click` waits for it.
-                keyframes, keyframe_dir = self._record_keyframes(element)
-                actions, all_usage = self._get_keyframe_solution(keyframes)
-            else:
-                self._screenshot(element, shot, timeout_ms=self.config.element_screenshot_timeout_ms)
-                actions, all_usage = self._solve_frame_freshness_guarded(
-                    element,
-                    shot,
-                    lambda image_path: self._get_solution(image_path, puzzle_source, retry_mode),
-                )
+                with self._phase("burst"):
+                    keyframes, keyframe_dir = self._record_keyframes(element)
+                # THE RECORDING IS THE TEST. A burst of a widget that turns out
+                # not to move slices to a single keyframe (`mode=static`), and
+                # that frame is exactly the still this round would have taken
+                # anyway — so a wrong guess about "is it animated" costs the
+                # burst and nothing else, and cannot produce a wrong answer.
+                #
+                # This replaced a separate probe that watched the widget FIRST
+                # and only recorded if it saw motion. That paid for the
+                # observation twice over: up to `animated_probe_ms` to decide,
+                # then the burst to act, and it still had to be long enough to
+                # outlast the longest hold (8.2s measured on
+                # number_with_highest_value_video) or it answered "static" from
+                # inside one — which it did, live, burning 9s of a 45s budget to
+                # reach the wrong conclusion about a puzzle that was animating.
+                if len(keyframes) < 2:
+                    _log("[animated] the recording shows one picture; "
+                         "solving it as a still")
+                    is_animated = False
+                    # Reuse the frame we just recorded rather than taking
+                    # another screenshot of the same motionless widget.
+                    shutil.copyfile(keyframes[0], shot)
+                    have_shot = True
+                    shutil.rmtree(keyframe_dir, ignore_errors=True)
+                    keyframe_dir = None
+                else:
+                    with self._phase("inference"):
+                        actions, all_usage = self._get_keyframe_solution(keyframes)
+
+            if not is_animated:
+                if not have_shot:
+                    self._screenshot(element, shot,
+                                     timeout_ms=self.config.element_screenshot_timeout_ms)
+                with self._phase("inference"):
+                    actions, all_usage = self._solve_frame_freshness_guarded(
+                        element,
+                        shot,
+                        lambda image_path: self._get_solution(
+                            image_path, puzzle_source, retry_mode, text_mode=text_mode
+                        ),
+                    )
 
             element_box = element.bounding_box()
             if not element_box:
                 raise CaptchaSolveError("could not get bounding box of captcha element")
 
+            # Recorded at the moment of EXECUTION, which is what makes a repeat
+            # mean something: this exact answer is about to be performed, so if
+            # it matches the last one, the last one already ran and the page is
+            # still asking the same question.
+            self._note_answer(actions, retry_mode)
             _log(f"executing {len(actions)} action(s)")
             frame = element.content_frame()
             verify_button = None
@@ -1581,6 +2414,15 @@ class PageSolver:
                     else:
                         self._execute_click(page, action, element_box)
                     performed_action = True
+                    clicked = True
+                elif kind == "drag" and not action.get("source_bounding_box"):
+                    # No source — a puzzle-piece slider. What you grab is not
+                    # what has to arrive, so this cannot go through
+                    # _execute_drag: pressing the gap the model named and
+                    # dragging from there picks up nothing at all.
+                    if self._execute_slide(page, element, scope, action, element_box):
+                        performed_action = True
+                        slid = True
                 elif kind == "drag":
                     # Wait on the SOURCE: the piece has to be there to be picked up.
                     # The destination is not gated — by the time the mouse arrives the
@@ -1593,28 +2435,79 @@ class PageSolver:
                         )
                     self._execute_drag(page, action, element_box)
                     performed_action = True
+                    placed = True
+                elif kind == "type":
+                    if self._execute_type(page, scope, action):
+                        performed_action = True
+                        typed = True
                 elif kind == "wait":
                     duration = int(action.get("duration_ms") or 0)
                     if duration > 0:
                         _delay(duration)
                         performed_action = True
 
-                if frame:
-                    verify_button = self._get_verify_button(frame)
+                # `scope` when there is no vendor iframe. Eight vendors render
+                # into the HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin,
+                # Prosopo, MTCaptcha, BotDetect — so `content_frame()` is None
+                # for all of them and the button was never even SEARCHED FOR,
+                # while the text box and the slider handle it sits beside were
+                # both found through `scope` a few lines above. Two containers
+                # for two halves of one interaction.
+                #
+                # This used to be gated on `typed`, for fear of turning up the
+                # submit of the FORM the captcha guards. `scope` is the widget
+                # container and the xpaths are RELATIVE, so that button is out
+                # of reach by construction; what the gate actually did was make
+                # every non-typed inline puzzle unsubmittable. Measured on the
+                # Tier 3 fixtures: 4 pairs aborting outright and 11 more types
+                # burning all ten solve loops on a puzzle they had answered on
+                # the first one. The press itself is still bounded by
+                # `should_submit` below, which is where the hazard belongs.
+                lookup = frame or (scope if not slid else None)
+                if lookup is not None:
+                    verify_button = self._get_verify_button(lookup)
                     if verify_button:
                         self._move_to_element(page, verify_button)
 
-            # Submit policy:
-            #   hCaptcha        — every puzzle is one-shot; Verify submits it.
-            #   reCAPTCHA 4x4   — one-shot too (never fades), so submit now.
-            #   no action/done  — submit to advance.
-            # (reCAPTCHA 3x3 never reaches here; it returned above.)
-            should_submit = (
-                not performed_action or puzzle_source == "hcaptcha" or is_recaptcha_one_shot
-            )
-            if should_submit and frame and verify_button:
+            # Submit policy: press the widget's own submit control whenever we
+            # have put an ANSWER into it — a selection, a placed piece, a typed
+            # code — or when we had nothing to do and want the round to advance.
+            #
+            # Two exclusions, and they are the whole rule:
+            #
+            #   a completed SLIDE has already submitted. Letting go of the handle
+            #     is the gesture these puzzles grade; none of them ships a Verify
+            #     button, so anything the generic finder turns up afterwards
+            #     belongs to the host page, and pressing it would submit the form
+            #     the captcha guards while the verdict is still in flight.
+            #   a round that only WAITED has answered nothing. Submitting an
+            #     empty board spends the attempt on a puzzle we were about to
+            #     solve.
+            #
+            # hCaptcha and the reCAPTCHA 4x4 used to be named here as one-shot
+            # special cases; they are ordinary click rounds and this covers them.
+            # (reCAPTCHA 3x3 never reaches here — it returned above, to the
+            # driver that owns its fade-and-re-round rounds.)
+            #
+            # A click round DID used to be excluded, on the reasoning that these
+            # boards re-round and a half-made selection spends the attempt. They
+            # do not: the ones that grade themselves mid-selection draw no submit
+            # control at all, so `verify_button` is None and nothing is pressed
+            # either way. What the exclusion actually bought was a whole extra
+            # model call per puzzle, spent asking a board we had already answered
+            # correctly whether it was `done` — 6.2 s of prosopo_grid_3x3's 13.8 s,
+            # on a selection that scored 1.0 on the first call.
+            answered = clicked or placed or typed
+            should_submit = not slid and (answered or not performed_action)
+            if should_submit and verify_button:
                 _log(f"clicking Verify to submit ({puzzle_source}).")
                 self._move_and_click(page, verify_button)
+                # The press IS an interaction, and saying so is load-bearing:
+                # the caller aborts a round that reports none, so submitting a
+                # `done` answer and then returning False re-arms the very guard
+                # this satisfies — the puzzle is sent and the solve gives up on
+                # it one line later, which is what `prosopo_grid_3x3` did.
+                performed_action = True
                 # Snapshot at submit time so the NEXT attempt waits for the real
                 # transition before treating whatever is on screen as fresh.
                 self._last_submit_frame_hash = self._element_frame_hash(element)
@@ -1631,6 +2524,27 @@ class PageSolver:
     # Public entry point
     # ------------------------------------------------------------------
 
+    def watch(self, page: Any, **options: Any) -> "CaptchaWatcher":
+        """
+        A watcher that solves captchas on `page` as they appear.
+
+        Mirrors the TS `solver.watch(page)` in intent, but NOT in whether it
+        blocks: this returns an idle watcher and you choose how to drive it,
+        because a sync Playwright handle cannot be driven from a worker thread.
+
+            solver.watch(page).run()              # blocking; hold the page clean
+            w = solver.watch(page)
+            while my_loop():
+                w.poll_once()                     # cooperative; you own the cadence
+
+        Options are `CaptchaWatcher`'s fields: `interval_ms`, `max_solves`,
+        `error_backoff_ms`, `on_solved`, `on_error`. Nothing is injected into
+        the page; see watcher.py.
+        """
+        from .watcher import CaptchaWatcher
+
+        return CaptchaWatcher(solver=self, page=page, **options)
+
     def solve(self, page: Any) -> SolveResult:
         """
         Solve whatever captcha is on `page`.
@@ -1645,6 +2559,8 @@ class PageSolver:
         self._deadline_ms = start + self.config.overall_solve_timeout_ms
         self._viewport_cache = None
         self._cursor_seeded = False
+        self._reset_animated_state()
+        self._budget = PhaseBudget()
 
         # Mint one session id for the WHOLE solve, exactly as the TS driver does
         # per `solve()`. The planner turns it into `X-CK-Session`, which is what
@@ -1661,6 +2577,10 @@ class PageSolver:
         try:
             return self._solve_impl(page, start, cumulative_usage)
         finally:
+            # Printed on the way out of every solve, success or failure — a
+            # solve that FAILED is exactly the one whose time you want itemised.
+            if timings_enabled() and self._budget is not None:
+                print(self._budget.report(), file=sys.stderr)
             self._deadline_ms = None
             if previous_session is None:
                 os.environ.pop(_SESSION_ENV, None)
@@ -1681,16 +2601,47 @@ class PageSolver:
         stale_element_retries = 0
         has_interacted = False
         render_waits = 0
-        max_render_waits = 6
+        # Strictly FEWER than the solve loops. A render wait consumes an
+        # attempt, so at parity the loop runs out first and the branch below
+        # never fires — "no interactive captcha widget", which is the correct
+        # and benign answer for a reCAPTCHA v3 / invisible page, is reported
+        # instead as "still detected after N solve loops". That is a hard error
+        # for a caller who catches NoCaptchaFoundError to mean "nothing here",
+        # and it appeared the moment max_solve_loops came down from 10 to 6.
+        max_render_waits = min(6, cfg.max_solve_loops - 1)
 
         for attempt in range(1, cfg.max_solve_loops + 1):
+            # Round 1 did not finish the challenge. Before spending another
+            # still inference on it, let this round's settle check probe whether
+            # the widget is animated — the settle rule alone cannot tell, and
+            # answering an animated puzzle from one still is how a solve burns
+            # all ten loops without ever being able to succeed.
+            if attempt >= 2:
+                self._arm_animated_probe()
             if (time.monotonic() * 1000.0) - start > cfg.overall_solve_timeout_ms:
                 raise CaptchaSolveError(
                     f"captcha solve timed out after {cfg.overall_solve_timeout_ms}ms "
                     f"(attempt {attempt}/{cfg.max_solve_loops})"
                 )
 
-            element = self.detect_captcha(page)
+            # Ask the DOM whether we are DONE before asking what to solve next.
+            # Only once we have interacted: before that a populated token is the
+            # "already satisfied" case handled below, and this ordering would
+            # skip the render-wait a fresh widget needs.
+            #
+            # `detect_captcha` is the expensive call — it settles pixels and
+            # screenshots the element — and after the winning submit it returns
+            # the challenge frame hCaptcha is TEARING DOWN. Solving that frame
+            # cannot succeed; it just runs until the handle goes stale, which
+            # measured 19-33s of dead time at the end of every run while the
+            # answer had already been accepted. `is_captcha_solved` is a couple
+            # of cheap DOM reads and is authoritative, so it goes first.
+            if has_interacted and self.is_captcha_solved(page):
+                _log("captcha reports solved; finishing.")
+                return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
+
+            with self._phase("detect"):
+                element = self.detect_captcha(page)
             if not element:
                 # Two-stage. A null detection splits into two very different
                 # cases and treating them alike is how you either hang on a
@@ -1729,14 +2680,16 @@ class PageSolver:
                 did_interact, usage = self._solve_single(page, element, retry_mode_this_loop)
             except AnimatedChallengeError:
                 raise
-            except UnsupportedCaptchaError:
+            except UnsupportedCaptchaError as unsupported:
                 # A settled frame the model cannot solve is normally definitive.
                 # BUT mid-solve, a transitional blank frame produces the same
                 # verdict — that was the "solves round 1, dies on round 2" bug.
                 if has_interacted and unsupported_retries < cfg.max_unsupported_resolves:
                     unsupported_retries += 1
                     current = self.detect_captcha(page)
-                    if current and self._wait_for_element_settled(current) == "animated":
+                    with self._phase("settle"):
+                        _settled = self._wait_for_element_settled(current)
+                    if current and _settled == "animated":
                         # Used to be terminal. Now it just means the next round is an
                         # animated puzzle: retry the loop and `_solve_single` takes the
                         # recording path. `unsupported_retries` still bounds it, so a
@@ -1753,31 +2706,79 @@ class PageSolver:
                         f"({unsupported_retries}/{cfg.max_unsupported_resolves})."
                     )
                     continue
+                # The solver's OWN message, not a guess about what it saw.
+                # This used to substitute "likely an hCaptcha click/drag
+                # puzzle" for every unsupported verdict, including the ones
+                # that already said exactly what was wrong — "prompt
+                # generation 1 has no distorted-text prompt", say, which names
+                # both the cause and the fix. Reporting a wrong guess in place
+                # of a right answer costs whoever reads the gate an
+                # investigation, every time.
                 raise UnsupportedChallengeError(
-                    "cannot solve this kind of captcha — the rendered puzzle is not a "
-                    "supported grid or checkbox (likely an hCaptcha click/drag puzzle)"
-                )
+                    f"cannot solve this kind of captcha — {unsupported}"
+                ) from unsupported
             except Exception as exc:
                 # A stale/detached handle after a submit is a TRANSITION, not a
                 # dead puzzle: hCaptcha swapped in the next round while we held
                 # the old iframe. Only after interacting — a first-frame failure
                 # is a genuine problem worth surfacing.
                 message = str(exc)
-                if (
-                    has_interacted
-                    and stale_element_retries < cfg.max_stale_element_retries
-                    and _STALE_HANDLE_RE.search(message)
-                ):
-                    stale_element_retries += 1
-                    _log(
-                        f"stale challenge handle after submit; re-detecting next round "
-                        f"({stale_element_retries}/{cfg.max_stale_element_retries})."
-                    )
-                    _delay(cfg.stale_element_backoff_ms)
-                    continue
+                closed = bool(_CLOSED_TARGET_RE.search(message))
+                if has_interacted and (closed or _STALE_HANDLE_RE.search(message)):
+                    # ASK THE VENDOR FIRST. The handle most often went stale
+                    # BECAUSE the answer was accepted: reCAPTCHA tears the
+                    # challenge iframe down the instant it takes an answer, and
+                    # hCaptcha swaps the frame out. Re-entering the pipeline
+                    # here spends a whole round — detect, screenshot, infer — on
+                    # a puzzle that no longer exists, and races the teardown.
+                    # Headless usually won that race; headed usually lost it and
+                    # surfaced `TargetClosedError` from whatever ran next.
+                    #
+                    # The top-of-loop check is not enough on its own: it runs
+                    # only after the backoff, and it does DOM reads that throw
+                    # on a target that is already gone.
+                    try:
+                        if self.is_captcha_solved(page):
+                            _log("captcha reports solved; finishing.")
+                            return SolveResult(
+                                True, self._last_mouse, _aggregate(cumulative_usage)
+                            )
+                    except Exception:  # noqa: BLE001
+                        # Can't consult the vendor — the page is gone. Fall
+                        # through; `closed` decides between a named error and a
+                        # retry, and neither wants this exception in its place.
+                        pass
+
+                    if closed:
+                        raise PageClosedError(
+                            "the page, context or browser closed mid-solve, after the "
+                            "answer had been submitted but before the vendor's verdict "
+                            "could be read — the solve may in fact have succeeded"
+                        ) from exc
+
+                    if stale_element_retries < cfg.max_stale_element_retries:
+                        stale_element_retries += 1
+                        _log(
+                            f"stale challenge handle after submit; re-detecting next round "
+                            f"({stale_element_retries}/{cfg.max_stale_element_retries})."
+                        )
+                        _delay(cfg.stale_element_backoff_ms)
+                        continue
                 raise
 
             has_interacted = has_interacted or did_interact
+
+            # Give up on a solve that is repeating itself, rather than letting
+            # the clock do it. The alternative is not "one more chance" — it is
+            # the same click, again, until `overall_solve_timeout_ms`, which is
+            # how a hopeless captcha came to cost 66s and how half of Tier 3's
+            # wall-clock was being spent on attempts that could not succeed.
+            if self._no_progress_rounds >= cfg.max_no_progress_rounds:
+                raise CaptchaSolveError(
+                    f"no progress: the model returned the same answer "
+                    f"{self._no_progress_rounds + 1} times running and the challenge "
+                    f"is still up (attempt {attempt}/{cfg.max_solve_loops})"
+                )
             render_waits = 0
             cumulative_usage.extend(usage)
 
@@ -1789,17 +2790,52 @@ class PageSolver:
                 # definitive signal, so it cannot loop.
                 deadline = time.monotonic() * 1000.0 + cfg.post_solve_outcome_timeout_ms
                 solved = False
+                widget_gone = 0
+                _verdict_t0 = time.perf_counter()
                 while time.monotonic() * 1000.0 < deadline:
                     if self.is_captcha_solved(page):
                         solved = True
                         break
+                    # The eight inline vendors have no response token, so
+                    # `is_captcha_solved` — which reads only the hCaptcha and
+                    # reCAPTCHA anchors — can never fire for them and this loop
+                    # ran out its whole 2.5s budget on EVERY round, waiting for
+                    # a signal that cannot arrive. Measured on geetest_v4_slide:
+                    # 5.2s of a 12.3s solve, spent after the puzzle was already
+                    # answered, with the widget sitting there visibly solved.
+                    #
+                    # "The widget is gone" is the completion signal for those
+                    # vendors and is already the authority immediately after
+                    # this loop, so this only reaches the same verdict sooner —
+                    # confirmed over two polls so a frame caught mid-swap
+                    # between rounds cannot read as a solve.
+                    if self.detect_captcha(page) is None:
+                        widget_gone += 1
+                        if widget_gone >= 2:
+                            solved = True
+                            break
+                    else:
+                        widget_gone = 0
                     if self._is_challenge_freshly_rendered(page):
                         break  # next round is up; go solve it now
-                    _delay(200)
+                    _delay(cfg.post_solve_outcome_poll_ms)
+                _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0
+                if self._budget is not None:
+                    self._budget.add("await-verdict", _verdict_ms)
+                # How long a SUCCESS actually took to show itself. This is the
+                # only number that can size `post_solve_outcome_timeout_ms`: the
+                # window exists to catch a late success, so it needs to cover
+                # the slowest real one and nothing beyond it. A round that ends
+                # any other way spends the whole window by construction — there
+                # is no signal on a wrong answer — so its duration says nothing
+                # about how long the window ought to be.
+                if solved:
+                    _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
                 if solved:
                     return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
             else:
-                _delay(cfg.post_solve_delay_ms + random.random() * 300)
+                with self._phase("post-submit-delay"):
+                    _delay(cfg.post_solve_delay_ms + random.random() * 300)
 
             if self._has_recaptcha_underselect_error(page):
                 if already_retried_underselect:
@@ -1836,6 +2872,20 @@ def _bbox_center(bbox: Sequence[float]) -> Tuple[float, float]:
     around the model's point, so the centre recovers that point exactly."""
     x1, y1, x2, y2 = (float(v) for v in bbox)
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def _round_pts(value: Any, places: int = 3) -> Any:
+    """Coordinates rounded, for comparing two answers for sameness.
+
+    Rounded rather than compared exactly because the same tile chosen twice can
+    differ in the last float digit after the normalise/clamp round-trip, and a
+    repeat that reads as "different" is a repeat that costs a round.
+    """
+    if isinstance(value, (int, float)):
+        return round(float(value), places)
+    if isinstance(value, (list, tuple)):
+        return [_round_pts(v, places) for v in value]
+    return value
 
 
 def _as_dict(action: Any) -> Dict[str, Any]:

@@ -1,11 +1,8 @@
 """
 Human-like mouse trajectories for the page driver.
 
-MIRRORS, DOES NOT PORT, `cursory-ts`. The TypeScript driver calls
-`generate_trajectory()` from cursory-ts, which selects and warps a real recorded
-human trace out of a bundled ~MB corpus (`data/trajectories.json.gz`). That
-corpus is the package's own asset, so the Python port synthesises comparable
-motion instead of shipping a second copy of someone else's data.
+The Python side of `js/src/trajectory.ts`; the two are one implementation in
+two languages, pinned by `test_trajectory_parity.py`.
 
 The CONTRACT is identical, which is what matters for keeping the two drivers in
 step: given a start point, an end point and a sampling frequency, return
@@ -89,8 +86,6 @@ def generate_trajectory(
     frequency_randomizer: float = 0.12,
 ) -> Tuple[List[Point], List[float]]:
     """
-    Mirror of cursory-ts `generate_trajectory`.
-
     Returns `(points, timings)`. `timings` is CUMULATIVE milliseconds from the
     gesture start — not per-step deltas — because that is what the TS driver's
     `tracePath` sleeps against, and the two must pace identically.

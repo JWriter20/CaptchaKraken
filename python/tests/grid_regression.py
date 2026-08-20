@@ -27,7 +27,7 @@ _DATA = os.path.join(_ROOT, "cleanSamples", "test", "raw")
 ESTABLISHED = {"recaptcha_grid_3x3": 9, "recaptcha_grid_4x4": 16, "hcaptcha_grid_3x3_property": 9}
 TARGETS = {"hcaptcha_grocery_list": 18, "hcaptcha_drag_missing_slot": 16}
 NON_GRID = [
-    "hcaptcha_arrows_deviating", "hcaptcha_block_cover", "hcaptcha_car_parking_lot",
+    "hcaptcha_arrows_deviating", "hcaptcha_car_parking_lot",
     "hcaptcha_click_highest_jumper", "hcaptcha_click_image_by_traits",
     "hcaptcha_click_on_path", "hcaptcha_connect_path",
     "hcaptcha_drag_numbered_line_pieces", "hcaptcha_fish_swim_different",

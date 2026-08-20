@@ -9,8 +9,7 @@ Usage:
 
 Model/endpoint defaults live in `captchakraken.config` and are fully
 env-overridable (VLLM_BASE_URL, CAPTCHA_LORA_ADAPTER, …); the solver itself is
-model-agnostic. The legacy v1 stack (SAM3 grounding, multi-provider planner,
-detect/segment/drag-refine) lives on the `v1-old-architecture` branch.
+model-agnostic.
 """
 
 from pathlib import Path
@@ -46,11 +45,13 @@ try:  # pragma: no cover - exercised only when the serving stack is installed
     # caller supplies the Playwright-compatible page (see page_solver's module
     # docstring on why we duck-type rather than import one).
     from .page_solver import PageSolver, SolveResult, solve_captcha_on_page
+    from .watcher import CaptchaWatcher
 except ModuleNotFoundError:
     ActionPlanner = None  # type: ignore[assignment,misc]
     CaptchaSolver = None  # type: ignore[assignment,misc]
     solve_captcha = None  # type: ignore[assignment]
     PageSolver = None  # type: ignore[assignment,misc]
+    CaptchaWatcher = None  # type: ignore[assignment,misc]
     SolveResult = None  # type: ignore[assignment,misc]
     solve_captcha_on_page = None  # type: ignore[assignment]
 
@@ -58,6 +59,7 @@ __all__ = [
     "CaptchaSolver",
     "solve_captcha",
     "PageSolver",
+    "CaptchaWatcher",
     "SolveResult",
     "solve_captcha_on_page",
     "ActionPlanner",
@@ -70,4 +72,4 @@ __all__ = [
     "add_overlays_to_image",
 ]
 
-__version__ = "2.3.0"
+__version__ = "2.6.0"

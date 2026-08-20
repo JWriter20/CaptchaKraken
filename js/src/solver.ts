@@ -11,17 +11,22 @@ import {
   PlaywrightElementHandle as ElementHandle,
   PlaywrightFrame as Frame,
 } from './playwright-types';
-import { generate_trajectory, } from 'cursory-ts';
-import { exec, execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import { watchPage, CaptchaWatcher, WatchOptions } from './watcher';
+import { generate_trajectory } from './trajectory.js';
+import { exec, execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash, randomUUID } from 'crypto';
-import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
+import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, TypeAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
 import { aggregateTokenUsage } from './token-usage';
 import { parseApiError } from './errors';
 import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
+import { resolvePythonCommand } from './python-command';
+import { buildSolveArgs, redactCommand, solveEnv } from './cli-invocation';
+import { solveSlideGeometry } from './slide-geometry';
+import { getBundledCliRoot, resolveLoraName } from './model-name';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -35,14 +40,18 @@ function bboxCenter(bbox: [number, number, number, number]): [number, number] {
   return [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
 }
 
-function getBundledCliRoot(): string {
-  // When installed from npm, this file is in `<pkgRoot>/dist` (compiled) or `<pkgRoot>/src` (dev).
-  // Published packages bundle the python engine at `<pkgRoot>/python` (copied in
-  // by scripts/copy-python.mjs at build time). In the source monorepo it instead
-  // lives at the sibling `../python`, so fall back to that for local dev/tests.
-  const bundled = path.resolve(__dirname, '..', 'python');
-  if (fs.existsSync(bundled)) return bundled;
-  return path.resolve(__dirname, '..', '..', 'python');
+/**
+ * Is `command` runnable? Probed with `--version`, which every candidate
+ * interpreter answers cheaply and without side effects. `shell: false` so a
+ * command name can never be interpreted by /bin/sh.
+ */
+function commandExists(command: string): boolean {
+  try {
+    const probe = spawnSync(command, ['--version'], { stdio: 'ignore', shell: false });
+    return !probe.error && probe.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function getVenvPython(cliRoot: string): string | null {
@@ -151,6 +160,115 @@ const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: s
   { puzzleSource: 'botdetect', selectors: ['.BDC_CaptchaDiv'] },
 ];
 
+/**
+ * Where the answer goes, when it is not a click. Mirrors TEXT_INPUT_SELECTORS /
+ * SLIDER_HANDLE_SELECTORS / DRAGGABLE_PIECE_SELECTORS in page_solver.py — keep
+ * both in the same order with the same selectors.
+ *
+ * Ordered VENDOR-FIRST, GENERIC-LAST, and the driver takes the first visible
+ * match. That order is the design: a named vendor selector is unambiguous,
+ * while the generic patterns are guesses that happen to be right most of the
+ * time. Trying the guess first would, on a page hosting a captcha *and* a login
+ * form, type the captcha's answer into the username box.
+ *
+ * The generic tail is not a nicety either — it is what actually fires on most
+ * pages. Vendors rename these classes without notice, and our own Tier 3
+ * fixtures render neither vendor's DOM.
+ */
+const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [
+  // BotDetect — the input is application-defined, so match the id fragment its
+  // own docs and samples use (the three the nightly collector already drives).
+  'input[id*=captchaCode]',
+  'input#captchaCode',
+  'input[id*=validateCaptcha]',
+  '.BDC_CaptchaDiv input[type=text]',
+  // MTCaptcha
+  'input.mtcap-inputtext',
+  '.mtcap input[type=text]',
+  // Yandex SmartCaptcha
+  '.AdvancedCaptcha-Input input',
+  'input.Textinput-Control',
+  'input[name="rep"]',
+  // Generic — an input the page itself labels as the captcha answer.
+  'input[name*="captcha" i]',
+  'input[id*="captcha" i]',
+  'input[aria-label*="captcha" i]',
+  'input[placeholder*="code" i]',
+  'input[autocomplete="off"][type=text]',
+  // Last resort: the only text box in the widget. Scoped to the challenge
+  // frame/container by the caller, never to the whole page — see findControl.
+  'input[type=text]',
+  'input:not([type])',
+  'input[type=tel]',
+  'textarea',
+];
+
+/**
+ * The handle you drag on a puzzle-piece slider. NOT the piece: on every one of
+ * these vendors the piece is inert decoration that the handle carries, so a
+ * drag starting on the piece moves nothing at all.
+ */
+const SLIDER_HANDLE_SELECTORS: ReadonlyArray<string> = [
+  // GeeTest v3 / v4
+  '.geetest_slider_button',
+  '.geetest_btn',
+  '.geetest_slider .geetest_arrow',
+  // Tencent
+  '#tcaptcha_drag_thumb',
+  '.tc-slider-normal',
+  '[id*=slideBlock]',
+  // Yidun (NetEase)
+  '.yidun_slider',
+  '.yidun_jigsaw',
+  // Lemin
+  '.lemin-slider-handle',
+  '#lemin-cropped-captcha .slider',
+  // Generic — an ARIA slider, or a class that says handle/thumb/button on a
+  // track. `[draggable=true]` is deliberately absent: it is the HTML5
+  // drag-and-drop opt-in, which fires dragstart rather than pointermove, and no
+  // slider captcha uses it.
+  '[role="slider"]',
+  '[aria-valuenow]',
+  '[class*="slider"][class*="btn"]',
+  '[class*="slider"][class*="button"]',
+  '[class*="slide"][class*="handle"]',
+  '[class*="drag"][class*="thumb"]',
+];
+
+/**
+ * Fallback for the sliderless members of the family. Lemin's "cropped" puzzle
+ * has no track at all — you drag the piece itself onto the gap — and the model
+ * answers it with the same sourceless drag, because from the picture the two
+ * are indistinguishable. Tried only after SLIDER_HANDLE_SELECTORS finds nothing.
+ */
+const DRAGGABLE_PIECE_SELECTORS: ReadonlyArray<string> = [
+  '.lemin-cropped-puzzle-piece',
+  '#lemin-cropped-captcha canvas + canvas',
+  '[class*="puzzle"][class*="piece"]',
+  '[class*="jigsaw"]',
+];
+
+/**
+ * Puzzle-piece slider tuning. Mirrors the `slide_*` fields of
+ * PageSolverConfig in page_solver.py.
+ */
+const SLIDE_PROBE_OFFSETS_PX = [24, 64];
+const SLIDE_TOLERANCE_PX = 2;
+const SLIDE_MAX_CORRECTIONS = 2;
+
+/**
+ * The two numbers that bound a solve, together, because they only make sense
+ * together: `maxSolveLoops` is the count that FITS inside the timeout at the
+ * ~4-7s a round costs, and the timeout is the backstop for when it does not.
+ * Named rather than inlined as `??` defaults so the relationship between them
+ * can be pinned by a test — see no-progress.test.ts. The Python port keeps the
+ * same pair on `PageSolverConfig`.
+ */
+export const SOLVE_DEFAULTS = {
+  maxSolveLoops: 6,
+  overallSolveTimeoutMs: 45_000,
+} as const;
+
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
   private lastMousePosition: Vector; // Start at safe position
@@ -178,6 +296,29 @@ export class CaptchaKrakenSolver {
   // the model about it, re-querying is wasted work — reuse the prior answer.
   // Cleared at the top of each solve. See getSolution().
   private solutionCache: Map<string, CliResponse> = new Map();
+  // Set when a screenshot we have ALREADY answered comes back this solve.
+  //
+  // Every answer getSolution returns is executed — there is no speculative
+  // call — so an identical picture on a later round cannot mean "nothing
+  // changed, reuse it". It means the answer we already tried changed nothing.
+  // On a board that CYCLES (GeeTest's svg variant advances through screens and
+  // dwells ~1.5s on each) the pixels come back around, the settle probe reads
+  // that dwell as static, and the driver replayed a failed answer every round:
+  // 81 solve loops, 12 model calls, 69 cache hits, 0 solves across 16 live
+  // attempts. So a repeat is treated as EVIDENCE the still reading was wrong,
+  // and the challenge is re-solved from a recorded burst. See
+  // repeated-answer.test.ts.
+  private repeatedAnswerSeen = false;
+  // Slicing mode of the burst the current answer came from, as reported by
+  // `solve-animated`. `waitForKeyframe` reads it: `even` means the slicer found
+  // no state that RECURS, so there is nothing for the page to come back to and
+  // the gate can only ever time out. See test_even_clips_do_not_wait.py.
+  private keyframeMode: string | null = null;
+  // Repeat detection; see `maxNoProgressRounds`. `lastAnswerSig` is the answer
+  // the previous round EXECUTED, `noProgressRounds` how many rounds running
+  // have re-executed it.
+  private lastAnswerSig: string | null = null;
+  private noProgressRounds = 0;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
   // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
   private state: CaptchaState = CaptchaState.Detecting;
@@ -214,18 +355,40 @@ export class CaptchaKrakenSolver {
     }
   }
 
+  /**
+   * Install an auto-solver: probe `page` on a timer and solve any captcha that
+   * becomes visible, until `stop()`.
+   *
+   * Returns immediately — the watching happens in the background, so your
+   * automation carries on and captchas are handled underneath it.
+   *
+   * Nothing is injected into the page on any platform; see watcher.ts for why,
+   * and for the note on Camoufox, where the probe's DOM reads land in its
+   * isolated world by default.
+   *
+   * ```typescript
+   * const solver = new CaptchaKrakenSolver();
+   * const watcher = solver.watch(page);
+   * await page.goto('https://example.com/protected');   // solved as it appears
+   * await watcher.stop();
+   * ```
+   */
+  watch(page: Page, options: WatchOptions = {}): CaptchaWatcher {
+    return watchPage(this, page, options);
+  }
+
   private async solveImpl(page: Page): Promise<SolveResult | void> {
-    const maxSolveLoops = this.config.maxSolveLoops ?? 10;
+    const maxSolveLoops = this.config.maxSolveLoops ?? SOLVE_DEFAULTS.maxSolveLoops;
     const postSolveDelayMs = this.config.postSolveDelayMs ?? 1200;
-    const overallSolveTimeoutMs = this.config.overallSolveTimeoutMs ?? 120_000;
+    const overallSolveTimeoutMs =
+      this.config.overallSolveTimeoutMs ?? SOLVE_DEFAULTS.overallSolveTimeoutMs;
 
     const start = Date.now();
     let cumulativeTokenUsage: TokenUsage[] = [];
     this.imageCounter = 0;
     this.stepIndex = 0;
     this.solveStartMs = start;
-    this.solutionCache.clear();
-    this.lastSubmitFrameHash = null;
+    this.resetSolveState();
     this.setState(CaptchaState.Detecting);
 
     // Initialize session debug directory if debugging is enabled
@@ -268,11 +431,40 @@ export class CaptchaKrakenSolver {
     let hasInteracted = false;
     // Bounded wait for an in-DOM-but-still-rendering widget (Stage 1).
     let renderWaits = 0;
-    const MAX_RENDER_WAITS = 6;
+    // Strictly FEWER than the solve loops. A render wait consumes an attempt,
+    // so at parity the loop runs out first and the "no interactive captcha
+    // widget" branch below never fires — the correct, benign answer for a
+    // reCAPTCHA v3 / invisible page gets reported as "still detected after N
+    // solve loops" instead. Mirrors page_solver.py's max_render_waits.
+    const MAX_RENDER_WAITS = Math.min(6, maxSolveLoops - 1);
 
     for (let attempt = 1; attempt <= maxSolveLoops; attempt++) {
       if (Date.now() - start > overallSolveTimeoutMs) {
         throw new Error(`Captcha solve timed out after ${overallSolveTimeoutMs}ms (attempt ${attempt}/${maxSolveLoops}).`);
+      }
+
+      /*
+       * ASK THE VENDOR BEFORE DOING ANY MORE WORK.
+       *
+       * Once we have interacted, the cheapest possible question is "did that
+       * already work?" — a hidden response field on the page, no iframe, no
+       * screenshot, microseconds. Skipping it meant a solved reCAPTCHA still
+       * paid a full re-detect on the challenge iframe the vendor was tearing
+       * down: settle probe, grid poll, each screenshot waiting on an element
+       * that would never go stable again, ~10s after the answer was already
+       * accepted.
+       *
+       * Gated on hasInteracted for the same reason the post-interaction branch
+       * below is: before we touch anything, a response token belongs to
+       * somebody else's earlier solve and says nothing about this one.
+       */
+      if (hasInteracted && await this.isCaptchaSolved(page)) {
+        console.log('Vendor reports solved; returning without another detect pass.');
+        return {
+          isSolved: true,
+          finalMousePosition: this.lastMousePosition,
+          tokenUsage: aggregateTokenUsage(cumulativeTokenUsage),
+        };
       }
 
       const captchaElement = await this.detectCaptcha(page);
@@ -371,10 +563,13 @@ export class CaptchaKrakenSolver {
             );
             continue;
           }
-          throw new Error(
-            'Cannot solve this kind of captcha — the rendered puzzle is not a '
-            + 'supported grid or checkbox (likely an hCaptcha click/drag puzzle).'
-          );
+          // The solver's OWN message, not a guess about what it saw. This
+          // used to substitute "likely an hCaptcha click/drag puzzle" for
+          // every unsupported verdict, including the ones that already said
+          // exactly what was wrong and how to fix it. A wrong guess reported
+          // in place of a right answer costs whoever reads the gate an
+          // investigation, every time.
+          throw new Error(`Cannot solve this kind of captcha — ${e?.message ?? e}`);
         }
         // Stale/detached challenge handle: hCaptcha swapped in the next round
         // while we held the old iframe, so a screenshot on it fails "not
@@ -399,6 +594,18 @@ export class CaptchaKrakenSolver {
         throw e;
       }
       hasInteracted = hasInteracted || didInteract;
+
+      // Give up on a solve that is repeating itself, rather than letting the
+      // clock do it. The alternative is not "one more chance" — it is the same
+      // click, again, until overallSolveTimeoutMs.
+      if (this.noProgressRounds >= (this.config.maxNoProgressRounds ?? 2)) {
+        throw new Error(
+          `No progress: the model returned the same answer ${this.noProgressRounds + 1} `
+          + `times running and the challenge is still up `
+          + `(attempt ${attempt}/${maxSolveLoops}). Total usage: `
+          + JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))
+        );
+      }
       renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
 
@@ -412,7 +619,7 @@ export class CaptchaKrakenSolver {
       // re-solves, so it can't loop. If not solved in the window, the original
       // detectCaptcha path below handles a genuine next round exactly as before.
       const settleMs = didInteract
-        ? (this.config.postSolveOutcomeTimeoutMs ?? 2500)
+        ? (this.config.postSolveOutcomeTimeoutMs ?? 1000)
         : postSolveDelayMs + Math.random() * 300;
       if (didInteract) {
         const deadline = Date.now() + settleMs;
@@ -422,7 +629,7 @@ export class CaptchaKrakenSolver {
           // A fresh next round has rendered → stop waiting, go solve it now
           // (keeps multi-round solves fast instead of burning the full window).
           if (await this.isChallengeFreshlyRendered(page)) break;
-          await delay(200);
+          await delay(this.config.postSolveOutcomePollMs ?? 75);
         }
         if (solved) {
           return {
@@ -548,6 +755,25 @@ export class CaptchaKrakenSolver {
             ? 'checkbox'
             : 'unknown';
 
+    // Everything the answer might have to be delivered INTO — a text box, a
+    // slider handle — is looked up against this, never against the page. For
+    // the iframed vendors it is the challenge document; for the ones that
+    // render into the host page (GeeTest, Yidun, BotDetect, …) it is the widget
+    // element, whose subtree is the same boundary.
+    const scope: Frame | ElementHandle = (await captchaElement.contentFrame()) ?? captchaElement;
+
+    // Does this puzzle want a STRING rather than a place to click? Only the DOM
+    // can say. The picture cannot: BotDetect's warped code and hCaptcha's
+    // "click the matching character" are the same genre of image and want
+    // opposite answers. Restricted to `unknown` because neither hCaptcha nor
+    // reCAPTCHA has ever served a typed challenge, so a match inside one of
+    // their frames would be a false positive by definition.
+    const textMode = puzzleSource === 'unknown'
+      && (await this.findControl(scope, TEXT_INPUT_SELECTORS)) !== null;
+    if (textMode) {
+      console.log('Widget has a text box; solving as a distorted-text captcha.');
+    }
+
     // hCaptcha swaps the challenge images in asynchronously — the iframe is
     // "visible" the instant the frame opens, but the task tiles paint a beat
     // later, and on multi-round puzzles it REUSES the same iframe: after a
@@ -584,6 +810,14 @@ export class CaptchaKrakenSolver {
         console.log('[animated] challenge never settles — recording it');
         isAnimated = true;
       }
+      // Those three waits total ~21s and none of them watches for success, so
+      // the vendor's token routinely lands DURING them. Ask once more before
+      // spending an inference: last free moment to notice the captcha is
+      // already accepted, and inference is the most expensive step in the loop.
+      if (await this.isCaptchaSolved(page)) {
+        console.log('[captchakraken] solved while waiting for the next round; skipping inference.');
+        return { didInteract: false, tokenUsage: [] };
+      }
       this.setState(CaptchaState.Ready);
     } else if (puzzleSource === 'unknown' && this.config.videoSolveEnabled !== false) {
       // Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle probe
@@ -598,6 +832,19 @@ export class CaptchaKrakenSolver {
       }
     }
 
+    /*
+     * A board that cycles but DWELLS defeats the settle probe: it holds each
+     * screen still for far longer than the ~440ms of stillness that declares a
+     * challenge static, so it is read as a picture and answered from whichever
+     * screen we caught. The tell arrives a round later, when a screenshot we
+     * have already answered comes back — proof that the answer ran and moved
+     * nothing. Record it from here on instead of guessing at another still.
+     */
+    if (!isAnimated && this.shouldRetryAsAnimated(puzzleSource)) {
+      console.log('[animated] a picture we already answered came back — recording it');
+      isAnimated = true;
+    }
+
     // Only the image-challenge frame (bframe) holds a grid. The anchor checkbox
     // (api2/anchor) has none — running the grid settle/detect on it just wastes
     // an 8s timeout + a find-grid subprocess before the checkbox click. Gate the
@@ -610,21 +857,18 @@ export class CaptchaKrakenSolver {
     // blank/partial grid. Poll until the grid's cells have settled before
     // grabbing the frame. Best-effort — falls through on timeout. The in-place
     // refresh re-enters solveSingle each loop, so this guard covers it too.
-    // True only for a one-shot reCAPTCHA grid (4x4): click all matching tiles,
-    // then submit in the same pass — these never blank/fade, so there's no
-    // dynamic-refresh loop to run.
-    let isRecaptchaOneShotGrid = false;
     // Grid size the solver establishes for this challenge, surfaced in the
     // baseline step's meta so callers (e.g. the demo recorder) can bucket
     // reCAPTCHA attempts into 3x3 vs 4x4 without scraping debug logs.
     let establishedGridSize: number | null = null;
     if (isRecaptchaChallenge) {
       await this.waitForGridCellsLoaded(captchaElement);
-      // 3x3 reCAPTCHA puzzles refresh tiles in place (blank/fade → new image),
-      // so they need the multi-round driver: click → hover/wait for fades →
-      // re-solve, submitting only when the CLI says `done`. 4x4 puzzles only ever
-      // return `checked` (no in-place refresh) and are one-shot like hCaptcha.
-      // Falls through if the grid can't be established.
+      // Only a 3x3 reCAPTCHA ever refreshes its tiles in place (blank/fade →
+      // new image), so only a 3x3 can need the multi-round driver: click →
+      // hover/wait for fades → re-solve. Whether THIS one does is decided inside
+      // the driver, by what the widget does with the first click. A 4x4 never
+      // refreshes and is one-shot like hCaptcha: click all matching tiles, then
+      // submit in the same pass. Falls through if the grid can't be established.
       const grid = await this.getGridBoxes(captchaElement);
       if (grid && grid.size === 3) {
         establishedGridSize = 3;
@@ -634,7 +878,6 @@ export class CaptchaKrakenSolver {
         }
       } else if (grid && grid.size === 4) {
         establishedGridSize = 4;
-        isRecaptchaOneShotGrid = true;
       }
     }
 
@@ -658,6 +901,10 @@ export class CaptchaKrakenSolver {
     }
 
     let performedAction = false;
+    let slid = false;
+    let placed = false;
+    let clicked = false;
+    let typed = false;
     let allTokenUsage: TokenUsage[] = [];
     let burstDir: string | null = null;
 
@@ -676,7 +923,7 @@ export class CaptchaKrakenSolver {
         response = await this.solveFrameFreshnessGuarded(
           captchaElement, screenshotPath,
           (imagePath) => this.withIdleWander(page, captchaElement, () =>
-            this.getSolution(imagePath, puzzleSource, retryMode)),
+            this.getSolution(imagePath, puzzleSource, retryMode, textMode)),
         );
       }
       const actions = response.actions;
@@ -694,6 +941,11 @@ export class CaptchaKrakenSolver {
         throw new Error('Could not get bounding box of captcha element');
       }
 
+      // Recorded at the moment of EXECUTION, which is what makes a repeat mean
+      // something: this exact answer is about to be performed, so if it matches
+      // the last one, the last one already ran and the page is still asking the
+      // same question.
+      this.noteAnswer(actionList, retryMode);
       console.log(`Executing ${actionList.length} actions.`);
       const frame = await captchaElement.contentFrame();
       let verifyButton: ElementHandle | null = null;
@@ -724,7 +976,17 @@ export class CaptchaKrakenSolver {
             await this.executeClick(page, captchaElement, c, elementBox);
           }
           performedAction = true;
+          clicked = true;
           await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
+        } else if (action.action === 'drag' && !(action as DragAction).source_bounding_box) {
+          // No source — a puzzle-piece slider. What you grab is not what has to
+          // arrive, so this cannot go through executeDrag: pressing the gap the
+          // model named and dragging from there picks up nothing at all.
+          if (await this.executeSlide(page, captchaElement, scope, action as DragAction, elementBox)) {
+            performedAction = true;
+            slid = true;
+            await this.emitStep(captchaElement, 'drag', 'slid the piece into the slot', puzzleSource, frameRole, attempt, { action });
+          }
         } else if (action.action === 'drag') {
           const d = action as DragAction;
           // Wait on the SOURCE: the piece has to be there to be picked up. The
@@ -736,7 +998,14 @@ export class CaptchaKrakenSolver {
           }
           await this.executeDrag(page, captchaElement, action as any, elementBox);
           performedAction = true;
+          placed = true;
           await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
+        } else if (action.action === 'type') {
+          if (await this.executeType(page, scope, action as TypeAction)) {
+            performedAction = true;
+            typed = true;
+            await this.emitStep(captchaElement, 'type', 'typed the code', puzzleSource, frameRole, attempt, { action });
+          }
         } else if (action.action === 'wait') {
           if ((action as any).duration_ms > 0) {
             console.log(`Waiting for ${(action as any).duration_ms}ms as requested by CLI`);
@@ -745,8 +1014,20 @@ export class CaptchaKrakenSolver {
             await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, frameRole, attempt, { action });
           }
         }
-        if (frame) {
-          verifyButton = await this.getVerifyButton(frame);
+        // `scope` when there is no vendor iframe. Eight vendors render into the
+        // HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin, Prosopo,
+        // MTCaptcha, BotDetect — so `contentFrame()` is null for all of them
+        // and the button was never even SEARCHED FOR, while the text box and
+        // the slider handle it sits beside were both found through `scope`
+        // above. Two containers for two halves of one interaction.
+        //
+        // `scope` is the widget container and getVerifyButton's xpaths are
+        // RELATIVE, so the submit of the FORM the captcha guards is out of
+        // reach by construction. The press itself is bounded by
+        // `shouldClickSubmit` below, which is where that hazard belongs.
+        const lookup = frame ?? (slid ? null : scope);
+        if (lookup) {
+          verifyButton = await this.getVerifyButton(lookup);
           if (verifyButton) {
             await this.move(page, verifyButton);
           }
@@ -754,21 +1035,43 @@ export class CaptchaKrakenSolver {
         // 'done' actions intentionally fall through to the Verify-button block below.
       }
 
-      // Submit policy:
-      //   - hCaptcha: every puzzle is one-shot. Tiles don't refresh in place;
-      //     we must click Verify after our selection to submit and advance.
-      //   - reCAPTCHA 4x4: one-shot too — never blanks/fades — so submit right
-      //     after clicking. (3x3 is dynamic and never reaches this path; it's
-      //     handled by solveRecaptchaGrid above.)
-      //   - Otherwise (no action / 'done'): submit to advance.
-      const shouldClickSubmit = !performedAction
-        || puzzleSource === 'hcaptcha'
-        || isRecaptchaOneShotGrid;
-      if (shouldClickSubmit && frame && verifyButton) {
+      // Submit policy: press the widget's own submit control whenever we have
+      // put an ANSWER into it — a selection, a placed piece, a typed code — or
+      // when we had nothing to do and want the round to advance.
+      //
+      // Two exclusions, and they are the whole rule:
+      //
+      //   a completed SLIDE has already submitted. Letting go of the handle is
+      //     the gesture these puzzles grade; none of them ships a Verify
+      //     button, so anything the generic finder turns up afterwards belongs
+      //     to the HOST page, and pressing it would submit the form the captcha
+      //     guards while the verdict is still in flight.
+      //   a round that only WAITED has answered nothing.
+      //
+      // hCaptcha and the reCAPTCHA 4x4 used to be named here as one-shot
+      // special cases; they are ordinary click rounds and this covers them.
+      // (reCAPTCHA 3x3 never reaches here — solveRecaptchaGrid owns its
+      // fade-and-re-round rounds.)
+      //
+      // A click round used to be excluded, on the reasoning that these boards
+      // re-round and a half-made selection spends the attempt. They do not: the
+      // ones that grade themselves mid-selection draw no submit control, so
+      // verifyButton is null and nothing is pressed either way. What the
+      // exclusion bought was an extra model call per puzzle, asking a board we
+      // had already answered correctly whether it was `done`.
+      const answered = clicked || placed || typed;
+      const shouldClickSubmit = !slid && (answered || !performedAction);
+      if (shouldClickSubmit && verifyButton) {
         console.log(performedAction
           ? `Actions executed; clicking Verify to submit (${puzzleSource}).`
           : 'No active actions performed (empty or done). Checking for Verify/Next button...');
         await this.moveAndClick(page, verifyButton);
+        // The press IS an interaction, and saying so is load-bearing: the
+        // caller aborts a round that reports none, so submitting a `done`
+        // answer and then reporting false re-arms the very guard this
+        // satisfies — the puzzle is sent and the solve gives up on it one line
+        // later, which is what `prosopo_grid_3x3` did.
+        performedAction = true;
         await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
         // Snapshot the frame at submit time so the NEXT attempt waits for the
         // real transition (next round loading / frame closing) before treating
@@ -792,16 +1095,25 @@ export class CaptchaKrakenSolver {
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
   }
 
-  private async getVerifyButton(frame: Frame): Promise<ElementHandle | null> {
+  private async getVerifyButton(frame: Frame | ElementHandle): Promise<ElementHandle | null> {
     let submitted = false;
 
     // 1. Try generic button selectors by text
+    //
+    // `.//` — RELATIVE. `frame` is an ElementHandle whenever the widget is
+    // markup on the host page rather than a vendor iframe (all eight inline
+    // vendors), and a document-rooted `//button` does not resolve against an
+    // element handle: the query returns nothing even with the button sitting
+    // inside that very element. On a Frame the context node is the document,
+    // where `.//` and `//` mean the same thing, so the vendor paths are
+    // unaffected — and scoping is the point on an element, since a
+    // document-rooted match would reach the host page's own form submit.
     const buttonTexts = ['Verify', 'Next', 'Submit', 'Skip'];
     for (const text of buttonTexts) {
       try {
         // Case-insensitive contains for text
         const btn = await frame.$(
-          `xpath=//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')] | //div[@role="button" and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`
+          `xpath=.//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')] | .//div[@role="button" and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`
         );
         if (btn && await btn.isVisible()) {
           return btn;
@@ -824,6 +1136,29 @@ export class CaptchaKrakenSolver {
       const hcaptchaVerify = await frame.$('.button-submit');
       if (hcaptchaVerify && await hcaptchaVerify.isVisible()) {
         return hcaptchaVerify;
+      }
+    }
+
+    if (!submitted) {
+      // 4. GeeTest: `<div class="geetest_submit geetest_disable">OK</div>`.
+      //
+      // Invisible to BOTH shapes above — a bare div carries no role="button",
+      // and "OK" is on none of the four word lists. So nothing was ever pressed
+      // on the puzzles that need pressing, and since a GeeTest board does not
+      // grade until you do, the solve loop re-read the same unchanged panel and
+      // re-answered it identically until the round cap. Ordered icon-click
+      // scored 0/31 and 0/13 that way while the model was answering correctly:
+      // measured on 2026-08-19, three returned points landed on the three
+      // reference icons in order and the cursor arrived within 0.005 normalised
+      // of each. A driver that discards a right answer is indistinguishable
+      // from a model that cannot solve the puzzle, which is how this hid.
+      //
+      // Matched by CLASS, not by the word: `geetest_submit_tips` sits beside it
+      // and also reads "OK", and pressing the tooltip does nothing at all.
+      // `.geetest_submit` is a distinct class token, so it cannot match it.
+      const geetestSubmit = await frame.$('.geetest_submit');
+      if (geetestSubmit && await geetestSubmit.isVisible()) {
+        return geetestSubmit;
       }
     }
     return null;
@@ -919,14 +1254,29 @@ export class CaptchaKrakenSolver {
    */
   private async isCaptchaSolved(page: Page): Promise<boolean> {
     try {
+      // The token FIRST, and unconditionally. It is a hidden field on the PAGE,
+      // not inside the widget, so it never needed the anchor iframe to be on
+      // screen — and the moment it matters most is precisely when the anchor is
+      // NOT on screen, because hCaptcha keeps its challenge overlay up for a
+      // couple of seconds after the winning submit. Gating this on the anchor's
+      // visibility meant the one signal that was already true went unread, and
+      // the loop ground on against a frame being torn down. Mirrors the Python
+      // driver; pinned by tests/test_solved_detection.py in the finetune repo.
+      if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
+      if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
+      // Turnstile. detectCaptcha already reads this exact field to decide a
+      // Turnstile widget is UNSOLVED, so the signal was known to one half of
+      // the driver and ignored by the other. Mirrors the Python driver.
+      if (await this.hasNonEmptyFieldValue(page, '[name="cf-turnstile-response"]')) return true;
+
+      // Anchor state is the fallback, and this one DOES need the iframe: it is
+      // read out of the anchor's own document.
       const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
       if (hc && await hc.isVisible().catch(() => false)) {
-        if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
         if (await this.isHcaptchaAnchorChecked(hc)) return true;
       }
       const rc = await page.$('iframe[src*="recaptcha/api2/anchor"]');
       if (rc && await rc.isVisible().catch(() => false)) {
-        if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
         if (await this.isRecaptchaAnchorChecked(rc)) return true;
       }
     } catch { /* fall through */ }
@@ -943,6 +1293,17 @@ export class CaptchaKrakenSolver {
     try {
       const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
       if (hc && await hc.isVisible().catch(() => false)) {
+        // "Prompt painted" alone does NOT mean a next round. hCaptcha leaves
+        // the round you just answered on screen while it verifies, so this
+        // fired on the CLOSING frame and broke the post-submit poll out of its
+        // solved-check immediately — committing the solver to ~21s of
+        // readiness waits and a full inference against a dying frame. The
+        // frame must have actually CHANGED since the submit, which we already
+        // snapshot at submit time. Mirrors the Python driver.
+        if (this.lastSubmitFrameHash) {
+          const current = await this.elementFrameHash(hc).catch(() => null);
+          if (current && current === this.lastSubmitFrameHash) return false;
+        }
         const frame = await hc.contentFrame();
         const prompt = frame && await frame.$('.prompt-text');
         if (prompt && await prompt.isVisible().catch(() => false)) {
@@ -952,6 +1313,16 @@ export class CaptchaKrakenSolver {
       }
       const rc = await page.$('iframe[src*="recaptcha/api2/bframe"]');
       if (rc && await rc.isVisible().catch(() => false)) {
+        // The SAME gate as hCaptcha above, and for the same reason. reCAPTCHA
+        // also leaves the answered board on screen while it verifies, and its
+        // instructions stay visible throughout — so "instructions are showing"
+        // fired on the closing frame and reported a fresh round that was not
+        // coming. This branch simply never got the fix when the hCaptcha one
+        // did.
+        if (this.lastSubmitFrameHash) {
+          const current = await this.elementFrameHash(rc).catch(() => null);
+          if (current && current === this.lastSubmitFrameHash) return false;
+        }
         const frame = await rc.contentFrame();
         const instr = frame && await frame.$('.rc-imageselect-instructions, #rc-imageselect');
         if (instr && await instr.isVisible().catch(() => false)) return true;
@@ -983,7 +1354,10 @@ export class CaptchaKrakenSolver {
 
       // Prompt must be present and non-empty first — it's the cheapest signal
       // that the challenge frame has rendered its content at all.
-      await frame.waitForSelector('.prompt-text', { state: 'visible', timeout: 8000 });
+      await frame.waitForSelector('.prompt-text', {
+        state: 'visible',
+        timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000,
+      });
 
       // Then wait for the actual imagery to load. Grid tiles expose a
       // background-image; click/drag puzzles expose a canvas or example image.
@@ -1006,8 +1380,18 @@ export class CaptchaKrakenSolver {
         const example = document.querySelector(
           '.challenge-example img, .image-wrapper img',
         ) as HTMLImageElement | null;
-        return !!(example && example.complete && example.naturalWidth > 0);
-      }, { timeout: 8000 });
+        if (example) return example.complete && example.naturalWidth > 0;
+        // NOTHING TO WAIT FOR IS READY. This used to be
+        // `return !!(example && ...)`, false when there was no example image at
+        // all — so a challenge with no tile grid, no canvas and no example
+        // polled out the whole timeout and then carried on regardless.
+        // Measured in the Python port, which had the identical clause: 24.0s of
+        // a 45.2s solve, the full window three times, spent asking about
+        // elements that were not on the page. A gate can only report on what it
+        // can see; with nothing to check it has no opinion, and no opinion must
+        // not read as "not ready".
+        return true;
+      }, { timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000 });
     } catch {
       // Timed out or frame detached mid-load; fall through to the screenshot.
     }
@@ -1043,6 +1427,24 @@ export class CaptchaKrakenSolver {
     // hCaptcha checkbox or challenge frame present (visible or not yet).
     if (await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]')) return true;
     if (await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]')) return true;
+
+    // The eight inline vendors, same table detectCaptcha uses. Without them
+    // this answered "no widget" for every GeeTest / Yidun / Yandex / Lemin /
+    // Prosopo / MTCaptcha / BotDetect / Tencent page whose puzzle had not
+    // painted yet — and the caller reads that as "reCAPTCHA v3 / invisible"
+    // and throws "No interactive captcha widget detected. Failing fast." in
+    // under a second, instead of granting the render wait this method exists
+    // to grant. The Python port has no such fail-fast, so the two ports
+    // disagreed on every inline vendor (CLAUDE.md 1c) and Tier 3 scored it as
+    // an unsolvable puzzle on the JS side only.
+    //
+    // Presence, not visibility — "in the DOM but not finished rendering" is
+    // the entire question here; detectCaptcha still does the visibility check.
+    for (const { selectors } of VENDOR_WIDGET_LOCATORS) {
+      for (const selector of selectors) {
+        if (await page.$(selector)) return true;
+      }
+    }
 
     return false;
   }
@@ -1235,7 +1637,7 @@ export class CaptchaKrakenSolver {
    * is missing — callers that must not throw (e.g. runCliTool) wrap this.
    */
   private resolveCli(): { cliRoot: string; py: string } {
-    const { repoPath, pythonCommand = 'python' } = this.config;
+    const { repoPath, pythonCommand } = this.config;
     const cliRoot = repoPath ?? getBundledCliRoot();
     if (!fs.existsSync(cliRoot)) {
       throw new Error(
@@ -1243,7 +1645,15 @@ export class CaptchaKrakenSolver {
         `If you installed from npm, ensure the package ships 'python/'.`
       );
     }
-    const py = getVenvPython(cliRoot) ?? pythonCommand;
+    // Was `getVenvPython(cliRoot) ?? 'python'`. Debian-family systems have no
+    // bare `python`, so with no bundled venv every solve died at
+    // `/bin/sh: 1: python: not found` — before reaching the model, and only on
+    // the JS side, which made it read as an endpoint fault. See python-command.ts.
+    const py = resolvePythonCommand({
+      configured: pythonCommand,
+      venvPython: getVenvPython(cliRoot),
+      exists: commandExists,
+    });
     return { cliRoot, py };
   }
 
@@ -1405,7 +1815,34 @@ export class CaptchaKrakenSolver {
     try {
       while (Date.now() - start < timeout) {
         const f = tmp();
-        await captchaElement.screenshot({ path: f });
+        /*
+         * AN EXPLICIT, SHORT TIMEOUT — and the loop's own budget is not one.
+         *
+         * Playwright defaults to 30s and waits for the element to be visible
+         * and stable first. Right after the grid driver clicks Verify, this
+         * element is a challenge iframe the vendor is tearing down, so that
+         * wait runs to the full default. The `while` above is consulted only
+         * BETWEEN iterations, so one hung screenshot sails straight past the
+         * 8s cap it looks protected by: measured live, submit at 24.5s and the
+         * solved verdict at 64.7s, a 38.5s tail on a solve whose real work took
+         * twelve seconds — paid on every multi-round reCAPTCHA.
+         *
+         * waitForElementSettled already carries this fix and the note
+         * explaining it; this poll was written in the same shape without it.
+         */
+        const left = timeout - (Date.now() - start);
+        try {
+          await captchaElement.screenshot({
+            path: f,
+            timeout: Math.max(500, Math.min(2500, left)),
+            animations: 'disabled',
+          });
+        } catch {
+          // The challenge cannot be photographed: it is gone or going. There is
+          // no grid here to finish loading, so stop rather than spend the rest
+          // of the budget proving it again.
+          return false;
+        }
         frames.push(f);
 
         if (frames.length >= 2) {
@@ -1483,7 +1920,9 @@ export class CaptchaKrakenSolver {
   ): Promise<{ boxes: number[][]; size: 3 | 4; screenshotW: number; screenshotH: number } | null> {
     const f = path.join(os.tmpdir(), `findgrid_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
     try {
-      await captchaElement.screenshot({ path: f });
+      // Explicit timeout — the challenge may be mid-teardown and Playwright's
+      // 30s default waits for it to go stable. See screenshot-timeouts.test.ts.
+      await captchaElement.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
       const res = await this.runCvTool('find-grid', { image: f }, ['find-grid', f]);
       if (!Array.isArray(res) || (res.length !== 9 && res.length !== 16)) {
         return null;
@@ -1597,22 +2036,42 @@ export class CaptchaKrakenSolver {
   }
 
   /**
-   * Detect whether any tiles are blank or fading, watching for the ONSET of the
-   * reCAPTCHA refresh over a short grace window. The blank/fade transition lags
-   * the click by a beat, so a single snapshot right after clicking misses it
-   * (the tile still shows its old image — not yet white, not yet changing). We
-   * poll consecutive frames and mark a cell loading if it is `empty` (≥97%
-   * near-white) OR `changing` (>2% pixels differ). HOVERS a clicked tile each
-   * poll so the mouse keeps moving (no unnatural pauses). Returns the loading
-   * cells (priority/clicked first) as soon as any appears, or [] if the whole
-   * window passes with nothing loading (→ solved). Logs every poll + frame.
+   * Watch the just-clicked tiles until the widget says what it did with them.
+   *
+   * Two answers because reCAPTCHA gives a click one of exactly two replies, and
+   * they are the two kinds of board:
+   *
+   *   - `chipped`: the small blue chip landed in the tiles' top-left corners —
+   *     the photos were KEPT. Nothing is on its way in, the selection is the
+   *     answer, and the caller should press Verify.
+   *   - `loading`: the photos are blanking or dissolving under a large centred
+   *     check — those tiles are being SWAPPED, and what lands may match too, so
+   *     the board has to be read again.
+   *
+   * A widget that swaps one clicked cell swaps them all, so the two never share
+   * a board and one look at the tiles we just clicked settles it. The chip is
+   * what the CV layer reports as `selected` (top-left corner only, behind a
+   * circularity and a centroid test a centred check fails), and we already read
+   * it on every poll. `chipped` needs EVERY watched tile: a partial reading is a
+   * misread, and calling a swapping board finished submits half an answer and
+   * burns the attempt, where calling a chipped board unfinished costs one
+   * inference.
+   *
+   * The blank/fade transition lags the click by a beat, so a single snapshot
+   * right after clicking misses it (the tile still shows its old image — not yet
+   * white, not yet changing). We poll consecutive frames and mark a cell loading
+   * if it is `empty` (≥97% near-white) OR `changing` (>2% pixels differ). HOVERS
+   * a clicked tile each poll so the mouse keeps moving (no unnatural pauses).
+   * Returns as soon as either verdict is in, or `{loading: [], chipped: false}`
+   * if the whole window passes with nothing happening (→ solved). Logs every
+   * poll + frame.
    */
-  private async currentLoadingCells(
+  private async watchClickedTiles(
     page: Page,
     captchaElement: ElementHandle,
     session: GridSession,
     priority: number[] = [],
-  ): Promise<number[]> {
+  ): Promise<{ loading: number[]; chipped: boolean }> {
     const grace = this.config.recaptchaFadeOnsetGraceMs ?? 4000;
     const interval = this.config.recaptchaDynamicFadePollMs ?? 250;
     const start = Date.now();
@@ -1627,7 +2086,13 @@ export class CaptchaKrakenSolver {
     let hoverIdx = 0;
     try {
       const first = tmp();
-      await captchaElement.screenshot({ path: first });
+      try {
+        await captchaElement.screenshot({ path: first, timeout: 2500, animations: 'disabled' });
+      } catch {
+        // Cannot photograph the challenge: it is gone or going, so no tile is
+        // loading and none was chipped. Same verdict as an empty window.
+        return { loading: [], chipped: false };
+      }
       frames.push(first);
       this.gridDebug('fade-onset:baseline', {}, first);
 
@@ -1645,7 +2110,16 @@ export class CaptchaKrakenSolver {
         const elapsed = Date.now() - iterStart;
         if (elapsed < interval) await delay(interval - elapsed);
         const f = tmp();
-        await captchaElement.screenshot({ path: f });
+        /*
+         * Explicit timeout: this element is a challenge iframe that may be
+         * mid-teardown, and Playwright's 30s default waits for it to become
+         * stable first. See screenshot-timeouts.test.ts.
+         */
+        try {
+          await captchaElement.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+        } catch {
+          break; // challenge gone — let the post-loop verdict stand
+        }
         frames.push(f);
         polls++;
 
@@ -1664,21 +2138,30 @@ export class CaptchaKrakenSolver {
           empty: st?.empty ?? null, changing: st?.changing ?? null,
           loaded: st?.loaded ?? null, selected: st?.selected ?? null,
         }, b);
+        // Chip first: a chip landing on a tile ZOOMS its photo out, which reads
+        // as `changing` on the very frame that shows the chip. Test the swap
+        // first and every chipped board looks like a swapping one for as long as
+        // that animation runs.
+        const selected = st?.selected ?? [];
+        if (priority.length && priority.every(c => selected.includes(c))) {
+          this.gridDebug('fade-onset:chipped', { chipped: priority, afterMs: Date.now() - start });
+          return { loading: [], chipped: true };
+        }
         const loading = [...new Set([...emptyW, ...changingW])];
         if (loading.length) {
           const ordered = this.orderByPriority(loading, priority);
           this.gridDebug('fade-onset:loading-detected', { loading: ordered, afterMs: Date.now() - start });
-          return ordered;
+          return { loading: ordered, chipped: false };
         }
 
         const stale = frames.shift();
         if (stale && fs.existsSync(stale)) fs.unlinkSync(stale);
       }
       this.gridDebug('fade-onset:none', { afterMs: Date.now() - start, polls });
-      return [];
+      return { loading: [], chipped: false };
     } catch (e) {
       this.gridDebug('fade-onset:error', { error: String(e) });
-      return [];
+      return { loading: [], chipped: false };
     } finally {
       for (const f of frames) {
         if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
@@ -1723,7 +2206,16 @@ export class CaptchaKrakenSolver {
         const elapsed = Date.now() - iterStart;
         if (elapsed < interval) await delay(interval - elapsed);
         const f = tmp();
-        await captchaElement.screenshot({ path: f });
+        /*
+         * Explicit timeout: this element is a challenge iframe that may be
+         * mid-teardown, and Playwright's 30s default waits for it to become
+         * stable first. See screenshot-timeouts.test.ts.
+         */
+        try {
+          await captchaElement.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+        } catch {
+          break; // challenge gone — nothing left to wait for
+        }
         frames.push(f);
 
         if (frames.length >= 2) {
@@ -1771,7 +2263,13 @@ export class CaptchaKrakenSolver {
    * and on a `wait`, it hovers the just-clicked / currently blank+fading tiles
    * (in click order) and waits for at least one to finish reloading before
    * re-screenshotting and re-solving — so we don't burn a solver call on a grid
-   * that's still mid-fade. It submits only on `done`.
+   * that's still mid-fade.
+   *
+   * Only a board that SWAPS a clicked tile out is worth those extra rounds. One
+   * that ticks the tile and keeps the photo has been fully answered by the round
+   * that clicked it — same as the 4x4 — so `watchClickedTiles` reports the chip
+   * and this submits there and then. Rounds 2..N exist for the fading board and
+   * nothing else. It submits on `done`, and on a board that ticked our clicks.
    *
    * Returns the same shape as solveSingle so the outer solve loop — including the
    * under-selection retry and post-solve detectCaptcha — wraps it unchanged.
@@ -1814,7 +2312,16 @@ export class CaptchaKrakenSolver {
       // 1. Settle and screenshot.
       await this.waitForGridCellsLoaded(captchaElement);
       const shotA = path.join(os.tmpdir(), `recap_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-      await captchaElement.screenshot({ path: shotA });
+      try {
+        // Explicit timeout — after a Verify this element is being torn down,
+        // and the 30s default waits for it to go stable first. See
+        // screenshot-timeouts.test.ts.
+        await captchaElement.screenshot({ path: shotA, timeout: 2500, animations: 'disabled' });
+      } catch {
+        // The board is gone. Stop driving rounds and let the outer loop
+        // re-detect — which, having interacted, reads "nothing left" as solved.
+        break;
+      }
       this.saveImageForDebug(shotA);
       // Per-round boundary snapshot for onStep observers. Round 1's snapshot is
       // the baseline (pre-action) for the 3x3 dynamic path.
@@ -1868,8 +2375,8 @@ export class CaptchaKrakenSolver {
         // Tiles are still loading; the CLI explicitly told us NOT to submit.
         // Find what's loading, hover it, and wait for at least one to settle.
         console.log(`[recaptcha-grid] round ${round}: CLI says wait (${(action as any).duration_ms ?? 0}ms).`);
-        const loadingCells = await this.currentLoadingCells(page, captchaElement, session, clickedOrder);
-        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loadingCells);
+        const { loading } = await this.watchClickedTiles(page, captchaElement, session, clickedOrder);
+        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading);
         continue;
       }
 
@@ -1902,23 +2409,25 @@ export class CaptchaKrakenSolver {
         this.gridDebug(`round-${round}:clicked`, { bboxes, clickedThisRound });
         await this.emitStep(captchaElement, 'click', `round-${round}:clicked ${bboxes.length} tile(s)`, 'recaptcha', 'challenge', attempt, { round, clickedThisRound, bboxes });
 
-        // 5. The clicked tiles may go blank / fade out for a replacement
-        //    (dynamic puzzle), or they may just stay checked (the puzzle is
-        //    fully solved). reCAPTCHA's blank/fade transition lags the click, so
-        //    we watch a grace window (not a single instant-after snapshot).
-        const loadingCells = await this.currentLoadingCells(page, captchaElement, session, clickedThisRound);
-        if (!loadingCells.length) {
-          // Nothing is loading/fading within the grace window → the model fully
-          // solved it; submit immediately rather than burning another round.
-          console.log(`[recaptcha-grid] round ${round}: no tiles loading after click; submitting.`);
-          this.gridDebug(`round-${round}:no-loading-submit`, {});
+        // 5. The clicked tiles either wear the chip (the widget kept the photo:
+        //    this board is answered) or go blank / fade out for a replacement
+        //    (dynamic puzzle: read it again). reCAPTCHA's reply lags the click,
+        //    so we watch a grace window, not a single instant-after snapshot.
+        const { loading, chipped } = await this.watchClickedTiles(page, captchaElement, session, clickedThisRound);
+        if (chipped || !loading.length) {
+          // Either the widget ticked our clicks and kept the photos — a board
+          // that does that is fully answered by the round that clicked it — or
+          // nothing loaded within the grace window. Submit rather than paying
+          // for another round to be told the same thing.
+          console.log(`[recaptcha-grid] round ${round}: ${chipped ? 'tiles chipped' : 'no tiles loading'} after click; submitting.`);
+          this.gridDebug(`round-${round}:${chipped ? 'chipped-submit' : 'no-loading-submit'}`, {});
           shouldSubmit = true;
           break;
         }
         // Tiles are reloading — wait (while hovering) for at least one to settle
         // before re-solving, so we don't feed the model a mid-fade grid.
-        console.log(`[recaptcha-grid] round ${round}: tiles loading ${JSON.stringify(loadingCells)}; waiting.`);
-        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loadingCells);
+        console.log(`[recaptcha-grid] round ${round}: tiles loading ${JSON.stringify(loading)}; waiting.`);
+        await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading);
         continue;
       }
 
@@ -1928,8 +2437,9 @@ export class CaptchaKrakenSolver {
     }
 
     // Submit: click Verify if present (no-op if the grid is gone). Only when the
-    // CLI signalled `done` — never on a timeout/round-cap exit, which leaves the
-    // outer loop to re-detect and decide.
+    // CLI signalled `done` or the widget chipped our clicks — never on a
+    // timeout/round-cap exit, which leaves the outer loop to re-detect and
+    // decide.
     if (shouldSubmit) {
       const frame = await captchaElement.contentFrame();
       if (frame) {
@@ -1938,6 +2448,12 @@ export class CaptchaKrakenSolver {
           console.log('[recaptcha-grid] clicking Verify to submit.');
           await this.moveAndClick(page, verifyButton);
           await this.emitStep(captchaElement, 'submit', 'submitted (Verify)', 'recaptcha', 'challenge', attempt);
+          // Snapshot the submitted frame, exactly as the one-shot path does.
+          // Without it isChallengeFreshlyRendered reads the CLOSING board as a
+          // fresh round, breaks the post-submit solved-poll on its first tick,
+          // and commits the solver to a full re-detect against a dying iframe —
+          // measured at 13s per solve, on top of a 12s solve.
+          this.lastSubmitFrameHash = await this.elementFrameHash(captchaElement).catch(() => null);
         }
       }
     }
@@ -1974,7 +2490,16 @@ export class CaptchaKrakenSolver {
         await captchaElement.screenshot({
           path: frame,
           timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
-          animations: 'disabled',
+          // ANIMATIONS STAY ON. Everywhere else in this file screenshots are
+          // taken with animations: 'disabled', which is right when the goal is
+          // a stable still — it fast-forwards finite animations and FREEZES
+          // infinite ones. Here the motion IS the subject, so freezing it
+          // records the same picture forty times: GeeTest's svg board cycles in
+          // CSS, and the slicer correctly reported the burst as `mode=static`
+          // and cut it down to a single keyframe, putting us back to answering
+          // a still. hCaptcha's animated challenges hid this because they
+          // animate in canvas, which that flag does not touch.
+          animations: 'allow',
         });
         captured++;
       } catch {
@@ -2011,11 +2536,14 @@ export class CaptchaKrakenSolver {
    * recordings of the same widget are never byte-identical anyway.
    */
   private async getAnimatedSolution(framesDir: string): Promise<CliResponse> {
+    // resolveCli() FIRST: the default model is read out of the bundled engine's
+    // models.json, so the name and the prompt generation it selects come from
+    // the same place the Python port reads them. See model-name.ts.
+    const { cliRoot, py } = this.resolveCli();
     const {
-      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
+      model = resolveLoraName({ cliRoot }),
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
-    const { cliRoot, py } = this.resolveCli();
 
     const args = [
       '-m', 'captchakraken.cli', 'solve-animated',
@@ -2023,18 +2551,24 @@ export class CaptchaKrakenSolver {
       '--fps', String(this.config.videoBurstFps ?? 10),
       '--model', model,
     ];
-    if (apiKey) args.push('--api-key', apiKey);
+    // NOT `args.push('--api-key', apiKey)`: a flag value is argv just as much as
+    // a positional is, and argv is world-readable on Linux. Env, same as the
+    // still-image path.
 
     try {
       // execFile (no shell): the temp dir path is ours but still goes through
       // literally, with no quoting hazard.
       const { stdout, stderr } = await execFileAsync(py, args, {
         cwd: cliRoot,
-        env: cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+        env: solveEnv(
+          cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+          apiKey,
+        ),
         maxBuffer: 10 * 1024 * 1024,
       });
       if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
       const parsed = JSON.parse(stdout.trim());
+      this.keyframeMode = parsed.keyframe_mode ?? null;
       console.log(
         `[animated] ${parsed.source_frames} frames -> ${(parsed.keyframes ?? []).length} `
         + `keyframe(s) (mode=${parsed.keyframe_mode})`,
@@ -2070,6 +2604,17 @@ export class CaptchaKrakenSolver {
    *
    * Never throws. Returns whether the state was reached; on timeout the caller
    * clicks anyway (see `keyframeWaitTimeoutMs`).
+   *
+   * NOT ATTEMPTED on an `even` clip. The slicer picks that mode precisely when
+   * the clip never revisits a picture it has already shown — a rotation, a
+   * one-way fade, a sprite crossing — so there is no state to come back to and
+   * this can only run out its full 6s, PER CLICK, before clicking the
+   * coordinates it already had. It is also the normal case, not a corner: all
+   * 116 real clips under cleanSamples/test/raw are `even` and `cycle` has never
+   * fired on real footage. Measured on hcaptcha_rotating_obj_video: 6.0s of a
+   * 28.8s solve, closest region diff 0.0721 against a 0.05 tolerance, then the
+   * same click, then solved. Kept for `cycle`/`static`, where the state does
+   * come back and waiting is the difference between the sprite and background.
    */
   private async waitForKeyframe(
     captchaElement: ElementHandle,
@@ -2077,6 +2622,13 @@ export class CaptchaKrakenSolver {
     cx: number,
     cy: number,
   ): Promise<boolean> {
+    if (this.keyframeMode === 'even') {
+      console.log(
+        '[animated] clip is mode=even (no state recurs); '
+        + "acting on the model's frame without waiting",
+      );
+      return false;
+    }
     const timeout = this.config.keyframeWaitTimeoutMs ?? 6000;
     const interval = this.config.keyframeWaitPollMs ?? 120;
     const deadline = Date.now() + timeout;
@@ -2115,74 +2667,187 @@ export class CaptchaKrakenSolver {
     return false;
   }
 
-  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null): Promise<CliResponse> {
-    // v2 ships a single provider: the JobHarvest vLLM server via the bundled
+  /**
+   * Per-solve state that must not leak into the next challenge on the page.
+   *
+   * A repeat is a fact about ONE challenge. Carrying it forward would make the
+   * captcha after a cycling one record a burst it does not need.
+   */
+  private resetSolveState(): void {
+    this.solutionCache.clear();
+    this.repeatedAnswerSeen = false;
+    this.lastSubmitFrameHash = null;
+    this.keyframeMode = null;
+    this.lastAnswerSig = null;
+    this.noProgressRounds = 0;
+  }
+
+  /**
+   * A stable identity for "the answer this round is about to execute".
+   *
+   * Keyed on the retry mode too: the missed-tiles retry deliberately re-asks
+   * about the same board and its answer legitimately overlaps the previous one,
+   * so counting that as a repeat would abandon the one path built to recover
+   * from an under-selection.
+   *
+   * Coordinates are ROUNDED rather than compared exactly — the same tile chosen
+   * twice can differ in the last float digit after the normalise/clamp
+   * round-trip, and a repeat that reads as "different" is a repeat that costs a
+   * round. Returns null when the answer cannot be summarised, which counts as
+   * "not a repeat": an unreadable answer must never be why a solve is
+   * abandoned. Mirrors page_solver.py `_answer_signature`.
+   */
+  private static answerSignature(actions: any[], retryMode: string | null): string | null {
+    const round3 = (v: any): any => {
+      if (typeof v === 'number') return Math.round(v * 1000) / 1000;
+      if (Array.isArray(v)) return v.map(round3);
+      return v ?? null;
+    };
+    try {
+      return JSON.stringify([retryMode ?? null, actions.map((a: any) => [
+        a?.action ?? null,
+        round3(a?.target_bounding_boxes),
+        round3(a?.target_bounding_box),
+        round3(a?.target_coordinates),
+        round3(a?.source_bounding_box),
+        a?.text ?? null,
+      ])]);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Count consecutive identical answers; see `maxNoProgressRounds`. */
+  private noteAnswer(actions: any[], retryMode: string | null): void {
+    const sig = CaptchaKrakenSolver.answerSignature(actions, retryMode);
+    if (sig !== null && sig === this.lastAnswerSig) {
+      this.noProgressRounds++;
+      console.log(
+        `[no-progress] the model returned the same answer again `
+        + `(${this.noProgressRounds}/${this.config.maxNoProgressRounds ?? 2}) — `
+        + `the previous one already ran and changed nothing`,
+      );
+      // A board that reads the same every round is the signature of a CYCLING
+      // challenge answered as a still. Let the recording path have a go before
+      // giving up on the solve entirely.
+      this.repeatedAnswerSeen = true;
+    } else {
+      this.noProgressRounds = 0;
+      this.lastAnswerSig = sig;
+    }
+  }
+
+  /**
+   * The answer for this picture, asking the model only if we have not already.
+   *
+   * The cache saving is real and is kept: a byte-identical picture costs no
+   * second inference. What changed is what a hit MEANS. It used to mean
+   * "nothing has changed, so this answer still stands"; it actually means the
+   * answer already ran and moved nothing, because every answer this returns is
+   * executed. So the hit is served (it is free) and recorded, and the round
+   * after it stops guessing at a still frame — see `shouldRetryAsAnimated`.
+   */
+  private async answerFor(cacheKey: string, ask: () => Promise<CliResponse>): Promise<CliResponse> {
+    const cached = this.solutionCache.get(cacheKey);
+    if (cached) {
+      console.log(
+        '[dedup] this exact picture was already answered and the answer already ran — '
+        + 'the challenge is cycling, not still; re-solving it as animated.',
+      );
+      this.repeatedAnswerSeen = true;
+      // Reuse the actions but drop the token usage (no new tokens were spent).
+      return { actions: cached.actions, token_usage: [] };
+    }
+    const fresh = await ask();
+    this.solutionCache.set(cacheKey, fresh);
+    return fresh;
+  }
+
+  /**
+   * Should this round be recorded and solved from keyframes instead of read as
+   * a still?
+   *
+   * reCAPTCHA is excluded deliberately. Its dynamic 3x3 REPLACES tiles in place
+   * and has its own multi-round driver with its own fade gates; its grids are
+   * never animated, so escalating there would swap a path that works for one
+   * that cannot read a grid.
+   */
+  private shouldRetryAsAnimated(puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown'): boolean {
+    if (!this.repeatedAnswerSeen) return false;
+    if (puzzleSource === 'recaptcha') return false;
+    return this.config.videoSolveEnabled !== false;
+  }
+
+  private async getSolution(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
+    // v2 ships a single provider: the CaptchaKraken vLLM server via the bundled
     // CaptchaKraken CLI. The CLI's planner reads VLLM_BASE_URL and the bearer
     // token (CAPTCHA_KRAKEN_API_KEY, falling back to VLLM_API_KEY) from the
     // environment; we also forward the key explicitly as a CLI arg below so it
-    // works even when the subprocess doesn't inherit it.
-    const {
-      // vLLM LoRA name. Defaults to the full-puzzle `captcha` adapter
-      // (JobHarvest/qwen3.5-9b-captcha-lora — solves grids AND click/drag/pixel
-      // puzzles). Override in code or via CAPTCHA_LORA_NAME (e.g. `captcha-grid`
-      // for the older grids-only adapter). Most users only set the endpoint URL
-      // and, for the hosted API, CAPTCHA_KRAKEN_API_KEY.
-      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
-      apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
-    } = this.config;
+    // works even when the subprocess doesn't inherit it. The LoRA name defaults
+    // to whatever models.json calls `latest` — NOT a literal; a hardcoded
+    // `captcha` here is what sent generation-1 prompts to a generation-2
+    // adapter. Override via CAPTCHA_LORA_NAME.
 
-    // Dedup: if we've already asked the model about a byte-identical screenshot
-    // under the same prompt (puzzle source + retry mode), the page hasn't
-    // changed and another vLLM call would be wasted work. Reuse the answer.
-    // The image bytes ARE the cache key — any real page change (tile refresh,
-    // new challenge, fade) alters pixels and misses the cache, so this never
-    // stales a genuinely-changed puzzle.
+    // Dedup on the screenshot's bytes under the same prompt (puzzle source +
+    // retry mode). A hit costs no inference; what it MEANS is answerFor's job,
+    // and it is not "nothing changed" — see the note on repeatedAnswerSeen.
     let cacheKey: string | null = null;
     try {
       const imgHash = createHash('sha1').update(fs.readFileSync(imagePath)).digest('hex');
-      cacheKey = `${imgHash}|${puzzleSource}|${retryMode ?? ''}`;
-      const cached = this.solutionCache.get(cacheKey);
-      if (cached) {
-        console.log('[dedup] identical screenshot already solved this session — skipping vLLM query.');
-        // Reuse the actions but drop the token usage (no new tokens were spent).
-        return { actions: cached.actions, token_usage: [] };
-      }
+      cacheKey = `${imgHash}|${puzzleSource}|${retryMode ?? ''}|${textMode ? 'text' : ''}`;
     } catch {
       cacheKey = null; // hashing failed — fall through to a normal query
     }
+    if (cacheKey) return this.answerFor(cacheKey, () => this.askModel(imagePath, puzzleSource, retryMode, textMode));
+    return this.askModel(imagePath, puzzleSource, retryMode, textMode);
+  }
 
+  /** One inference: build the CLI invocation, run it, parse what comes back. */
+  private async askModel(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
+    // resolveCli() FIRST — see getAnimatedSolution.
     const { cliRoot, py } = this.resolveCli();
+    const {
+      model = resolveLoraName({ cliRoot }),
+      apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
+    } = this.config;
 
-    const cmdParts = [
-      py,
-      '-m',
-      'captchakraken.cli',
-      `"${imagePath}"`,
+    // An ARGV ARRAY for execFile, not a string for a shell.
+    //
+    // This was `cmdParts.join(' ')` handed to `exec`, so the bearer token sat in
+    // argv — world-readable at /proc/<pid>/cmdline for the life of the solve —
+    // and the same string was then printed to stdout, putting it in CI logs and
+    // scrollback. The key now travels in the environment (see cli-invocation.ts),
+    // and dropping the shell also removes the quoting hazard: `"${imagePath}"`
+    // was hand-quoted, which a path containing a quote defeats.
+    //
+    // The vendor hint goes on as --puzzle-source=<vendor>; the CLI's argparse
+    // falls through to the flag form for unknown trailing args.
+    const args = buildSolveArgs({
+      imagePath,
       model,
-      'captchaKrakenApi',
-    ];
+      puzzleSource,
+      retryMode,
+      // The DOM said this puzzle has a text box, so the CLI must send the
+      // distorted-text prompt and skip grid detection. The picture alone cannot
+      // decide this — see the textMode note in solveSingle.
+      textMode,
+    });
 
-    if (apiKey) {
-      cmdParts.push(apiKey);
-    }
-
-    // Always pass the vendor hint at the end as --puzzle-source=<vendor>; the
-    // CLI's argparse falls through to the flag form for unknown trailing args.
-    cmdParts.push(`--puzzle-source=${puzzleSource}`);
-    if (retryMode) {
-      cmdParts.push(`--retry-mode=${retryMode}`);
-    }
-
-    const command = cmdParts.join(' ');
-    console.log(`Executing CaptchaKraken CLI: ${command}`);
+    console.log(
+      `Executing CaptchaKraken CLI: ${redactCommand([py, ...args].join(' '), apiKey)}`
+    );
 
     try {
-      const { stdout, stderr } = await execAsync(command, {
+      const { stdout, stderr } = await execFileAsync(py, args, {
         cwd: cliRoot,
         // Only this call reaches the model, so it's the only one that needs the
         // session id — the other cliEnv() call sites run pure-OpenCV subcommands
-        // that never touch the inference endpoint.
-        env: cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+        // that never touch the inference endpoint. `solveEnv` adds the bearer
+        // token here, which is what keeps it out of argv.
+        env: solveEnv(
+          cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
+          apiKey,
+        ),
         maxBuffer: 10 * 1024 * 1024 // Increase buffer for large outputs if needed
       });
 
@@ -2222,11 +2887,8 @@ export class CaptchaKrakenSolver {
           }
         }
 
-        const response: CliResponse = { actions, token_usage: tokenUsage };
-        // Cache under the screenshot hash so a byte-identical re-query this
-        // session reuses this answer instead of hitting vLLM again.
-        if (cacheKey) this.solutionCache.set(cacheKey, response);
-        return response;
+        // Caching is answerFor's, so that what a hit MEANS lives in one place.
+        return { actions, token_usage: tokenUsage };
       } catch (parseError) {
         throw new Error(`Failed to parse CLI output: ${stdout}\nStderr: ${stderr}`);
       }
@@ -2307,7 +2969,7 @@ export class CaptchaKrakenSolver {
           `freshsolve_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
         );
         try {
-          await captchaElement.screenshot({ path: fresh });
+          await captchaElement.screenshot({ path: fresh, timeout: 2500, animations: 'disabled' });
         } catch {
           break; // can't grab a fresh frame — act on the answer we have.
         }
@@ -2482,7 +3144,7 @@ export class CaptchaKrakenSolver {
   /**
    * Run `fn` (typically the model query) while idly drifting the cursor over
    * the captcha, so the mouse behaves like a human weighing the options instead
-   * of freezing during inference. Uses the same cursory-ts trajectories as real
+   * of freezing during inference. Uses the same generate_trajectory paths as real
    * clicks; cancelled the instant `fn` resolves. Best-effort — any wander error
    * is swallowed and never fails the solve. Disable via config.idleMouseWander.
    */
@@ -2567,7 +3229,7 @@ export class CaptchaKrakenSolver {
   }
 
   private async performSmoothMove(page: Page, x: number, y: number) {
-    // Generate trajectory using cursory-ts with 60Hz frequency for better control
+    // 60Hz sampling; see src/trajectory.ts
     const [points, timings] = generate_trajectory(
       [this.lastMousePosition.x, this.lastMousePosition.y],
       [x, y],
@@ -2706,5 +3368,234 @@ export class CaptchaKrakenSolver {
     await this.performSmoothMove(page, dst.x, dst.y);
     await page.waitForTimeout(Math.random() * 50 + 50);
     await page.mouse.up();
+  }
+
+  // ────────────────────────────────────────────────────────── typing + sliding
+  // Mirrors _find_control / _execute_type / _execute_slide in page_solver.py.
+
+  /**
+   * First VISIBLE match for `selectors`, tried in order.
+   *
+   * `scope` is the challenge frame, or — for the vendors that render into the
+   * host page rather than an iframe — the widget element itself. Never the
+   * page: the generic tail of both selector tables would otherwise happily
+   * match a login form's text box or a carousel's drag handle somewhere else on
+   * the document, and the answer would go there.
+   */
+  private async findControl(
+    scope: Frame | ElementHandle,
+    selectors: ReadonlyArray<string>,
+  ): Promise<ElementHandle | null> {
+    for (const selector of selectors) {
+      try {
+        const el = await scope.$(selector);
+        if (el && await el.isVisible()) return el;
+      } catch {
+        // A selector this adapter can't parse must not end the search.
+      }
+    }
+    return null;
+  }
+
+  /** Put the model's reading of a distorted-text captcha into its box. */
+  private async executeType(
+    page: Page,
+    scope: Frame | ElementHandle,
+    action: TypeAction,
+  ): Promise<boolean> {
+    const text = action.text ?? '';
+    if (!text) return false;
+    const field = await this.findControl(scope, TEXT_INPUT_SELECTORS);
+    if (!field) {
+      console.warn('Type action, but no text box in the widget; skipping.');
+      return false;
+    }
+
+    await this.moveAndClick(page, field);  // travel there, then press to focus
+    // A retry round arrives with the previous attempt still in the box, and
+    // typing would APPEND to it — submitting a string the model never read.
+    try {
+      await page.keyboard.press('Control+A');
+    } catch { /* an adapter without a keyboard shortcut path */ }
+    // Per character rather than one type(text, {delay}) call: a constant
+    // inter-key delay is itself a signal, and these are the vendors that score
+    // typing cadence.
+    for (const ch of text) {
+      try {
+        await page.keyboard.type(ch);
+      } catch (e) {
+        console.warn('Could not type into the captcha field:', e);
+        return false;
+      }
+      await page.waitForTimeout(Math.random() * 90 + 45);
+    }
+    console.log(`Typed ${text.length} character(s) into the captcha field.`);
+    return true;
+  }
+
+  /** `captchakraken track-piece` — box of what moved, handle masked out. */
+  private async trackPiece(
+    element: ElementHandle,
+    beforePath: string,
+    afterPath: string,
+    exclude: [number, number, number, number],
+  ): Promise<[number, number, number, number] | null> {
+    try {
+      await element.screenshot({
+        path: afterPath,
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      });
+      const res = await this.runCvTool(
+        'track-piece',
+        { before: beforePath, after: afterPath, exclude },
+        ['track-piece', beforePath, afterPath, JSON.stringify(exclude)],
+      );
+      return res && res.bbox ? res.bbox : null;
+    } catch (e) {
+      console.warn('track-piece failed:', e);
+      return null;
+    }
+  }
+
+  /**
+   * Drive a puzzle-piece slider until the PIECE reaches the model's slot.
+   *
+   * The model is asked for one thing here — the centre of the gap — because it
+   * is the only thing the picture can tell it. What it cannot know is how far
+   * the handle must travel to put the piece there: the handle is elsewhere on
+   * the widget, and the ratio between the two is a vendor implementation detail
+   * that several of them deliberately vary.
+   *
+   * So this is closed-loop, not a calculation. Press the handle, nudge it twice
+   * by known amounts, and watch the screen: union(before, after) spans the
+   * piece's ORIGINAL left edge to its CURRENT right edge, so its width is
+   * pieceWidth + ratio x nudge. Two nudges, two widths, two unknowns — solve for
+   * both, then steer the remaining distance and re-measure. The mouse is not
+   * released until the piece is home, because on every one of these puzzles
+   * releasing IS the submit; there is no Verify button to reconsider at.
+   *
+   * Returns false if there is nothing here to drag, leaving the caller's normal
+   * no-op handling to deal with it.
+   */
+  private async executeSlide(
+    page: Page,
+    element: ElementHandle,
+    scope: Frame | ElementHandle,
+    action: DragAction,
+    elementBox: { x: number, y: number, width: number, height: number },
+  ): Promise<boolean> {
+    const targetX = ((action.target_bounding_box[0] + action.target_bounding_box[2]) / 2)
+      * elementBox.width;
+
+    const handle = await this.findControl(scope, SLIDER_HANDLE_SELECTORS);
+    if (!handle) {
+      // No track — the sliderless members of the family (Lemin's "cropped")
+      // want the piece dragged directly. Same answer from the model, because
+      // the two look identical; different gesture. Nothing to close a loop on,
+      // since the piece is under the cursor and moves with it one for one.
+      const piece = await this.findControl(scope, DRAGGABLE_PIECE_SELECTORS);
+      const box = piece ? await piece.boundingBox() : null;
+      if (!box) {
+        console.warn('Slide action, but the widget has neither a slider nor a draggable piece.');
+        return false;
+      }
+      // BOTH axes. The rail members travel horizontally and nothing else, so
+      // the handle's own y is the only y there is — but a free drag carries the
+      // piece across the card, and holding the piece's row here slid it along
+      // the TRAY and released it there, well below the slot, every time.
+      const targetY = ((action.target_bounding_box[1] + action.target_bounding_box[3]) / 2)
+        * elementBox.height;
+      console.log('No slider track; dragging the piece to the slot directly.');
+      await this.performSmoothMove(page, box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.waitForTimeout(Math.random() * 50 + 50);
+      await this.performSmoothMove(page, elementBox.x + targetX, elementBox.y + targetY);
+      await page.waitForTimeout(Math.random() * 50 + 50);
+      await page.mouse.up();
+      return true;
+    }
+
+    const hbox = await handle.boundingBox();
+    if (!hbox) return false;
+    const startX = hbox.x + hbox.width / 2;
+    const holdY = hbox.y + hbox.height / 2;
+
+    // Mask the whole horizontal BAND the handle runs in, not just where it is
+    // now: it is about to move across that band, and most vendors fill the
+    // track behind it as it goes. Either would otherwise be the largest moving
+    // thing in frame, and we would track the handle instead of the piece.
+    const pad = Math.max(4, hbox.height * 0.35);
+    const exclude: [number, number, number, number] = [
+      0,
+      hbox.y - elementBox.y - pad,
+      elementBox.width,
+      hbox.y + hbox.height - elementBox.y + pad,
+    ];
+
+    const shots = Array.from({ length: 4 }, (_, i) =>
+      path.join(os.tmpdir(), `slide_${Date.now()}_${i}_${Math.floor(Math.random() * 1e9)}.png`));
+    try {
+      await this.move(page, handle, { paddingPercentage: 30 });
+      await page.mouse.down();
+      await page.waitForTimeout(Math.random() * 60 + 60);
+      await element.screenshot({
+        path: shots[0],
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      });
+
+      const widths: Array<[number, number]> = [];
+      let lastBox: [number, number, number, number] | null = null;
+      for (let i = 0; i < SLIDE_PROBE_OFFSETS_PX.length; i++) {
+        const offset = SLIDE_PROBE_OFFSETS_PX[i];
+        await this.performSmoothMove(page, startX + offset, holdY);
+        await page.waitForTimeout(Math.random() * 40 + 40);
+        const box = await this.trackPiece(element, shots[0], shots[i + 1], exclude);
+        if (box) {
+          widths.push([offset, box[2] - box[0]]);
+          lastBox = box;
+        }
+      }
+
+      const { pieceWidth, ratio } = solveSlideGeometry(widths, elementBox.width);
+      if (!lastBox || pieceWidth === null) {
+        // Never saw the piece — a canvas the screenshot cannot separate, a
+        // widget that redraws wholesale, or a press the handle refused. Fall
+        // back on the geometry every one of these puzzles shares: piece and
+        // handle both start flush left, so the handle's travel is the piece's.
+        console.warn('Slider: piece never resolved on screen; steering by handle travel alone.');
+        await this.performSmoothMove(page, startX + (targetX - (startX - elementBox.x)), holdY);
+      } else {
+        // The offset lastBox was MEASURED at — not the final probe, and not
+        // indexed by how many measurements succeeded. If the first probe failed
+        // to resolve and the second worked, those two disagree, and steering
+        // from a base the reading does not belong to sends the piece somewhere
+        // neither the model nor the screen asked for.
+        let offset = widths[widths.length - 1][0];
+        for (let i = 0; i < SLIDE_MAX_CORRECTIONS; i++) {
+          const pieceCentre = lastBox[2] - pieceWidth / 2;
+          const error = targetX - pieceCentre;
+          if (Math.abs(error) <= SLIDE_TOLERANCE_PX) break;
+          offset += error / ratio;
+          await this.performSmoothMove(page, startX + offset, holdY);
+          await page.waitForTimeout(Math.random() * 40 + 40);
+          const box = await this.trackPiece(element, shots[0], shots[3], exclude);
+          if (!box) break;  // ran out of track; release where we are
+          lastBox = box;
+        }
+      }
+
+      // Settle before letting go. A release in the same tick as the last move
+      // reads as a machine, and some vendors sample the final milliseconds of
+      // the gesture.
+      await page.waitForTimeout(Math.random() * 120 + 90);
+    } finally {
+      try { await page.mouse.up(); } catch { /* the page may have navigated */ }
+      for (const shot of shots) {
+        try { if (fs.existsSync(shot)) fs.unlinkSync(shot); } catch { /* best-effort */ }
+      }
+    }
+    return true;
   }
 }

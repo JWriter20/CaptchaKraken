@@ -12,12 +12,13 @@ export interface SolveStepEvent {
    * Coarse stage kind:
    *  - `initial`  : screenshot taken before any action (baseline)
    *  - `click`    : after a click (or batch of clicks) was executed
-   *  - `drag`     : after a drag was executed
+   *  - `drag`     : after a drag was executed (a slider counts as one)
+   *  - `type`     : after a distorted-text answer was typed into its box
    *  - `wait`     : after a CLI-requested wait elapsed
    *  - `submit`   : after the Verify/Next/Submit button was clicked
    *  - `round`    : a dynamic reCAPTCHA 3x3 round boundary (pre-solve snapshot)
    */
-  stage: 'initial' | 'click' | 'drag' | 'wait' | 'submit' | 'round';
+  stage: 'initial' | 'click' | 'drag' | 'type' | 'wait' | 'submit' | 'round';
   /** Short human label, e.g. "round-2:clicked 3 tile(s)". */
   label: string;
   /**
@@ -70,8 +71,13 @@ export interface CaptchaKrakenConfig {
    */
   pythonCommand?: string;
   /**
-   * vLLM LoRA name to invoke (default: 'captcha' — our bbox-aware LoRA).
-   * Override if you've registered a different module with the vLLM server.
+   * vLLM LoRA name to invoke.
+   *
+   * Defaults to whatever `models.json` calls `latest` (via CAPTCHA_LORA_NAME if
+   * set) — NOT a literal. The name selects the PROMPT GENERATION as well as the
+   * weights, so a constant here would pin the prompts to one generation while
+   * `latest` moved on. Override only if you've registered a different module
+   * with the vLLM server; see model-name.ts.
    */
   model?: string;
   /**
@@ -90,9 +96,31 @@ export interface CaptchaKrakenConfig {
    * Automatically re-check for newly opened / next-step captchas after each solve
    * attempt (e.g., clicking a checkbox opens an image challenge).
    *
-   * Default: 10
+   * The loop count that FITS inside overallSolveTimeoutMs, rather than one that
+   * needs policing by the clock: a round costs ~4-7s, so six rounds is the 45s
+   * budget. A backstop, not the normal way a hopeless solve ends — that is
+   * maxNoProgressRounds. Reaching this number is a bug report.
+   *
+   * Default: 6
    */
   maxSolveLoops?: number;
+
+  /**
+   * Consecutive rounds producing the SAME answer before the solve is abandoned.
+   *
+   * At temperature 0 the model is a function of the picture, so an identical
+   * answer means an identical picture — and every answer this driver produces is
+   * EXECUTED, so the previous one already ran and moved nothing. Repeating it
+   * cannot do better; it just spends a round.
+   *
+   * 2 rather than 1 because the first repeat also escalates to a RECORDING (see
+   * shouldRetryAsAnimated), which is the one recovery worth trying: a cycling
+   * board reads as a still and answers the same way every round. One more round
+   * buys that chance.
+   *
+   * Default: 2
+   */
+  maxNoProgressRounds?: number;
 
   /**
    * Delay (ms) after executing actions before re-detecting captchas.
@@ -105,7 +133,7 @@ export interface CaptchaKrakenConfig {
   /**
    * Overall time limit (ms) for the entire solve loop.
    *
-   * Default: 120000 (2 minutes)
+   * Default: 45000
    */
   overallSolveTimeoutMs?: number;
 
@@ -197,9 +225,27 @@ export interface CaptchaKrakenConfig {
    * soon as the solved signal appears avoids re-entering the solve pipeline on a
    * challenge frame that is merely animating closed.
    *
-   * Default: 4000
+   * That is the window's whole job, and it is why a WRONG answer spends all of
+   * it: the vendors emit nothing on a wrong answer, they just re-deal. So
+   * sizing it means asking how late a real SUCCESS can arrive — measured over
+   * 34 successful rounds across 20 puzzle types on the fixture server: p50
+   * 360ms, max 528ms. 1000ms is that worst case plus headroom for a vendor
+   * round-trip nobody has measured yet. Down from 2500, which was spent in full
+   * on every unsuccessful round.
+   *
+   * Default: 1000
    */
   postSolveOutcomeTimeoutMs?: number;
+
+  /**
+   * Poll interval (ms) inside that window.
+   *
+   * The success signals are polled, so detection latency is a MULTIPLE of this.
+   * Each poll is a couple of cheap DOM reads.
+   *
+   * Default: 75
+   */
+  postSolveOutcomePollMs?: number;
 
   /**
    * Guard against the captcha frame changing WHILE the model is generating.
@@ -248,6 +294,13 @@ export interface CaptchaKrakenConfig {
    * Default: 0.01
    */
   settleDiffThreshold?: number;
+
+  /**
+   * How long to wait for hCaptcha's task images to paint before screenshotting
+   * anyway. Best-effort by design — the screenshot happens either way — so it
+   * is bounded by what a loading tile plausibly costs. Default: 3000
+   */
+  hcaptchaImagesTimeoutMs?: number;
 
   /** Poll interval (ms) for the settle monitor. Default: 220 */
   settlePollMs?: number;
@@ -411,8 +464,21 @@ export interface ClickAction extends AnimatedActionFields {
 
 export interface DragAction extends AnimatedActionFields {
   action: 'drag';
-  source_bounding_box: [number, number, number, number];
+  /**
+   * Null on a PUZZLE-PIECE SLIDER. Not a missing field — the shape of the
+   * answer: what you grab (a handle, elsewhere on the widget) is not what has
+   * to arrive (the piece), and how far one moves the other is a vendor detail
+   * no picture reveals. The driver reads a null source as "find the slider and
+   * close the loop on the piece" (see executeSlide).
+   */
+  source_bounding_box: [number, number, number, number] | null;
   target_bounding_box: [number, number, number, number];
+}
+
+/** Distorted-text captchas: the answer is a string, not a place. */
+export interface TypeAction {
+  action: 'type';
+  text: string;
 }
 
 export interface DoneAction {
@@ -424,7 +490,7 @@ export interface WaitAction {
   duration_ms: number;
 }
 
-export type CaptchaAction = ClickAction | WaitAction | DragAction | DoneAction;
+export type CaptchaAction = ClickAction | WaitAction | DragAction | TypeAction | DoneAction;
 
 export type SolverResult = CaptchaAction | CaptchaAction[];
 

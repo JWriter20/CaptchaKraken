@@ -2,7 +2,7 @@
  * The tools.
  *
  * WHAT THIS SERVER IS FOR: letting an agent provision and watch its own captcha
- * solving. Sign the human in, mint a key for the Abyss model, report what has
+ * solving. Sign the human in, mint a key for the hosted endpoint, report what has
  * been spent, and hand over a payment link when the balance runs low. It does
  * not solve captchas — that is the gateway's OpenAI-compatible endpoint, and
  * the key minted here is what talks to it.
@@ -84,6 +84,13 @@ interface AccountResponse {
     balance_usd: string;
     low_balance_threshold: number | null;
     low_balance: boolean;
+    /**
+     * Optional because a control plane older than migration 0008 does not send
+     * them, and an MCP client is distributed — it meets whatever is deployed.
+     * Absent reads as "a normal account", which is the safe way to be wrong.
+     */
+    unlimited?: boolean;
+    is_admin?: boolean;
   };
   endpoint: { base_url: string; dashboard_url: string; requires_dev_header: boolean };
   credits_per_usd: number;
@@ -110,6 +117,8 @@ interface UsageResponse {
   ledger: Array<{ at: string; kind: string; delta_credits: number; usd_amount_cents: number | null }>;
   balance_credits: number;
   balance_usd: string;
+  /** Absent on a control plane older than migration 0008. */
+  unlimited?: boolean;
 }
 
 interface KeyListResponse {
@@ -315,9 +324,14 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
       try {
         const me = await api.request<AccountResponse>('/api/v1/me');
         const lines = [
-          `Account:   ${me.account.github_login ?? `#${me.account.user_id}`}`,
+          `Account:   ${me.account.github_login ?? `#${me.account.user_id}`}${me.account.is_admin ? ' (admin)' : ''}`,
           `Email:     ${me.account.email ?? '(none on file)'}`,
-          `Balance:   ${me.account.balance_usd} (${me.account.balance_credits.toLocaleString('en-US')} credits)`,
+          // An exempt account's balance is real and simply never spent. Printing
+          // it alone would have an agent reason about a number that cannot move,
+          // and offer top-ups against it.
+          me.account.unlimited
+            ? `Balance:   unlimited — this account is not billed for solves`
+            : `Balance:   ${me.account.balance_usd} (${me.account.balance_credits.toLocaleString('en-US')} credits)`,
           `Endpoint:  ${me.endpoint.base_url}`,
           `Dashboard: ${me.endpoint.dashboard_url}`,
         ];
@@ -347,6 +361,9 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     async () => {
       try {
         const me = await api.request<AccountResponse>('/api/v1/me');
+        if (me.account.unlimited) {
+          return text('unlimited — this account is not billed for solves');
+        }
         return text(
           `${me.account.balance_usd} (${me.account.balance_credits.toLocaleString('en-US')} credits)` +
             (me.account.low_balance ? ' — low' : ''),
@@ -393,7 +410,12 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           `Balance now: ${usage.balance_usd} (${usage.balance_credits.toLocaleString('en-US')} credits)`,
         ];
 
-        if (usage.totals.waived_rounds > 0) {
+        if (usage.unlimited) {
+          lines.push(
+            '',
+            'This account is billing-exempt: every response above was served free, and the balance does not move.',
+          );
+        } else if (usage.totals.waived_rounds > 0) {
           lines.push(
             '',
             `${usage.totals.waived_rounds} response(s) in the full window were served free — our own retries and the per-attempt cap. Those are not billing errors.`,
@@ -472,7 +494,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     {
       title: 'Create an API key',
       description:
-        'Mint a key for the captcha-solving endpoint (the Abyss model) and save it to disk where ' +
+        'Mint a key for the captcha-solving endpoint and save it to disk where ' +
         'the solver will find it. THE SECRET IS NEVER RETURNED — it is written straight to a ' +
         '0600 file and only the path is reported back, so it cannot leak through this ' +
         'conversation. After this runs, a solve works with no environment variables set.',
@@ -688,6 +710,8 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
             hosted: boolean;
             hugging_face_id: string | null;
             published: boolean;
+            coming_soon: boolean;
+            base_model: string;
             min_vram: string | null;
             weights_gb: number | null;
             accuracy: number | null;
@@ -699,13 +723,25 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
         for (const model of listing.models) {
           lines.push(`${model.name} — ${model.zone}`);
           lines.push(`  ${model.tagline}`);
-          lines.push(
-            model.hosted
-              ? '  Hosted only; not downloadable.'
-              : model.published
-                ? `  Weights: ${model.hugging_face_id} (~${model.weights_gb} GB, needs ${model.min_vram})`
-                : `  Weights: ${model.hugging_face_id} — reserved, not uploaded yet`,
-          );
+          lines.push(`  Base: ${model.base_model}`);
+          /*
+           * `hosted` and "downloadable" are SEPARATE facts, and deriving one
+           * from the other is what made this listing wrong in both directions
+           * at once: it announced the unreleased model as "what the hosted API
+           * runs" and reported the model actually taking requests as "reserved,
+           * not uploaded yet". Twilight is downloadable AND serving; Abyss is
+           * neither. Read each flag for what it says.
+           */
+          if (model.coming_soon) {
+            lines.push('  Coming soon — not serving, nothing to download.');
+          } else if (model.published) {
+            lines.push(
+              `  Weights: ${model.hugging_face_id} (~${model.weights_gb} GB, needs ${model.min_vram})`,
+            );
+          } else {
+            lines.push(`  Weights: ${model.hugging_face_id} — reserved, not uploaded yet`);
+          }
+          if (model.hosted) lines.push('  This is what the hosted API answers with.');
           if (model.accuracy !== null) {
             lines.push(`  Measured: ${(model.accuracy * 100).toFixed(1)}% exact match`);
           }

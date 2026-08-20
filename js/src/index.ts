@@ -2,6 +2,17 @@ export * from './types';
 export { CaptchaKrakenSolver } from './solver';
 
 /**
+ * The served LoRA name this client will ask for when `model` is left unset —
+ * `CAPTCHA_LORA_NAME`, else `models.json`'s `latest`, else the shipped pin.
+ *
+ * Exported so anything that REPORTS which adapter was driven can ask the client
+ * instead of re-deriving the answer. That distinction is not cosmetic: the name
+ * selects the prompt generation, so a reporter that guesses it can disagree with
+ * the solver and describe a run that never happened.
+ */
+export { resolveLoraName } from './model-name';
+
+/**
  * Errors raised when the **hosted** CaptchaKraken API refuses a solve — out of
  * credits, rate limited, key rejected, attempt abandoned.
  *
@@ -80,3 +91,21 @@ export { fromPuppeteer } from './puppeteer-adapter';
  * ```
  */
 export type { Page, PlaywrightPage, PlaywrightFrame, PlaywrightElementHandle } from './playwright-types';
+
+/**
+ * Auto-solve watcher: `solver.watch(page)` installs a background poller that
+ * solves captchas as they appear, and returns a handle with `stop()`.
+ *
+ * Injects nothing into the page, on any platform — see watcher.ts. On Camoufox
+ * its DOM reads run in the isolated Juggler world by default.
+ *
+ * @example
+ * ```typescript
+ * const solver = new CaptchaKrakenSolver();
+ * const watcher = solver.watch(page, { onSolved: r => console.log(r.isSolved) });
+ * // ... your automation ...
+ * await watcher.stop();
+ * ```
+ */
+export { watchPage } from './watcher';
+export type { CaptchaWatcher, WatchOptions, WatchableSolver } from './watcher';
