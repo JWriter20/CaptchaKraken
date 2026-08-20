@@ -1,11 +1,20 @@
-name: Request Tier 2 solver gate
+name: Request Tier 3 driver gate
 
-# Every PR here triggers a Tier 2 solve-rate gate on the real, curated held-out
-# captchas — but the model/prompt/dataset methodology lives in the PRIVATE
-# CaptchaKrakenFinetune repo, not here. This workflow does not run the gate
-# itself: it asks the private repo to run it and post a redacted result back
-# (a commit status + a PR comment — see that repo's public-pr-gate.yml and
-# scripts/post_public_check.py for exactly what does and doesn't leave it).
+# Every PR here triggers a TIER 3 gate: both shipped solver ports driven
+# end to end through a real browser against the fixture suite. The fixtures,
+# generators and adapter live in the PRIVATE CaptchaKrakenFinetune repo, not
+# here, so this workflow does not run the gate itself — it asks the private repo
+# to run it and post a redacted result back (a commit status + a PR comment; see
+# that repo's public-pr-gate.yml and scripts/post_public_check.py for exactly
+# what does and does not leave it).
+#
+# TIER 3, NOT TIER 2. This repo ships the DRIVER. A pull request here cannot
+# change the model, so a Tier 2 solve-rate measurement gated on the one thing
+# the PR could not move. What a PR here CAN break is driving — a selector, a
+# click landing off-widget, one port asking for a different adapter than the
+# other — and Tier 3 is the only gate that exercises both ports end to end.
+# On 2026-08-20 that last failure cost the JS port 22 of its 44 puzzle types
+# while every check here stayed green.
 #
 # workflow_dispatch, not repository_dispatch: dispatching a workflow needs
 # only `Actions: write` on the private repo. repository_dispatch would need a
@@ -28,7 +37,7 @@ on:
 
 jobs:
   request:
-    name: Dispatch Tier 2 gate
+    name: Dispatch Tier 3 gate
     runs-on: ubuntu-latest
     if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
@@ -41,4 +50,4 @@ jobs:
             --repo JWriter20/CaptchaKrakenFinetune \
             -f pr="${{ github.event.pull_request.number }}" \
             -f sha="${{ github.event.pull_request.head.sha }}"
-          echo "Dispatched. The private repo verifies this PR's head via the API before running anything — see public-pr-gate.yml. Status arrives as the 'tier2/solver-gate' check on this PR shortly after."
+          echo "Dispatched. The private repo verifies this PR's head via the API before running anything — see public-pr-gate.yml. Status arrives as the 'tier3/driver-gate' check on this PR shortly after."
