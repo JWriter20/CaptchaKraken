@@ -2446,28 +2446,37 @@ class PageSolver:
                         _delay(duration)
                         performed_action = True
 
-                # `scope` when there is no vendor iframe. Eight vendors render
-                # into the HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin,
-                # Prosopo, MTCaptcha, BotDetect — so `content_frame()` is None
-                # for all of them and the button was never even SEARCHED FOR,
-                # while the text box and the slider handle it sits beside were
-                # both found through `scope` a few lines above. Two containers
-                # for two halves of one interaction.
-                #
-                # This used to be gated on `typed`, for fear of turning up the
-                # submit of the FORM the captcha guards. `scope` is the widget
-                # container and the xpaths are RELATIVE, so that button is out
-                # of reach by construction; what the gate actually did was make
-                # every non-typed inline puzzle unsubmittable. Measured on the
-                # Tier 3 fixtures: 4 pairs aborting outright and 11 more types
-                # burning all ten solve loops on a puzzle they had answered on
-                # the first one. The press itself is still bounded by
-                # `should_submit` below, which is where the hazard belongs.
-                lookup = frame or (scope if not slid else None)
-                if lookup is not None:
-                    verify_button = self._get_verify_button(lookup)
-                    if verify_button:
-                        self._move_to_element(page, verify_button)
+
+            # Resolve the widget's submit control AFTER the action loop, not
+            # inside it. An empty plan — the correct answer to reCAPTCHA 3x3's
+            # `none_present` variation, where nothing matches and the control
+            # reads SKIP — never enters that loop, so the lookup never ran, the
+            # press below found `verify_button` None, and the round aborted on
+            # 'performed no interactions'. The finder was never the problem:
+            # 'Skip' has always been in its list. It was simply never called for
+            # the one answer shape that performs no other action.
+            # `scope` when there is no vendor iframe. Eight vendors render
+            # into the HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin,
+            # Prosopo, MTCaptcha, BotDetect — so `content_frame()` is None
+            # for all of them and the button was never even SEARCHED FOR,
+            # while the text box and the slider handle it sits beside were
+            # both found through `scope` a few lines above. Two containers
+            # for two halves of one interaction.
+            #
+            # This used to be gated on `typed`, for fear of turning up the
+            # submit of the FORM the captcha guards. `scope` is the widget
+            # container and the xpaths are RELATIVE, so that button is out
+            # of reach by construction; what the gate actually did was make
+            # every non-typed inline puzzle unsubmittable. Measured on the
+            # Tier 3 fixtures: 4 pairs aborting outright and 11 more types
+            # burning all ten solve loops on a puzzle they had answered on
+            # the first one. The press itself is still bounded by
+            # `should_submit` below, which is where the hazard belongs.
+            lookup = frame or (scope if not slid else None)
+            if lookup is not None:
+                verify_button = self._get_verify_button(lookup)
+                if verify_button:
+                    self._move_to_element(page, verify_button)
 
             # Submit policy: press the widget's own submit control whenever we
             # have put an ANSWER into it — a selection, a placed piece, a typed

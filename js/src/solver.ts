@@ -1014,26 +1014,35 @@ export class CaptchaKrakenSolver {
             await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, frameRole, attempt, { action });
           }
         }
-        // `scope` when there is no vendor iframe. Eight vendors render into the
-        // HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin, Prosopo,
-        // MTCaptcha, BotDetect — so `contentFrame()` is null for all of them
-        // and the button was never even SEARCHED FOR, while the text box and
-        // the slider handle it sits beside were both found through `scope`
-        // above. Two containers for two halves of one interaction.
-        //
-        // `scope` is the widget container and getVerifyButton's xpaths are
-        // RELATIVE, so the submit of the FORM the captcha guards is out of
-        // reach by construction. The press itself is bounded by
-        // `shouldClickSubmit` below, which is where that hazard belongs.
-        const lookup = frame ?? (slid ? null : scope);
-        if (lookup) {
-          verifyButton = await this.getVerifyButton(lookup);
-          if (verifyButton) {
-            await this.move(page, verifyButton);
-          }
-        }
-        // 'done' actions intentionally fall through to the Verify-button block below.
       }
+
+      // Resolve the widget's submit control AFTER the action loop, not inside
+      // it. An empty plan — the correct answer to reCAPTCHA 3x3's
+      // `none_present` variation, where nothing matches and the control reads
+      // SKIP — never enters that loop, so the lookup never ran, the press below
+      // found `verifyButton` null, and the round aborted on 'performed no
+      // interactions'. The finder was never the problem: 'Skip' has always been
+      // in its list. It was simply never called for the one answer shape that
+      // performs no other action.
+      // `scope` when there is no vendor iframe. Eight vendors render into the
+      // HOST PAGE — GeeTest, Yidun, Tencent, Yandex, Lemin, Prosopo,
+      // MTCaptcha, BotDetect — so `contentFrame()` is null for all of them
+      // and the button was never even SEARCHED FOR, while the text box and
+      // the slider handle it sits beside were both found through `scope`
+      // above. Two containers for two halves of one interaction.
+      //
+      // `scope` is the widget container and getVerifyButton's xpaths are
+      // RELATIVE, so the submit of the FORM the captcha guards is out of
+      // reach by construction. The press itself is bounded by
+      // `shouldClickSubmit` below, which is where that hazard belongs.
+      const lookup = frame ?? (slid ? null : scope);
+      if (lookup) {
+        verifyButton = await this.getVerifyButton(lookup);
+        if (verifyButton) {
+          await this.move(page, verifyButton);
+        }
+      }
+      // 'done' actions fall through to the submit block below, same as before.
 
       // Submit policy: press the widget's own submit control whenever we have
       // put an ANSWER into it — a selection, a placed piece, a typed code — or
