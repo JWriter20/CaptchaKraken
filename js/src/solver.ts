@@ -26,6 +26,7 @@ import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
 import { resolvePythonCommand } from './python-command';
 import { buildSolveArgs, redactCommand, solveEnv } from './cli-invocation';
 import { solveSlideGeometry } from './slide-geometry';
+import { getBundledCliRoot, resolveLoraName } from './model-name';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -37,16 +38,6 @@ const execFileAsync = promisify(execFile);
  */
 function bboxCenter(bbox: [number, number, number, number]): [number, number] {
   return [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
-}
-
-function getBundledCliRoot(): string {
-  // When installed from npm, this file is in `<pkgRoot>/dist` (compiled) or `<pkgRoot>/src` (dev).
-  // Published packages bundle the python engine at `<pkgRoot>/python` (copied in
-  // by scripts/copy-python.mjs at build time). In the source monorepo it instead
-  // lives at the sibling `../python`, so fall back to that for local dev/tests.
-  const bundled = path.resolve(__dirname, '..', 'python');
-  if (fs.existsSync(bundled)) return bundled;
-  return path.resolve(__dirname, '..', '..', 'python');
 }
 
 /**
@@ -2545,11 +2536,14 @@ export class CaptchaKrakenSolver {
    * recordings of the same widget are never byte-identical anyway.
    */
   private async getAnimatedSolution(framesDir: string): Promise<CliResponse> {
+    // resolveCli() FIRST: the default model is read out of the bundled engine's
+    // models.json, so the name and the prompt generation it selects come from
+    // the same place the Python port reads them. See model-name.ts.
+    const { cliRoot, py } = this.resolveCli();
     const {
-      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
+      model = resolveLoraName({ cliRoot }),
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
-    const { cliRoot, py } = this.resolveCli();
 
     const args = [
       '-m', 'captchakraken.cli', 'solve-animated',
@@ -2790,7 +2784,9 @@ export class CaptchaKrakenSolver {
     // token (CAPTCHA_KRAKEN_API_KEY, falling back to VLLM_API_KEY) from the
     // environment; we also forward the key explicitly as a CLI arg below so it
     // works even when the subprocess doesn't inherit it. The LoRA name defaults
-    // to the full-puzzle `captcha` adapter; override via CAPTCHA_LORA_NAME.
+    // to whatever models.json calls `latest` — NOT a literal; a hardcoded
+    // `captcha` here is what sent generation-1 prompts to a generation-2
+    // adapter. Override via CAPTCHA_LORA_NAME.
 
     // Dedup on the screenshot's bytes under the same prompt (puzzle source +
     // retry mode). A hit costs no inference; what it MEANS is answerFor's job,
@@ -2808,12 +2804,12 @@ export class CaptchaKrakenSolver {
 
   /** One inference: build the CLI invocation, run it, parse what comes back. */
   private async askModel(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
+    // resolveCli() FIRST — see getAnimatedSolution.
+    const { cliRoot, py } = this.resolveCli();
     const {
-      model = process.env.CAPTCHA_LORA_NAME ?? 'captcha',
+      model = resolveLoraName({ cliRoot }),
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
-
-    const { cliRoot, py } = this.resolveCli();
 
     // An ARGV ARRAY for execFile, not a string for a shell.
     //

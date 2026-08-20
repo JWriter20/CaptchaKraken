@@ -71,8 +71,13 @@ export interface CaptchaKrakenConfig {
    */
   pythonCommand?: string;
   /**
-   * vLLM LoRA name to invoke (default: 'captcha' — our bbox-aware LoRA).
-   * Override if you've registered a different module with the vLLM server.
+   * vLLM LoRA name to invoke.
+   *
+   * Defaults to whatever `models.json` calls `latest` (via CAPTCHA_LORA_NAME if
+   * set) — NOT a literal. The name selects the PROMPT GENERATION as well as the
+   * weights, so a constant here would pin the prompts to one generation while
+   * `latest` moved on. Override only if you've registered a different module
+   * with the vLLM server; see model-name.ts.
    */
   model?: string;
   /**
