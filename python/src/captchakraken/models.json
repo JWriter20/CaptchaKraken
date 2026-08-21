@@ -113,8 +113,8 @@
     }
   },
   "served_aliases": {
-    "_comment": "A hosted endpoint serves a bare name, not a repo id. Map it back so prompt resolution works for callers who only ever see the alias.",
-    "captcha": "CaptchaKraken/CaptchaKraken_v1.1",
+    "_comment": "A hosted endpoint serves a bare name, not a repo id. Map it back so prompt resolution works for callers who only ever see the alias. api.captchakraken.com now serves ONE model behind the permanent public name `captcha`, whatever the caller sends, so `captcha` means whichever adapter is current there — today CaptchaKraken-Lora-v1.2 — and NOT the v1.1 weights that share the name as a local vLLM alias. Self-hosters resolve by repo id via CAPTCHA_LORA_ADAPTER and are unaffected. Move this in the same change as the gateway's CKGATE_UPSTREAM_MODEL or the hosted model answers a prompt generation it was not trained on.",
+    "captcha": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
     "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2"
   }
 }
