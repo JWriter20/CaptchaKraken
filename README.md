@@ -23,7 +23,7 @@
 </p>
 
 > ⭐ **Enjoying CaptchaKraken?** [Star & watch the repo](https://github.com/JWriter20/CaptchaKraken)
-> for new puzzle types, smaller models, and video support. One repo, two
+> for new puzzle types and new models. One repo, two
 > published ports — the TypeScript browser driver (**npm:** `captchakraken`) and
 > the Python engine (**PyPI:** `captchakraken`).
 
@@ -178,7 +178,7 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies — end to en
 | ✅ **NetEase Yidun** | Jigsaw, picture-click, icon-click |
 | ✅ **Lemin, Prosopo, Tencent** | Cropped-image, grid, and slide flows |
 | ✅ **Distorted text** | BotDetect, MTCaptcha, Yandex — read and typed, not clicked |
-| 🟡 Video challenges | Driver support ships; the adapter `setup.sh` installs skips them ([roadmap](./docs/roadmap.md)) |
+| ✅ **Animated / video challenges** | Recorded, cut into keyframes, solved as one multi-image prompt, then clicked once the widget returns to the chosen frame |
 
 The non-Google/hCaptcha vendors are driven end-to-end in CI against generated
 fixtures in **both** ports. Per-vendor accuracy varies more than the headline
@@ -341,7 +341,7 @@ cell indices:
 
 ### End-to-end, in a real browser
 
-Both runs below drove **live reCAPTCHA challenges** at
+The run below drove **live reCAPTCHA challenges** at
 `google.com/recaptcha/api2/demo` on 2026-07-27, headless, against the hosted
 API. A "solve" means reCAPTCHA accepted and the widget cleared — not that the
 model's first answer was right.
@@ -349,18 +349,15 @@ model's first answer was right.
 | Browser | Solved | Rounds billed | Median wall clock |
 |---|---:|---:|---:|
 | [Camoufox](https://camoufox.com) 0.4.11 | **3 / 3** | 21 | 96 s |
-| Holo 152.0.3 | **1 / 3** | 21 | 85 s |
 
 A solve took 5–8 model rounds, because reCAPTCHA replaces tiles after each
 click and every replacement is a fresh puzzle. That is the whole reason the
 hosted API meters per round rather than per solve.
 
-**Solve rate in a browser is not model accuracy, and the gap is mostly your
-IP.** reCAPTCHA rejects correct answers from addresses it distrusts, and both
-runs above came from the same datacenter address in the same hour — which is
-the least favourable condition there is, and the likeliest explanation for the
-difference between the two rows. Neither figure is a benchmark; they are proof
-the path works. See
+**Solve rate in a browser is not model accuracy, and much of it is your IP.**
+reCAPTCHA rejects correct answers from addresses it distrusts, and the run above
+came from a datacenter address — which is the least favourable condition there
+is. The figure is not a benchmark; it is proof the path works. See
 [Rate limiting & IP reputation](./docs/performance.md#rate-limiting--ip-reputation).
 
 Reproduce it yourself — the demos in this repo drive a real browser end to end:
@@ -392,7 +389,7 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 | 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, the Python CLI, migrating from v1 |
 | ⚙️ [How it works](./docs/how-it-works.md) | The solve pipeline, `find_grid`, the freshness guard, dedup |
 | 📊 [Performance](./docs/performance.md) | Accuracy, speed-by-device tables, IP-reputation & rate limits |
-| 🗺️ [Roadmap](./docs/roadmap.md) | Video support, more captcha types, and what shipped |
+| 🗺️ [Roadmap](./docs/roadmap.md) | What shipped, what's in progress, and what's planned |
 | 📜 [Licensing](./docs/licensing.md) | Plain-English: what you can and can't build |
 
 ---
