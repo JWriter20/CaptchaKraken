@@ -1,13 +1,41 @@
-# captchakraken
+<p align="center">
+  <img src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/logo-card.png" alt="CaptchaKraken" width="128" height="128">
+</p>
 
-The Python engine + CLI behind [CaptchaKraken](https://github.com/JWriter20/CaptchaKraken):
-OpenCV grid detection + a fine-tuned **Qwen3.5-9B** vision LoRA served on
-**vLLM**. Given a screenshot of a captcha grid, it locates the tiles and returns
-the click plan. Ships the `captchakraken` command.
+<h1 align="center">captchakraken</h1>
+
+<p align="center">
+  <b>A captcha solver for browser automation.</b><br>
+  The Python engine and CLI behind <a href="https://github.com/JWriter20/CaptchaKraken">CaptchaKraken</a>.
+</p>
+
+OpenCV tile detection plus a fine-tuned **Qwen3.5-9B** vision model. Give it a
+screenshot of a captcha and it returns the plan to solve it — which tiles to
+select, where to click, what to drag, how far to slide, or what text to type.
+Ships the `captchakraken` command.
+
+Run the model on **your own hardware**, or point it at the **hosted API** and run
+nothing at all.
 
 > For demo videos, accuracy numbers, the browser driver, and the full
 > self-hosting guide, see the main repo
 > **[CaptchaKraken](https://github.com/JWriter20/CaptchaKraken)**.
+
+## What it solves
+
+| Vendor | Puzzles |
+|---|---|
+| **reCAPTCHA** | 3×3 and 4×4 image grids, including the dynamic re-deal |
+| **hCaptcha** | Image grids, click, drag, connect-the-path, tetris-fit, animated |
+| **GeeTest** v3 + v4 | Slide, icon, nine, svg, gobang, iconcrush |
+| **NetEase Yidun** | Jigsaw, picture-click, icon-click |
+| **Tencent, Lemin, Prosopo** | Slide, cropped-image and grid flows |
+| **BotDetect, MTCaptcha, Yandex** | Distorted text — read and typed, not clicked |
+| **Cloudflare Turnstile** | Via the checkbox flow (free on the hosted API) |
+
+**44 puzzle types**, driven end to end in CI against generated fixtures on both
+the TypeScript and Python ports. Animated challenges are recorded, sliced into
+keyframes and answered with the frame the action belongs to.
 
 ## Install
 
