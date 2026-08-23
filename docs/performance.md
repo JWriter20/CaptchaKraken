@@ -87,12 +87,12 @@ any harness that trusts the file naively:
 2. **`rows`/`cols` disagree with `puzzle_type` on those same records.** Trust
    `puzzle_type`; it is the only field that agrees with the answer.
 
-**Browser solve rates are a different measurement.** In live runs against
-`google.com/recaptcha/api2/demo` on 2026-07-27, Camoufox cleared 3/3 challenges
-and Holo 1/3, each taking 5–8 model rounds — reCAPTCHA replaces tiles after
-every click, and each replacement is a fresh puzzle. Both runs came from one
-datacenter IP within one hour, which is the least favourable condition
-available; see [below](#rate-limiting--ip-reputation).
+**Browser solve rates are a different measurement.** In a live run against
+`google.com/recaptcha/api2/demo` on 2026-07-27, Camoufox cleared 3/3 challenges,
+taking 5–8 model rounds — reCAPTCHA replaces tiles after every click, and each
+replacement is a fresh puzzle. The run came from a datacenter IP, which is the
+least favourable condition available; see
+[below](#rate-limiting--ip-reputation).
 
 ## A note on speed
 

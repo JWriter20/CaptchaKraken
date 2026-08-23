@@ -26,7 +26,7 @@ Where CaptchaKraken is headed. Legend: 🟢 shipped · 🟡 in progress · ⚪ p
 | ⬛ **Abyss** | 🟡 in progress | The next hosted-only model, trained against the open weights' measured failures. **Not serving yet** — the endpoint answers with Twilight v1.2 until it lands. |
 | 🪶 **Sunlight / Twilight merges** | 🟢 shipped | The adapter merged into the base at 4-bit (~9 GB) and 8-bit (~14 GB), so self-hosting is one download instead of two. Published for both v1.1 and v1.2, all public on [HuggingFace](https://huggingface.co/CaptchaKraken). |
 | 📈 **More real labeled data** | 🟡 in progress | Broader coverage for under-represented prompts. |
-| 🎥 **Video challenge support** | 🟢 shipped | **The driver half has shipped.** A challenge that never settles is now recorded (4 s @ 10 fps), cut into keyframes, and sent to the model as one multi-image prompt; the answer names which keyframe it acted on, and the driver waits for the widget to return to that frame before clicking. The model half shipped with **v1.2**, which is trained on the keyframe format. |
+| 🎥 **Video challenge support** | 🟢 shipped | **Both halves are out.** A challenge that never settles is recorded (4 s @ 10 fps), cut into keyframes, and sent to the model as one multi-image prompt; the answer names which keyframe it acted on, and the driver waits for the widget to return to that frame before clicking. The model half shipped with **v1.2** — trained on the keyframe format, installed by `setup.sh`, and what the hosted API answers with. |
 
 ## ⚪ Planned
 
