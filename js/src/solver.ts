@@ -271,6 +271,9 @@ export const SOLVE_DEFAULTS = {
 
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
+  /** Extra ms this solve has been granted for a recording; see recordKeyframeBurst. */
+  private videoBudgetMs: number = 0;
+  private videoBudgetGranted: boolean = false;
   private lastMousePosition: Vector; // Start at safe position
   private imageCounter: number = 0; // Track images sent to CLI for debugging
   private sessionDebugDir: string | null = null;
@@ -439,8 +442,14 @@ export class CaptchaKrakenSolver {
     const MAX_RENDER_WAITS = Math.min(6, maxSolveLoops - 1);
 
     for (let attempt = 1; attempt <= maxSolveLoops; attempt++) {
-      if (Date.now() - start > overallSolveTimeoutMs) {
-        throw new Error(`Captcha solve timed out after ${overallSolveTimeoutMs}ms (attempt ${attempt}/${maxSolveLoops}).`);
+      // `videoBudgetMs` is 0 until this solve records something, so a solve
+      // that never escalates gets exactly the deadline the caller configured.
+      const budgetMs = overallSolveTimeoutMs + this.videoBudgetMs;
+      if (Date.now() - start > budgetMs) {
+        throw new Error(
+          `Captcha solve timed out after ${budgetMs}ms (attempt ${attempt}/${maxSolveLoops})`
+          + (this.videoBudgetMs ? `, including ${this.videoBudgetMs}ms granted for recording an animated challenge` : '')
+          + '.');
       }
 
       /*
@@ -2478,6 +2487,27 @@ export class CaptchaKrakenSolver {
   private async recordKeyframeBurst(captchaElement: ElementHandle): Promise<string> {
     const fps = Math.max(1, this.config.videoBurstFps ?? 10);
     const durationMs = this.config.videoBurstDurationMs ?? 4000;
+
+    /*
+     * THE ESCALATION BUYS ITS OWN BUDGET, once per solve.
+     *
+     * `overallSolveTimeoutMs` counts rounds and a recording is not a round —
+     * see `videoExtraInferenceMs` for the arithmetic and for what it cost not
+     * to have it. Recorded as an EXTENSION rather than by loosening the config,
+     * so a solve that never escalates keeps the deadline the caller asked for.
+     *
+     * Same one-shot, same total, same reason as page_solver.py's
+     * `video_budget_ms`: the ports must not disagree about how long a video
+     * solve may take, or the same fixture passes on one and times out on the
+     * other and it reads as a driver bug.
+     */
+    if (this.config.videoSolveEnabled !== false && !this.videoBudgetGranted) {
+      this.videoBudgetGranted = true;
+      this.videoBudgetMs =
+        durationMs +
+        (this.config.keyframeWaitTimeoutMs ?? 6000) +
+        (this.config.videoExtraInferenceMs ?? 8000);
+    }
     const total = Math.max(1, Math.round(durationMs / (1000 / fps)));
     const intervalMs = 1000 / fps;
 
@@ -2680,6 +2710,10 @@ export class CaptchaKrakenSolver {
     this.keyframeMode = null;
     this.lastAnswerSig = null;
     this.noProgressRounds = 0;
+    // Per SOLVE, not per process: a grant leaking into the next captcha would
+    // silently hand a still puzzle 18s it was never meant to have.
+    this.videoBudgetMs = 0;
+    this.videoBudgetGranted = false;
   }
 
   /**
