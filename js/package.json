@@ -1,7 +1,7 @@
 {
   "name": "captchakraken",
-  "version": "2.6.0",
-  "description": "Browser-agnostic Playwright/Puppeteer captcha solver. Detects the captcha, reads the grid with a fine-tuned Qwen3.5-9B vision model on vLLM, and clicks through to a token.",
+  "version": "2.6.1",
+  "description": "Captcha solver for Playwright and Puppeteer. Finds the captcha, reads the puzzle with a fine-tuned Qwen3.5-9B vision model, and clicks, drags, slides or types through to a token — reCAPTCHA, hCaptcha, GeeTest, NetEase Yidun, Tencent, Lemin, Prosopo, Turnstile and distorted text. Hosted API or self-hosted.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -25,11 +25,19 @@
   },
   "keywords": [
     "captcha",
+    "captcha-solver",
     "recaptcha",
     "hcaptcha",
+    "geetest",
+    "turnstile",
+    "yidun",
+    "tencent-captcha",
     "playwright",
     "puppeteer",
-    "automation",
+    "camoufox",
+    "browser-automation",
+    "scraping",
+    "anti-bot",
     "vllm",
     "qwen"
   ],

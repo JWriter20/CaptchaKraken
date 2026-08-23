@@ -1,9 +1,20 @@
-# captchakraken
+<p align="center">
+  <img src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/logo-card.png" alt="CaptchaKraken" width="128" height="128">
+</p>
 
-The TypeScript browser driver for [CaptchaKraken](https://github.com/JWriter20/CaptchaKraken).
-Hand it a Playwright/Puppeteer `Page`; it finds the captcha, reads the grid with
-a fine-tuned **Qwen3.5-9B** vision model on **vLLM**, clicks human-like, and
-verifies through to a token.
+<h1 align="center">captchakraken</h1>
+
+<p align="center">
+  <b>A captcha solver for browser automation.</b><br>
+  The TypeScript driver for <a href="https://github.com/JWriter20/CaptchaKraken">CaptchaKraken</a>.
+</p>
+
+Hand it a Playwright or Puppeteer `Page`. It finds the captcha, reads the whole
+puzzle with a fine-tuned **Qwen3.5-9B** vision model, and clicks, drags, slides
+or types human-like through to a token.
+
+Run the model on **your own hardware**, or point it at the **hosted API** and run
+nothing at all.
 
 > Full docs — demo videos, accuracy, self-hosting — live in the main repo
 > **[CaptchaKraken](https://github.com/JWriter20/CaptchaKraken)**.
@@ -15,9 +26,9 @@ npm install captchakraken
 ```
 
 The package bundles the Python engine (`captchakraken`) and, on `postinstall`,
-creates a local venv with its lightweight core deps so grid detection + the vLLM
-planner work out of the box. It ships **no browser** — bring your own
-Playwright-compatible launcher.
+creates a local venv with its lightweight core deps, so tile detection and the
+inference client work out of the box. It ships **no browser** — bring your own
+Playwright-compatible launcher (camoufox and patchright both work).
 
 - Skip the Python bootstrap: `CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP=1`
 - To **self-host** the model, run the repo's `setup.sh` (installs vLLM + weights).
@@ -37,6 +48,22 @@ claude mcp add captchakraken -- npx -y captchakraken-mcp
 `create_api_key` writes the key and the endpoint to `~/.captchakraken/credentials`,
 which the client reads on its own — **no environment variables needed**.
 
+## What it solves
+
+| Vendor | Puzzles |
+|---|---|
+| **reCAPTCHA** | 3×3 and 4×4 image grids, including the dynamic re-deal |
+| **hCaptcha** | Image grids, click, drag, connect-the-path, tetris-fit, animated |
+| **GeeTest** v3 + v4 | Slide, icon, nine, svg, gobang, iconcrush |
+| **NetEase Yidun** | Jigsaw, picture-click, icon-click |
+| **Tencent, Lemin, Prosopo** | Slide, cropped-image and grid flows |
+| **BotDetect, MTCaptcha, Yandex** | Distorted text — read and typed, not clicked |
+| **Cloudflare Turnstile** | Via the checkbox flow (free on the hosted API) |
+
+**44 puzzle types**, driven end to end in CI against generated fixtures on both
+the TypeScript and Python ports. Animated challenges are recorded, sliced into
+keyframes and answered with the frame the action belongs to.
+
 ## Usage
 
 ```typescript
@@ -49,7 +76,7 @@ await page.goto('https://www.google.com/recaptcha/api2/demo');
 
 // Reads VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY from the environment.
 const solver = new CaptchaKrakenSolver();
-await solver.solve(page);            // detect → solve grid → click → verify
+await solver.solve(page);            // detect → read → act → verify
 
 await browser.close();
 ```
