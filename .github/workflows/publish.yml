@@ -103,13 +103,40 @@ jobs:
       - name: Build
         run: npm run build
       - name: Publish (idempotent)
+        # The `else` branch is wrapped because npm reports "you are not the
+        # trusted publisher for this package" as a 404 on the PUT:
+        #
+        #   npm error 404 Not Found - PUT https://registry.npmjs.org/captchakraken-mcp
+        #   npm error 404  The requested resource 'captchakraken-mcp@0.1.1' could
+        #   npm error 404  not be found or you do not have permission to access it.
+        #
+        # Which reads as "the package does not exist" — and it plainly does, at
+        # 0.1.0, published by hand in July. That wording cost a real diagnosis on
+        # 2026-08-23: `captchakraken` published in the same run, from the same
+        # workflow, with the same OIDC, so the obvious readings (bad auth, broken
+        # release) were all wrong. The one true reading is the narrowest one, and
+        # npm will not say it.
+        #
+        # Trusted publishers are scoped to ONE package name (see the header), so
+        # a package first published by hand has no entry until someone adds it.
+        # Say so, and keep failing.
         run: |
           VER=$(node -p "require('./package.json').version")
           if npm view "captchakraken-mcp@$VER" version >/dev/null 2>&1; then
             echo "captchakraken-mcp@$VER already published — skipping."
-          else
-            npm publish --access public --provenance
+            exit 0
           fi
+          if npm publish --access public --provenance; then
+            exit 0
+          fi
+          if npm view captchakraken-mcp version >/dev/null 2>&1; then
+            echo "::error::captchakraken-mcp EXISTS on npm ($(npm view captchakraken-mcp version)) \
+          but this workflow is not its trusted publisher, which npm reports as a 404 on the PUT. \
+          Fix: npmjs.com -> captchakraken-mcp -> Settings -> Trusted Publisher -> GitHub Actions, \
+          repository JWriter20/CaptchaKraken, workflow publish.yml. The captchakraken entry does \
+          NOT cover this package. Then re-run this job."
+          fi
+          exit 1
 
   publish-pypi:
     name: Publish PyPI (captchakraken)
