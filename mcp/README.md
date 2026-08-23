@@ -1,8 +1,15 @@
-# captchakraken-mcp
+<p align="center">
+  <img src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/logo-card.png" alt="CaptchaKraken" width="128" height="128">
+</p>
 
-The CaptchaKraken account, driven from an MCP client. It signs you in through
-GitHub, mints and revokes API keys for the solving endpoint, and reads back what
-you have spent.
+<h1 align="center">captchakraken-mcp</h1>
+
+<p align="center">
+  <b>The CaptchaKraken account, driven from an MCP client.</b>
+</p>
+
+It signs you in through GitHub, mints and revokes API keys for the solving
+endpoint, and reads back what you have spent.
 
 **It does not solve captchas.** The key it mints is what does that, against the
 OpenAI-compatible endpoint at `api.captchakraken.com/v1`.

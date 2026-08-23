@@ -1,7 +1,7 @@
 {
   "name": "captchakraken-mcp",
-  "version": "0.1.1",
-  "description": "MCP server for CaptchaKraken: sign in with GitHub, mint API keys for the Abyss model, and read your usage and spending.",
+  "version": "0.1.2",
+  "description": "MCP server for the CaptchaKraken account: sign in with GitHub, mint and revoke API keys for the captcha-solving endpoint, and read your usage and balance. Writes the key to disk so the solver needs no environment variables.",
   "type": "module",
   "author": "Jake Writer",
   "license": "SEE LICENSE IN LICENSE",
@@ -25,7 +25,10 @@
     "mcp",
     "model-context-protocol",
     "captcha",
-    "captchakraken"
+    "captchakraken",
+    "claude",
+    "api-keys",
+    "llm-tools"
   ],
   "bugs": {
     "url": "https://github.com/JWriter20/CaptchaKraken/issues"
