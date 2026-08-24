@@ -29,6 +29,125 @@
 
 ---
 
+## Watch it work
+
+Thirteen puzzle types, each driven on the vendor's own **public demo page**
+through the hosted API, with every attempt scored. These are the same clips that
+run on [captchakraken.com](https://captchakraken.com) — recorded 2026-08-19
+against **captcha-v12**.
+
+Three things worth knowing before you read the numbers:
+
+- **They are counts, not percentages.** Ten attempts is not a percentage, and
+  the count is the thing you can actually reason about.
+- **The clip runs shorter than the solve.** Stretches where the pointer is not
+  moving are cut out, so the footage stays watchable. The median beside each
+  clip is the measured whole-solve time, computed from the run and never from
+  the footage — the clip illustrates, the median asserts.
+- **It is the whole widget, not one puzzle.** A tab is named for the puzzle the
+  vendor *opened* with, and the time covers every round after it. hCaptcha
+  usually asks a second, different puzzle; reCAPTCHA keeps going until it is
+  satisfied. That is why one drag attempt takes 6 seconds and the next takes 78.
+
+A round the vendor waved through without a puzzle is not in these counts, and
+neither is one we could not classify — only rounds where a challenge was on
+screen and had to be solved.
+
+<details open>
+<summary><b>hCaptcha</b> — 4 puzzle types</summary>
+
+**Image select** — 12/12 solved · 10.5s median
+
+Opens on nine separate photos with no fixed answer count. hCaptcha almost always asks a second, different puzzle before it lets you through.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_grid.webm" width="408" controls muted loop playsinline preload="none"></video>
+
+**Canvas puzzle** — 50/50 solved · 15.1s median
+
+One picture instead of tiles: click or drag the pieces the prompt names. hCaptcha almost always asks a second, different puzzle before it lets you through.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_drag.webm" width="528" controls muted loop playsinline preload="none"></video>
+
+**Drag puzzle** — 9/10 solved · 9.0s median · <sub>demonstrated, **not scored** — these two figures are asserted by hand</sub>
+
+Pick a character up and carry it to its match hidden behind the lines. hCaptcha deals this one rarely.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_truedrag.webm" width="520" controls muted loop playsinline preload="none"></video>
+
+**Animated** — 36/36 solved · 45.0s median
+
+Opens on a board that never holds still — solved from a recorded burst, on a frame the model picks.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_video.webm" width="528" controls muted loop playsinline preload="none"></video>
+
+</details>
+
+<details>
+<summary><b>reCAPTCHA</b> — 3 puzzle types</summary>
+
+**4×4 tile grid** — 9/10 solved · 8.7s median
+
+One image cut into sixteen, with the object spanning several of them. Another board normally follows.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_4x4.webm" width="408" controls muted loop playsinline preload="none"></video>
+
+**3×3 tile grid** — 11/11 solved · 9.3s median
+
+Nine tiles of one photo. reCAPTCHA keeps asking until it is satisfied, so the clip usually runs past the board it opened on.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_3x3.webm" width="408" controls muted loop playsinline preload="none"></video>
+
+**3×3 dynamic** — 8/10 solved · 38.2s median
+
+Each tile you clear fades and is replaced. It only ends when the board comes back clean.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_3x3_fade.webm" width="408" controls muted loop playsinline preload="none"></video>
+
+</details>
+
+<details>
+<summary><b>GeeTest</b> — 6 puzzle types</summary>
+
+**Ordered icon click** — 10/10 solved · 9.0s median
+
+Find small icons hidden in a photo and click them in the order given.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_icon.webm" width="348" controls muted loop playsinline preload="none"></video>
+
+**Icon crush** — 9/10 solved · 7.1s median
+
+Match-3 on near-identical sprites: swap one pair to line up three.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_iconcrush.webm" width="348" controls muted loop playsinline preload="none"></video>
+
+**Gobang** — 10/10 solved · 6.8s median
+
+A 5×5 board. Move one stone so five identical ones line up.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_gobang.webm" width="348" controls muted loop playsinline preload="none"></video>
+
+**3×3 photo grid** — 10/10 solved · 7.8s median
+
+The target is a thumbnail in the prompt bar, not a word. Nothing to read.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_nine.webm" width="348" controls muted loop playsinline preload="none"></video>
+
+**Slide jigsaw** — 10/10 solved · 7.6s median
+
+Drag the cut-out back into its notch. Off by six pixels is a failure.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_slide.webm" width="348" controls muted loop playsinline preload="none"></video>
+
+**Cycling line art** — 9/10 solved · 39.5s median
+
+The board cycles through fresh candidates. The answer is a frame and a point.
+
+<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_svg.webm" width="348" controls muted loop playsinline preload="none"></video>
+
+</details>
+
+---
+
 ## Setup
 
 Two ways to run the model. The client code is identical — only the endpoint
@@ -182,8 +301,11 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies — end to en
 
 The non-Google/hCaptcha vendors are driven end-to-end in CI against generated
 fixtures in **both** ports. Per-vendor accuracy varies more than the headline
-grids do; `geetest_v4_gobang` and `geetest_v4_iconcrush` are the two that
-currently fail to drive to completion, and are best treated as experimental.
+grids do, and the clips above are the per-type record: each one is that puzzle
+driven on the vendor's own demo page, with every attempt scored. GeeTest's
+gobang and icon-crush boards were long the two weakest — both drive to
+completion now (10/10 and 9/10 above) but they are the least exercised of the
+set, so they are the likeliest to move.
 
 ### Accuracy, measured
 
