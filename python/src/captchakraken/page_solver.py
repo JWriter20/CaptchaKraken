@@ -317,6 +317,38 @@ class PageSolverConfig:
     # still a better use of the remaining budget than a timeout.
     keyframe_wait_timeout_ms: int = 6_000
     keyframe_wait_poll_ms: int = 120
+    #: Extra wall clock granted ONCE, the first time a solve escalates to a
+    #: recording. NOT a looser `overall_solve_timeout_ms`.
+    #:
+    #: That budget is sized for ROUNDS — "a round costs ~4-7s, so six is the
+    #: budget". The recording path is not a round. It is a fixed extra stage
+    #: costing the burst, the slice, one MULTI-IMAGE inference (six keyframes,
+    #: several times a still's) and the wait for the widget to come back round
+    #: to the frame the model chose. Nothing in the 45s was ever set aside for
+    #: it, so an escalation started at ~35s ran the clock out mid-burst and
+    #: reported a TIMEOUT — which reads as a slow model rather than as a budget
+    #: with no room for the thing the solver had just decided to do.
+    #:
+    #: Measured 2026-08-22, Tier 3 run 32596340560: EVERY python-port failure on
+    #: hcaptcha_fish_swim_different, hcaptcha_number_with_highest_value_video and
+    #: hcaptcha_tile_flip_video was "exceeded overall_solve_timeout_ms during
+    #: recording the animated challenge", at 45.7-52.7s elapsed. The same three
+    #: fixtures solve in 11-20s on the rounds where the still path happens to
+    #: answer them, so it is the escalation that does not fit, not the puzzle.
+    #:
+    #: Granted only when `video_solve_enabled` — a caller who wants a hard
+    #: deadline turns recording off, which is the switch that already means
+    #: "fail fast rather than spend the recording time".
+    video_extra_inference_ms: int = 8_000
+
+    def video_budget_ms(self) -> int:
+        """What one escalation to recording is allowed to cost, on top.
+
+        DERIVED, so a longer burst or a longer keyframe wait carries its own
+        budget instead of quietly reintroducing the timeout this exists to fix.
+        """
+        return (self.video_burst_duration_ms + self.keyframe_wait_timeout_ms
+                + self.video_extra_inference_ms)
 
     # Grid load / dynamic-refresh timing.
     # How long to wait for hCaptcha's task images to paint before screenshotting
@@ -572,6 +604,9 @@ class PageSolver:
         self._known_animated = False
         self._animated_probe_armed = False
         self._animated_probe_done = False
+        # One-shot: the recording path buys its own budget the first time it is
+        # entered, and never again in the same solve. See video_budget_ms.
+        self._video_budget_granted = False
         self._keyframe_mode: Optional[str] = None
         # Repeat detection; see `max_no_progress_rounds`.
         self._last_answer_sig: Optional[str] = None
@@ -641,6 +676,7 @@ class PageSolver:
         self._known_animated = False
         self._animated_probe_armed = False
         self._animated_probe_done = False
+        self._video_budget_granted = False
         self._keyframe_mode = None
         self._last_answer_sig: Optional[str] = None
         self._no_progress_rounds = 0
@@ -1776,13 +1812,59 @@ class PageSolver:
         total = max(1, round(cfg.video_burst_duration_ms / (1000.0 / fps)))
         interval = 1.0 / fps
 
+        # THE ESCALATION BUYS ITS OWN BUDGET, once per solve.
+        #
+        # `overall_solve_timeout_ms` counts rounds, and this is not a round —
+        # see `video_budget_ms` for the arithmetic and for what it cost not to
+        # have it. Granted here rather than where the probe arms because this is
+        # the one place every path into a recording goes through.
+        if cfg.video_solve_enabled and not self._video_budget_granted:
+            self._video_budget_granted = True
+            if self._deadline_ms is not None:
+                self._deadline_ms += cfg.video_budget_ms()
+                _log(f"[animated] +{cfg.video_budget_ms()}ms for the recording path")
+
+        # Checked ONCE, before the first frame — never per frame.
+        #
+        # A HALF-RECORDED BURST IS WORTHLESS: the slicer reads a clip's temporal
+        # structure, so stopping at frame 27 of 40 does not produce a shorter
+        # answer, it produces a recording that may not contain the screen the
+        # answer is on. Aborting mid-way therefore threw away the whole burst
+        # AND the ~3s already spent making it, to report a timeout. The burst is
+        # also fixed-length and short, so it is not one of the places that "can
+        # legitimately spin for a long time" that `_check_deadline` is for.
+        #
+        # If the budget cannot fit one, say THAT — a caller who has tightened
+        # `overall_solve_timeout_ms` below what a recording costs has asked for
+        # something impossible, and should hear it rather than watch a burst die
+        # partway through every time.
+        if self._deadline_ms is not None:
+            left = self._deadline_ms - time.monotonic() * 1000.0
+            if left < cfg.video_burst_duration_ms:
+                raise CaptchaSolveError(
+                    f"only {left:.0f}ms of the {cfg.overall_solve_timeout_ms}ms solve "
+                    f"budget is left and an animated recording needs "
+                    f"{cfg.video_burst_duration_ms}ms — not starting one that would "
+                    f"be cut off mid-way. Raise overall_solve_timeout_ms or "
+                    f"video_extra_inference_ms, or set video_solve_enabled=False."
+                )
+
         frames: List[Any] = []
 
         remaining = max(0, total - len(frames))
         shot = _tmp_png("burst")
+        # A burst that runs far past its own length is a hung screenshot, not a
+        # tight budget — bounded separately so the two cannot be confused.
+        burst_deadline = (time.monotonic() * 1000.0
+                          + 3 * cfg.video_burst_duration_ms + 5_000)
         try:
             for i in range(remaining):
-                self._check_deadline("recording the animated challenge")
+                if time.monotonic() * 1000.0 > burst_deadline:
+                    raise CaptchaSolveError(
+                        f"the animated recording stalled: {i} of {remaining} frames "
+                        f"in {3 * cfg.video_burst_duration_ms + 5000}ms. The widget "
+                        f"is not screenshotting."
+                    )
                 start = time.monotonic()
                 try:
                     # animations ALLOWED — see `_screenshot`. The JS port has

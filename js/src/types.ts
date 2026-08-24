@@ -370,6 +370,37 @@ export interface CaptchaKrakenConfig {
   keyframeWaitPollMs?: number;
 
   /**
+   * Extra wall clock (ms) granted ONCE, the first time a solve escalates to a
+   * recording. NOT a looser `overallSolveTimeoutMs`.
+   *
+   * That budget counts ROUNDS — `maxSolveLoops` x ~7000ms, which
+   * no-progress.test.ts pins. A recording is not a round: it is a fixed extra
+   * stage costing the burst, the slice, one MULTI-IMAGE inference (six
+   * keyframes, several times a still's) and the wait for the widget to come
+   * back round to the chosen frame. Nothing in the 45s was set aside for it, so
+   * an escalation late in a solve simply ran the clock out and reported a
+   * timeout — which reads as a slow model rather than as a budget with no room
+   * for what the solver had just decided to do.
+   *
+   * Measured 2026-08-22, Tier 3 run 32596340560: hcaptcha_click_image_by_traits,
+   * hcaptcha_connect_path and hcaptcha_grid_3x3_property each failed this port
+   * with "Captcha solve timed out after 45000ms (attempt 6/6)" at 49-59s, and
+   * solve in 14-20s on the rounds the still path answers them.
+   *
+   * The total granted is `videoBurstDurationMs + keyframeWaitTimeoutMs + this`,
+   * derived so a longer burst carries its own budget — page_solver.py's
+   * `video_budget_ms` is the same arithmetic, since the two ports must not
+   * disagree about how long a video solve may take.
+   *
+   * Granted only when `videoSolveEnabled`: a caller who wants a hard deadline
+   * turns recording off, which already means "fail fast rather than spend the
+   * recording time".
+   *
+   * Default: 8000
+   */
+  videoExtraInferenceMs?: number;
+
+  /**
    * After clicking Submit/Verify, the solver EXPECTS the frame to change (advance
    * to the next round, or close because it was accepted). This is how long (ms)
    * to wait for that transition to begin before re-evaluating — so the shift
