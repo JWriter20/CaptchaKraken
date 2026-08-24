@@ -11,8 +11,18 @@ The driver duck-types the Playwright surface and imports no browser package
 real `sync_playwright` page actually provides every member that duck-typing
 assumes — and that the watcher drives one end to end.
 
-SKIPPED WHEN PLAYWRIGHT IS ABSENT, and deliberately not a dependency: this
-package ships with no browser dependency at all. To run these:
+RUNS WHEREVER A BROWSER EXISTS. Playwright pins one exact Chromium build and
+refuses to launch any other, so `chromium.launch()` with no path fails on a box
+that HAS Chromium — just not the pinned one — and this file used to report that
+as four ERRORS. Four broken tests, in the one place that checks the
+compatibility claim against something real. So the launch walks every installed
+build and passes `executable_path`, the same resolution
+CaptchaKrakenFinetune's `tests/test_fixtures_are_solvable.py` uses.
+
+Skipping is reserved for a box with NO browser at all, because the package
+ships with no browser dependency and an end user is not required to have one.
+Skipping because the pinned BUILD NUMBER moved is not that, and hid a browser
+that launches fine. To install one:
 
     pip install playwright && playwright install chromium
 """
@@ -46,10 +56,46 @@ HTML = """
 """
 
 
+def _installed_chromiums() -> List[str]:
+    """Every Chromium build on the box, newest first.
+
+    Playwright resolves ONE pinned build and errors if it is missing, which is
+    a version check dressed as an availability check: `playwright install`
+    fetching build N+1 does not make build N stop working.
+    """
+    cache = Path.home() / ".cache" / "ms-playwright"
+    rels = ("chrome-linux64/chrome", "chrome-linux/chrome",
+            "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+            "chrome-win/chrome.exe")
+    found = []
+    for d in sorted(cache.glob("chromium-*"), reverse=True):
+        for rel in rels:
+            if (d / rel).exists():
+                found.append(str(d / rel))
+                break
+    return found
+
+
 @pytest.fixture(scope="module")
 def page():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
+        # The pinned build first — on a correctly provisioned box that is the
+        # right answer and needs no path. Then every build actually present.
+        # Only when none of them launches is there genuinely no browser here.
+        attempts: List[dict] = [{}]
+        attempts += [{"executable_path": exe} for exe in _installed_chromiums()]
+        browser = None
+        failures = []
+        for kwargs in attempts:
+            try:
+                browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS, **kwargs)
+                break
+            except Exception as exc:                  # noqa: BLE001
+                failures.append(f"{kwargs.get('executable_path', 'pinned build')}: "
+                                f"{str(exc).splitlines()[0]}")
+        if browser is None:
+            pytest.skip("no launchable Chromium on this box; tried "
+                        + "; ".join(failures))
         try:
             ctx = browser.new_context(viewport={"width": 1280, "height": 720})
             yield ctx.new_page()
