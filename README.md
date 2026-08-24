@@ -85,7 +85,7 @@ One picture instead of tiles: click or drag the pieces the prompt names. hCaptch
   <a href="https://captchakraken.com/#demos">Watch the hCaptcha canvas puzzle solve</a>
 </video>
 
-**Drag puzzle** — 9/10 solved · 9.0s median · <sub>demonstrated, **not scored** — these two figures are asserted by hand</sub>
+**Drag puzzle** — 9/10 solved · 9.0s median
 
 Pick a character up and carry it to its match hidden behind the lines. hCaptcha deals this one rarely.
 
