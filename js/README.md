@@ -8,6 +8,26 @@ verifies through to a token.
 > Full docs — demo videos, accuracy, self-hosting — live in the main repo
 > **[CaptchaKraken](https://github.com/JWriter20/CaptchaKraken)**.
 
+## Watch it work
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_grid.webp" width="260"
+       alt="A live hCaptcha image select challenge being solved end to end">
+  <img src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_4x4.webp" width="260"
+       alt="A live reCAPTCHA 4×4 tile grid challenge being solved end to end">
+  <img src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_slide.webp" width="260"
+       alt="A live GeeTest slide jigsaw challenge being solved end to end">
+</p>
+
+hCaptcha image select 12/12 in 10.5s · reCAPTCHA 4×4 tile grid 9/10 in 8.7s · GeeTest slide jigsaw 10/10 in 7.6s — median of the solved attempts, measured 2026-08-19 on **captcha-v12**
+against each vendor's own public demo page. Counts rather than percentages
+because ten attempts is not a percentage. Idle time is cut from the clips, so
+they run shorter than the solves they show.
+
+**Ten more puzzle types**, as video and with the full method, at
+[captchakraken.com](https://captchakraken.com) and in the
+[main repo](https://github.com/JWriter20/CaptchaKraken#watch-it-work).
+
 ## Install
 
 ```bash
