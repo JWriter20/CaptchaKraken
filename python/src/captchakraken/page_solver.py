@@ -356,13 +356,78 @@ class PageSolverConfig:
 # solver.ts — keep both in the same order with the same selectors.
 VENDOR_WIDGET_LOCATORS = [
     {"puzzle_source": "geetest", "selectors": [".geetest_box", ".geetest_panel_box", ".geetest_popup_window", ".geetest_widget"]},
-    {"puzzle_source": "tencent", "selectors": ['iframe#tcaptcha_iframe_dy', 'iframe[id*="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]']},
+    # Tencent renders IN THE HOST DOCUMENT since 2026-08-11; before that it was
+    # `iframe#tcaptcha_iframe_dy`. Both shapes are listed, in-page first,
+    # because the iframe build is still deployed on sites pinning an older
+    # widget and costs nothing to keep. Dropping the in-page selectors is what
+    # made the client blind to every live Tencent captcha for twelve days.
+    #
+    # `iframe[id^="tcaptcha"]`, NOT `[id*=...]`. The substring form also matched
+    # MTCaptcha's `mtcaptcha-iframe-1` — "mtcaptcha" contains "tcaptcha" — so
+    # Tencent's entry was silently the only thing detecting MTCaptcha at all,
+    # which is why `.mtcap` matching nothing went unnoticed. Anchored, it still
+    # matches the real `tcaptcha_iframe_dy` and claims nobody else's widget.
+    {"puzzle_source": "tencent", "selectors": ['#tcaptcha_transform_dy', '#tCaptchaDyContent', '.tencent-captcha-dy__content', 'iframe#tcaptcha_iframe_dy', 'iframe[id^="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]']},
     {"puzzle_source": "yidun", "selectors": [".yidun_panel", ".yidun"]},
-    {"puzzle_source": "yandex", "selectors": [".CheckboxCaptcha"]},
+    # Yandex SmartCaptcha is IFRAMED, and `.CheckboxCaptcha` is a class inside
+    # that frame's document — `query_selector` does not cross a frame boundary,
+    # so the host page never carried it and this entry matched nothing, ever.
+    # Challenge frame first, anchor second, exactly like reCAPTCHA above.
+    # `.CheckboxCaptcha` stays for an inline embed that renders it directly.
+    {"puzzle_source": "yandex", "selectors": ['iframe[src*="smartcaptcha.yandexcloud.net/advanced"]', 'iframe[src*="smartcaptcha.yandexcloud.net"]', ".CheckboxCaptcha"]},
     {"puzzle_source": "lemin", "selectors": ["#lemin-cropped-captcha", ".lemin-captcha-popup"]},
     {"puzzle_source": "prosopo", "selectors": [".prosopo-modalInner", ".procaptcha-checkbox"]},
-    {"puzzle_source": "mtcaptcha", "selectors": [".mtcap"]},
+    # MTCaptcha is IFRAMED too: `<div class="mtcaptcha"><iframe
+    # id="mtcaptcha-iframe-1" src="https://service.mtcaptcha.com/...">`. `.mtcap`
+    # is the class prefix used INSIDE that frame (`mtcap-inputtext`), and a CSS
+    # class selector matches whole tokens, so it never matched the host page's
+    # `class="mtcaptcha"` either. Kept last for an inline embed.
+    {"puzzle_source": "mtcaptcha", "selectors": ['iframe[src*="service.mtcaptcha.com"]', 'iframe[id^="mtcaptcha-iframe"]', ".mtcaptcha", ".mtcap"]},
     {"puzzle_source": "botdetect", "selectors": [".BDC_CaptchaDiv"]},
+]
+
+
+# ── which vendor's code the page LOADED, as opposed to what it rendered ─────
+#
+# A selector is a claim about markup, and markup is the half of a captcha the
+# vendor is free to rewrite overnight — it is an anti-bot surface, so churn is
+# the point. The REQUEST is far more stable: Tencent moved its widget out of an
+# iframe and renamed every class on 2026-08-11, and went on fetching from
+# `turing.captcha.gtimg.com` and `turing.captcha.qcloud.com` throughout. The
+# substring `captcha.gtimg.com` — already in the table above, on a selector that
+# stopped matching — never left the wire.
+#
+# This is a TRIPWIRE, not a detection path. A URL says which vendor is on the
+# page; it cannot say where the widget is, and the solver needs an ELEMENT to
+# screenshot, to scope its controls against, and to drag. What it buys is the
+# difference between the two things a null detection can mean:
+#
+#   · no captcha here (reCAPTCHA v3 / invisible / not triggered yet) — fine, and
+#     what the message used to guess unconditionally;
+#   · the vendor's code is loaded and running and NOTHING WE LOOK FOR MATCHES —
+#     i.e. the DOM moved under us. That is a bug report, and it took twelve days
+#     to notice the last time because the client said the first thing while
+#     meaning the second.
+#
+# Hosts measured 2026-08-24 by loading each vendor's demo page and recording
+# every third-party request (see scripts/check_vendor_selectors.py --hosts).
+VENDOR_URL_MARKERS = [
+    {"puzzle_source": "hcaptcha", "hosts": ["hcaptcha.com"]},
+    {"puzzle_source": "recaptcha", "hosts": ["google.com/recaptcha", "recaptcha.net"]},
+    {"puzzle_source": "turnstile", "hosts": ["challenges.cloudflare.com"]},
+    {"puzzle_source": "geetest", "hosts": ["geetest.com"]},
+    {"puzzle_source": "tencent", "hosts": ["captcha.gtimg.com", "captcha.qcloud.com"]},
+    {"puzzle_source": "yidun", "hosts": ["dun.163.com", "cstaticdun.126.net",
+                                         "necaptcha.nosdn.127.net"]},
+    {"puzzle_source": "yandex", "hosts": ["smartcaptcha.yandexcloud.net"]},
+    {"puzzle_source": "lemin", "hosts": ["leminnow.com"]},
+    {"puzzle_source": "prosopo", "hosts": ["prosopo.io"]},
+    {"puzzle_source": "mtcaptcha", "hosts": ["mtcaptcha.com"]},
+    # BotDetect is deliberately absent and must stay absent. It is a SELF-HOSTED
+    # library — the image comes from the application's own origin
+    # (`BotDetectCaptcha.ashx`), so there is no vendor host to see and a URL
+    # tripwire cannot cover it. Recording that is the point: an empty result for
+    # a BotDetect page means "this check does not apply", not "no captcha".
 ]
 
 
@@ -382,7 +447,13 @@ VENDOR_WIDGET_LOCATORS = [
 
 # A distorted-text captcha's answer box. The three vendor entries are the three
 # types in instructions.py::TEXT_TYPES.
-TEXT_INPUT_SELECTORS = [
+#
+# Split in two because the two halves are safe in different places. The NAMED
+# half identifies a captcha's answer box wherever it sits; the GENERIC half only
+# means "the text box in this widget" and is trustworthy only when the scope
+# already is the widget. `_answer_box` widens past the widget for BotDetect and
+# may take the named half with it, never the generic one.
+TEXT_INPUT_VENDOR_SELECTORS = [
     # BotDetect — the input is application-defined, so match the id fragment its
     # own docs and samples use. These three are what the nightly collector
     # already drives (src/captchaCollection/sources.py).
@@ -397,6 +468,9 @@ TEXT_INPUT_SELECTORS = [
     ".AdvancedCaptcha-Input input",
     "input.Textinput-Control",
     'input[name="rep"]',
+]
+
+TEXT_INPUT_GENERIC_SELECTORS = [
     # Generic — an input the page itself labels as the captcha answer.
     'input[name*="captcha" i]',
     'input[id*="captcha" i]',
@@ -411,6 +485,8 @@ TEXT_INPUT_SELECTORS = [
     "textarea",
 ]
 
+TEXT_INPUT_SELECTORS = TEXT_INPUT_VENDOR_SELECTORS + TEXT_INPUT_GENERIC_SELECTORS
+
 # The handle you drag on a puzzle-piece slider. NOT the piece: on every one of
 # these vendors the piece is inert decoration that the handle carries, so a
 # drag starting on the piece moves nothing at all.
@@ -419,7 +495,10 @@ SLIDER_HANDLE_SELECTORS = [
     ".geetest_slider_button",
     ".geetest_btn",
     ".geetest_slider .geetest_arrow",
-    # Tencent
+    # Tencent. The post-2026-08-11 knob is a bare div — no id, no role=slider,
+    # no aria-valuenow — so every generic fallback below misses it and it has to
+    # be named. The three after it are the pre-redesign widget.
+    ".tencent-captcha-dy__slider-block",
     "#tcaptcha_drag_thumb",
     ".tc-slider-normal",
     "[id*=slideBlock]",
@@ -906,12 +985,58 @@ class PageSolver:
                 return element
         return None
 
-    def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any]) -> bool:
+    def _answer_box(self, scope: Any, element: Any = None) -> Optional[Any]:
+        """Where a distorted-text captcha's answer goes.
+
+        Inside the widget first. If the widget holds no text box at all, widen
+        ONCE to its enclosing <fieldset>/<form> and look again for a
+        VENDOR-NAMED box only.
+
+        BotDetect is why, and nothing else needs it. BotDetect is a self-hosted
+        LIBRARY, so the host application owns the layout: measured on
+        captcha.com 2026-08-24, `.BDC_CaptchaDiv` — the element `detect_captcha`
+        returns — is 280x50 and holds the image alone, while `#captchaCode` sits
+        in a sibling `<div class="validationDiv">` under the enclosing
+        <fieldset>. Scoped to the widget the solver found no box, `text_mode`
+        stayed False, and it read the code correctly and never typed it. A clean
+        solve thrown away, and indistinguishable in any report from a model that
+        cannot read warped text.
+
+        The widened pass is restricted to TEXT_INPUT_VENDOR_SELECTORS on
+        purpose. The generic tail (`input[type=text]`, `textarea`,
+        `input:not([type])`) is what makes the in-widget lookup work for every
+        other vendor, and OUTSIDE the widget it is exactly how a captcha's
+        answer ends up in a login form's username box — the failure
+        `_find_control`'s docstring already warns about. One level, named
+        selectors, and never the page.
+        """
+        inside = self._find_control(scope, TEXT_INPUT_SELECTORS)
+        if inside is not None or element is None:
+            return inside
+        # Nearest first: a <fieldset> inside a <form> is the tighter box, and
+        # `query_selector` on a union would hand back whichever comes first in
+        # document order — the outer one.
+        for axis in ("ancestor::fieldset[1]", "ancestor::form[1]"):
+            try:
+                host = element.query_selector(f"xpath={axis}")
+            except Exception:
+                continue
+            if host is None:
+                continue
+            found = self._find_control(host, TEXT_INPUT_VENDOR_SELECTORS)
+            if found is not None:
+                _log("widget holds no answer box; using the vendor-named one "
+                     "in its enclosing form")
+                return found
+        return None
+
+    def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any],
+                      element: Any = None) -> bool:
         """Put the model's reading of a distorted-text captcha into its box."""
         text = str(action.get("text") or "")
         if not text:
             return False
-        field = self._find_control(scope, TEXT_INPUT_SELECTORS)
+        field = self._answer_box(scope, element)
         if field is None:
             _log("type action, but no text box in the widget; skipping")
             return False
@@ -1251,6 +1376,54 @@ class PageSolver:
                     return el
 
         return None
+
+    def vendors_on_the_wire(self, page: Any) -> List[str]:
+        """Which vendors' code this page actually loaded.
+
+        Read out of the page's own resource timing plus the `src`/`href` of
+        everything it linked, so it works whenever it is called — a request
+        listener would have to have been attached before navigation, and by the
+        time a solve fails that ship has sailed.
+
+        Best-effort by construction: the resource-timing buffer is finite and a
+        page may have cleared it. An empty answer is "nothing seen", never "no
+        captcha here".
+        """
+        try:
+            names = page.evaluate(
+                """() => {
+                  const out = [];
+                  try {
+                    for (const e of performance.getEntriesByType('resource')) out.push(e.name);
+                  } catch (err) {}
+                  for (const el of document.querySelectorAll('script[src],iframe[src],link[href],img[src]')) {
+                    out.push(el.getAttribute('src') || el.getAttribute('href') || '');
+                  }
+                  return out;
+                }"""
+            )
+        except Exception:
+            return []
+        blob = " ".join(str(n) for n in (names or []))
+        return [entry["puzzle_source"] for entry in VENDOR_URL_MARKERS
+                if any(host in blob for host in entry["hosts"])]
+
+    def _no_widget_message(self, page: Any) -> str:
+        """Why nothing was found — the two cases told apart.
+
+        The old text guessed "reCAPTCHA v3 / invisible" every time, including
+        the times a vendor had simply moved its DOM. See VENDOR_URL_MARKERS.
+        """
+        base = "no interactive captcha widget detected"
+        loaded = self.vendors_on_the_wire(page)
+        if not loaded:
+            return (f"{base} (no vendor captcha code loaded on this page — "
+                    "likely reCAPTCHA v3 / invisible, or a click-triggered "
+                    "challenge that has not been triggered)")
+        return (f"{base}, BUT {'/'.join(loaded)} code IS loaded and running on "
+                "this page. The vendor's markup no longer matches anything in "
+                "VENDOR_WIDGET_LOCATORS — re-measure with "
+                "scripts/check_vendor_selectors.py and update BOTH solver ports")
 
     def is_captcha_solved(self, page: Any) -> bool:
         """
@@ -2257,8 +2430,8 @@ class PageSolver:
         # and want opposite answers. Restricted to `unknown` because neither
         # hCaptcha nor reCAPTCHA has ever served a typed challenge, so a match
         # inside one of their frames would be a false positive by definition.
-        text_mode = puzzle_source == "unknown" and self._find_control(
-            scope, TEXT_INPUT_SELECTORS
+        text_mode = puzzle_source == "unknown" and self._answer_box(
+            scope, element
         ) is not None
         if text_mode:
             _log("widget has a text box; solving as a distorted-text captcha")
@@ -2437,7 +2610,7 @@ class PageSolver:
                     performed_action = True
                     placed = True
                 elif kind == "type":
-                    if self._execute_type(page, scope, action):
+                    if self._execute_type(page, scope, action, element):
                         performed_action = True
                         typed = True
                 elif kind == "wait":
@@ -2676,10 +2849,7 @@ class PageSolver:
                     )
                     _delay(800 + random.random() * 300)
                     continue
-                raise NoCaptchaFoundError(
-                    "no interactive captcha widget detected (likely reCAPTCHA v3 / "
-                    "invisible or a click-triggered challenge)"
-                )
+                raise NoCaptchaFoundError(self._no_widget_message(page))
 
             _log(f"--- captcha solve loop {attempt}/{cfg.max_solve_loops} ---")
             retry_mode_this_loop = pending_retry_mode
