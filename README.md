@@ -29,6 +29,19 @@
 
 ---
 
+<!--
+  The clips are served from captchakraken.com, NOT from this repo, and that is
+  deliberate. raw.githubusercontent.com sends `.webm` as `audio/webm` and `.mp4`
+  as `application/octet-stream` (both measured 2026-08-24), and a <video> given
+  either of those does not reliably play. The site's own /art/demo route sends
+  `video/webm`, which does. The animated WebP in the npm and PyPI READMEs is a
+  different story — `image/webp` IS served correctly from raw, so those come
+  from docs/assets/demo/ here.
+
+  Each <video> carries a plain <a> fallback so the section degrades to links
+  rather than to nothing if a renderer strips the tag.
+-->
+
 ## Watch it work
 
 Thirteen puzzle types, each driven on the vendor's own **public demo page**
@@ -60,25 +73,33 @@ screen and had to be solved.
 
 Opens on nine separate photos with no fixed answer count. hCaptcha almost always asks a second, different puzzle before it lets you through.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_grid.webm" width="408" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/hcaptcha_grid.webm" width="408" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the hCaptcha image select solve</a>
+</video>
 
 **Canvas puzzle** — 50/50 solved · 15.1s median
 
 One picture instead of tiles: click or drag the pieces the prompt names. hCaptcha almost always asks a second, different puzzle before it lets you through.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_drag.webm" width="528" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/hcaptcha_drag.webm" width="528" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the hCaptcha canvas puzzle solve</a>
+</video>
 
 **Drag puzzle** — 9/10 solved · 9.0s median · <sub>demonstrated, **not scored** — these two figures are asserted by hand</sub>
 
 Pick a character up and carry it to its match hidden behind the lines. hCaptcha deals this one rarely.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_truedrag.webm" width="520" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/hcaptcha_truedrag.webm" width="520" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the hCaptcha drag puzzle solve</a>
+</video>
 
 **Animated** — 36/36 solved · 45.0s median
 
 Opens on a board that never holds still — solved from a recorded burst, on a frame the model picks.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/hcaptcha_video.webm" width="528" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/hcaptcha_video.webm" width="528" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the hCaptcha animated solve</a>
+</video>
 
 </details>
 
@@ -89,19 +110,25 @@ Opens on a board that never holds still — solved from a recorded burst, on a f
 
 One image cut into sixteen, with the object spanning several of them. Another board normally follows.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_4x4.webm" width="408" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/recaptcha_4x4.webm" width="408" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the reCAPTCHA 4×4 tile grid solve</a>
+</video>
 
 **3×3 tile grid** — 11/11 solved · 9.3s median
 
 Nine tiles of one photo. reCAPTCHA keeps asking until it is satisfied, so the clip usually runs past the board it opened on.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_3x3.webm" width="408" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/recaptcha_3x3.webm" width="408" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the reCAPTCHA 3×3 tile grid solve</a>
+</video>
 
 **3×3 dynamic** — 8/10 solved · 38.2s median
 
 Each tile you clear fades and is replaced. It only ends when the board comes back clean.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/recaptcha_3x3_fade.webm" width="408" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/recaptcha_3x3_fade.webm" width="408" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the reCAPTCHA 3×3 dynamic solve</a>
+</video>
 
 </details>
 
@@ -112,40 +139,51 @@ Each tile you clear fades and is replaced. It only ends when the board comes bac
 
 Find small icons hidden in a photo and click them in the order given.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_icon.webm" width="348" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/geetest_icon.webm" width="348" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the GeeTest ordered icon click solve</a>
+</video>
 
 **Icon crush** — 9/10 solved · 7.1s median
 
 Match-3 on near-identical sprites: swap one pair to line up three.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_iconcrush.webm" width="348" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/geetest_iconcrush.webm" width="348" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the GeeTest icon crush solve</a>
+</video>
 
 **Gobang** — 10/10 solved · 6.8s median
 
 A 5×5 board. Move one stone so five identical ones line up.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_gobang.webm" width="348" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/geetest_gobang.webm" width="348" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the GeeTest gobang solve</a>
+</video>
 
 **3×3 photo grid** — 10/10 solved · 7.8s median
 
 The target is a thumbnail in the prompt bar, not a word. Nothing to read.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_nine.webm" width="348" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/geetest_nine.webm" width="348" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the GeeTest 3×3 photo grid solve</a>
+</video>
 
 **Slide jigsaw** — 10/10 solved · 7.6s median
 
 Drag the cut-out back into its notch. Off by six pixels is a failure.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_slide.webm" width="348" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/geetest_slide.webm" width="348" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the GeeTest slide jigsaw solve</a>
+</video>
 
 **Cycling line art** — 9/10 solved · 39.5s median
 
 The board cycles through fresh candidates. The answer is a frame and a point.
 
-<video src="https://raw.githubusercontent.com/JWriter20/CaptchaKraken/main/docs/assets/demo/geetest_svg.webm" width="348" controls muted loop playsinline preload="none"></video>
+<video src="https://captchakraken.com/art/demo/geetest_svg.webm" width="348" controls muted loop playsinline preload="none">
+  <a href="https://captchakraken.com/#demos">Watch the GeeTest cycling line art solve</a>
+</video>
 
 </details>
-
 ---
 
 ## Setup
