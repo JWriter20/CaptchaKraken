@@ -6,7 +6,7 @@ guides. Start here.
 > One repo, two published ports — the TypeScript browser driver
 > (npm: `captchakraken`) and the Python engine (PyPI: `captchakraken`). ⭐ **Star
 > & watch** [the repo](https://github.com/JWriter20/CaptchaKraken) for smaller
-> models, video support, and new puzzle types.
+> models and new puzzle types.
 
 ## 📚 Guides
 
@@ -17,7 +17,7 @@ guides. Start here.
 | [🧑‍💻 Usage](./usage.md) | Install both ports, the Python one-liner, all four browser frameworks (Playwright / Patchright / camoufox-js / Puppeteer), and migrating from v1. |
 | [⚙️ How it works](./how-it-works.md) | The detect → grid → click → verify pipeline, the OpenCV grid tracer, the stale-frame freshness guard, and solution dedup. |
 | [📊 Performance](./performance.md) | Model accuracy, the memory-bandwidth speed model + per-device throughput, and IP-reputation guidance. |
-| [🗺️ Roadmap](./roadmap.md) | What shipped recently, what's in progress, and what's planned (video support, more captcha types). |
+| [🗺️ Roadmap](./roadmap.md) | What shipped recently, what's in progress, and what's planned (more captcha types). |
 | [⚖️ Licensing](./licensing.md) | Plain-English explainer of the source-available license — what you may and may not build. |
 
 ## ✅ What it solves today
@@ -32,7 +32,7 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies.
 | ✅ **hCaptcha 3×3 image grid** | Works end-to-end |
 | ✅ **hCaptcha click / drag puzzles** | Full-puzzle model → pixel click/drag actions |
 | ✅ Cloudflare Turnstile | Works via the checkbox flow |
-| 🟡 **Animated / video challenges** | Driver support ships: recorded, cut into keyframes, solved as a multi-image prompt, then clicked once the widget returns to the chosen frame. Accuracy depends on the adapter; the one `setup.sh` installs skips them ([roadmap](./roadmap.md)) |
+| ✅ **Animated / video challenges** | Recorded (4 s @ 10 fps), cut into keyframes, solved as one multi-image prompt, then clicked once the widget returns to the chosen frame. The model half shipped with **v1.2**, which `setup.sh` installs and the hosted API serves |
 
 Non-grid still-image puzzles — **click** ("click each …"), **drag** ("drag the
 piece into place"), path/connect, "choose the card" — route to the full-puzzle

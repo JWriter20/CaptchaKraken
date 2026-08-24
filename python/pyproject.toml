@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "captchakraken"
-version = "2.6.0"
-description = "Self-hosted captcha solver: OpenCV grid detection + a fine-tuned Qwen3.5-9B vision LoRA served on vLLM."
+version = "2.6.1"
+description = "Captcha-solving engine and CLI: OpenCV grid detection plus a fine-tuned Qwen3.5-9B vision model, for image grids, click and drag puzzles, sliders, distorted text and animated challenges. Hosted API or self-hosted on vLLM."
 readme = "README.md"
 requires-python = ">=3.10"
 # Source-available, NOT GPL. The CaptchaKraken Source-Available License permits
@@ -14,12 +14,26 @@ requires-python = ">=3.10"
 # — see LICENSE. (GPL-3.0 would wrongly permit all three.)
 license = { file = "LICENSE" }
 authors = [{ name = "Jake Writer" }]
-keywords = ["captcha", "recaptcha", "hcaptcha", "vllm", "qwen", "computer-vision", "automation"]
+keywords = [
+  "captcha", "captcha-solver", "recaptcha", "hcaptcha", "geetest", "turnstile",
+  "yidun", "tencent-captcha", "playwright", "browser-automation", "scraping",
+  "anti-bot", "vllm", "qwen", "computer-vision", "ocr",
+]
 classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: OS Independent",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+  "Topic :: Software Development :: Testing",
   "License :: Other/Proprietary License",
+  "Typing :: Typed",
 ]
 
 # Core = the lightweight CLIENT: OpenCV grid detection + the HTTP planner that
@@ -55,8 +69,11 @@ dev = [
 captchakraken = "captchakraken.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/JWriter20/CaptchaKraken"
+Homepage = "https://captchakraken.com"
+Documentation = "https://github.com/JWriter20/CaptchaKraken#readme"
+Source = "https://github.com/JWriter20/CaptchaKraken"
 Issues = "https://github.com/JWriter20/CaptchaKraken/issues"
+Changelog = "https://github.com/JWriter20/CaptchaKraken/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/captchakraken"]
