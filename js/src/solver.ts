@@ -151,13 +151,71 @@ enum CaptchaState {
  */
 const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: string[] }> = [
   { puzzleSource: 'geetest', selectors: ['.geetest_box', '.geetest_panel_box', '.geetest_popup_window', '.geetest_widget'] },
-  { puzzleSource: 'tencent', selectors: ['iframe#tcaptcha_iframe_dy', 'iframe[id*="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]'] },
+  // Tencent renders IN THE HOST DOCUMENT since 2026-08-11; before that it was
+  // `iframe#tcaptcha_iframe_dy`. Both shapes are listed, in-page first, because
+  // the iframe build is still deployed on sites pinning an older widget and
+  // costs nothing to keep. Dropping the in-page selectors is what made the
+  // client blind to every live Tencent captcha for twelve days.
+  //
+  // `iframe[id^="tcaptcha"]`, NOT `[id*=...]`. The substring form also matched
+  // MTCaptcha's `mtcaptcha-iframe-1` — "mtcaptcha" contains "tcaptcha" — so
+  // Tencent's entry was silently the only thing detecting MTCaptcha at all,
+  // which is why `.mtcap` matching nothing went unnoticed. Anchored, it still
+  // matches the real `tcaptcha_iframe_dy` and claims nobody else's widget.
+  { puzzleSource: 'tencent', selectors: ['#tcaptcha_transform_dy', '#tCaptchaDyContent', '.tencent-captcha-dy__content', 'iframe#tcaptcha_iframe_dy', 'iframe[id^="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]'] },
   { puzzleSource: 'yidun', selectors: ['.yidun_panel', '.yidun'] },
-  { puzzleSource: 'yandex', selectors: ['.CheckboxCaptcha'] },
+  // Yandex SmartCaptcha is IFRAMED, and `.CheckboxCaptcha` is a class inside
+  // that frame's document — querySelector does not cross a frame boundary, so
+  // the host page never carried it and this entry matched nothing, ever.
+  // Challenge frame first, anchor second, exactly like reCAPTCHA above.
+  // `.CheckboxCaptcha` stays for an inline embed that renders it directly.
+  { puzzleSource: 'yandex', selectors: ['iframe[src*="smartcaptcha.yandexcloud.net/advanced"]', 'iframe[src*="smartcaptcha.yandexcloud.net"]', '.CheckboxCaptcha'] },
   { puzzleSource: 'lemin', selectors: ['#lemin-cropped-captcha', '.lemin-captcha-popup'] },
   { puzzleSource: 'prosopo', selectors: ['.prosopo-modalInner', '.procaptcha-checkbox'] },
-  { puzzleSource: 'mtcaptcha', selectors: ['.mtcap'] },
+  // MTCaptcha is IFRAMED too: `<div class="mtcaptcha"><iframe
+  // id="mtcaptcha-iframe-1" src="https://service.mtcaptcha.com/...">`. `.mtcap`
+  // is the class prefix used INSIDE that frame (`mtcap-inputtext`), and a CSS
+  // class selector matches whole tokens, so it never matched the host page's
+  // `class="mtcaptcha"` either. Kept last for an inline embed.
+  { puzzleSource: 'mtcaptcha', selectors: ['iframe[src*="service.mtcaptcha.com"]', 'iframe[id^="mtcaptcha-iframe"]', '.mtcaptcha', '.mtcap'] },
   { puzzleSource: 'botdetect', selectors: ['.BDC_CaptchaDiv'] },
+];
+
+/**
+ * Which vendor's code the page LOADED, as opposed to what it rendered.
+ * Mirrors VENDOR_URL_MARKERS in page_solver.py — CLAUDE.md 1c.
+ *
+ * A selector is a claim about markup, and markup is the half of a captcha the
+ * vendor is free to rewrite overnight — it is an anti-bot surface, so churn is
+ * the point. The REQUEST is far more stable: Tencent moved its widget out of an
+ * iframe and renamed every class on 2026-08-11, and went on fetching from
+ * `turing.captcha.gtimg.com` and `turing.captcha.qcloud.com` throughout. The
+ * substring `captcha.gtimg.com` — already in the table above, on a selector
+ * that stopped matching — never left the wire.
+ *
+ * This is a TRIPWIRE, not a detection path. A URL says which vendor is on the
+ * page; it cannot say where the widget is, and the solver needs an ELEMENT to
+ * screenshot, to scope its controls against, and to drag. What it buys is
+ * telling apart the two things a null detection can mean: no captcha here, or
+ * the vendor's code is loaded and running and nothing we look for matches.
+ *
+ * Hosts measured 2026-08-24 from each vendor's demo page.
+ */
+const VENDOR_URL_MARKERS: ReadonlyArray<{ puzzleSource: string; hosts: string[] }> = [
+  { puzzleSource: 'hcaptcha', hosts: ['hcaptcha.com'] },
+  { puzzleSource: 'recaptcha', hosts: ['google.com/recaptcha', 'recaptcha.net'] },
+  { puzzleSource: 'turnstile', hosts: ['challenges.cloudflare.com'] },
+  { puzzleSource: 'geetest', hosts: ['geetest.com'] },
+  { puzzleSource: 'tencent', hosts: ['captcha.gtimg.com', 'captcha.qcloud.com'] },
+  { puzzleSource: 'yidun', hosts: ['dun.163.com', 'cstaticdun.126.net', 'necaptcha.nosdn.127.net'] },
+  { puzzleSource: 'yandex', hosts: ['smartcaptcha.yandexcloud.net'] },
+  { puzzleSource: 'lemin', hosts: ['leminnow.com'] },
+  { puzzleSource: 'prosopo', hosts: ['prosopo.io'] },
+  { puzzleSource: 'mtcaptcha', hosts: ['mtcaptcha.com'] },
+  // BotDetect is deliberately absent and must stay absent: it is a SELF-HOSTED
+  // library, so the image comes from the application's own origin and there is
+  // no vendor host to see. An empty result for a BotDetect page means "this
+  // check does not apply", not "no captcha".
 ];
 
 /**
@@ -175,7 +233,12 @@ const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: s
  * pages. Vendors rename these classes without notice, and our own Tier 3
  * fixtures render neither vendor's DOM.
  */
-const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [
+// Split in two because the two halves are safe in different places. The NAMED
+// half identifies a captcha's answer box wherever it sits; the GENERIC half only
+// means "the text box in this widget" and is trustworthy only when the scope
+// already is the widget. `answerBox` widens past the widget for BotDetect and
+// may take the named half with it, never the generic one.
+const TEXT_INPUT_VENDOR_SELECTORS: ReadonlyArray<string> = [
   // BotDetect — the input is application-defined, so match the id fragment its
   // own docs and samples use (the three the nightly collector already drives).
   'input[id*=captchaCode]',
@@ -189,6 +252,9 @@ const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [
   '.AdvancedCaptcha-Input input',
   'input.Textinput-Control',
   'input[name="rep"]',
+];
+
+const TEXT_INPUT_GENERIC_SELECTORS: ReadonlyArray<string> = [
   // Generic — an input the page itself labels as the captcha answer.
   'input[name*="captcha" i]',
   'input[id*="captcha" i]',
@@ -203,6 +269,10 @@ const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [
   'textarea',
 ];
 
+const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [
+  ...TEXT_INPUT_VENDOR_SELECTORS, ...TEXT_INPUT_GENERIC_SELECTORS,
+];
+
 /**
  * The handle you drag on a puzzle-piece slider. NOT the piece: on every one of
  * these vendors the piece is inert decoration that the handle carries, so a
@@ -213,7 +283,10 @@ const SLIDER_HANDLE_SELECTORS: ReadonlyArray<string> = [
   '.geetest_slider_button',
   '.geetest_btn',
   '.geetest_slider .geetest_arrow',
-  // Tencent
+  // Tencent. The post-2026-08-11 knob is a bare div — no id, no role=slider,
+  // no aria-valuenow — so every generic fallback below misses it and it has to
+  // be named. The three after it are the pre-redesign widget.
+  '.tencent-captcha-dy__slider-block',
   '#tcaptcha_drag_thumb',
   '.tc-slider-normal',
   '[id*=slideBlock]',
@@ -506,10 +579,7 @@ export class CaptchaKrakenSolver {
         // No interactive widget in the DOM (reCAPTCHA v3 / invisible, or an
         // hCaptcha that only triggers on user action), or it never rendered.
         // Fail fast rather than burning the whole loop budget.
-        throw new Error(
-          'No interactive captcha widget detected (likely reCAPTCHA v3 / '
-          + 'invisible or a click-triggered challenge). Failing fast.'
-        );
+        throw new Error(await this.noWidgetMessage(page));
       }
 
       console.log(`\n--- Captcha Solve Loop ${attempt}/${maxSolveLoops} ---`);
@@ -778,7 +848,7 @@ export class CaptchaKrakenSolver {
     // reCAPTCHA has ever served a typed challenge, so a match inside one of
     // their frames would be a false positive by definition.
     const textMode = puzzleSource === 'unknown'
-      && (await this.findControl(scope, TEXT_INPUT_SELECTORS)) !== null;
+      && (await this.answerBox(scope, captchaElement)) !== null;
     if (textMode) {
       console.log('Widget has a text box; solving as a distorted-text captcha.');
     }
@@ -1010,7 +1080,7 @@ export class CaptchaKrakenSolver {
           placed = true;
           await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
         } else if (action.action === 'type') {
-          if (await this.executeType(page, scope, action as TypeAction)) {
+          if (await this.executeType(page, scope, action as TypeAction, captchaElement)) {
             performedAction = true;
             typed = true;
             await this.emitStep(captchaElement, 'type', 'typed the code', puzzleSource, frameRole, attempt, { action });
@@ -1432,6 +1502,65 @@ export class CaptchaKrakenSolver {
    * `size=invisible` in the src, and never an `api2/bframe` challenge frame, so
    * we exclude the invisible variant here.
    */
+  /**
+   * Which vendors' code this page actually loaded.
+   *
+   * Read out of the page's own resource timing plus the `src`/`href` of
+   * everything it linked, so it works whenever it is called — a request
+   * listener would have to have been attached before navigation, and by the
+   * time a solve fails that ship has sailed.
+   *
+   * Best-effort by construction: the resource-timing buffer is finite and a
+   * page may have cleared it. An empty answer is "nothing seen", never "no
+   * captcha here". Mirrors `vendors_on_the_wire` in page_solver.py.
+   */
+  public async vendorsOnTheWire(page: Page): Promise<string[]> {
+    let names: string[] = [];
+    try {
+      // `$eval('html', ...)` rather than `evaluate`: PlaywrightPage is a
+      // structural subset carrying exactly the members the solver uses, and
+      // widening it would oblige every adapter (puppeteer-adapter.ts) to grow a
+      // member for one diagnostic. The callback runs in the page either way.
+      names = await page.$eval('html', () => {
+        const out: string[] = [];
+        try {
+          for (const e of performance.getEntriesByType('resource')) out.push(e.name);
+        } catch (err) { /* buffer unavailable */ }
+        for (const el of Array.from(
+          document.querySelectorAll('script[src],iframe[src],link[href],img[src]'),
+        )) {
+          out.push(el.getAttribute('src') || el.getAttribute('href') || '');
+        }
+        return out;
+      });
+    } catch {
+      return [];
+    }
+    const blob = (names ?? []).join(' ');
+    return VENDOR_URL_MARKERS
+      .filter(({ hosts }) => hosts.some((h) => blob.includes(h)))
+      .map(({ puzzleSource }) => puzzleSource);
+  }
+
+  /**
+   * Why nothing was found — the two cases told apart. The old text guessed
+   * "reCAPTCHA v3 / invisible" every time, including the times a vendor had
+   * simply moved its DOM. See VENDOR_URL_MARKERS.
+   */
+  private async noWidgetMessage(page: Page): Promise<string> {
+    const base = 'No interactive captcha widget detected';
+    const loaded = await this.vendorsOnTheWire(page);
+    if (!loaded.length) {
+      return `${base} (no vendor captcha code loaded on this page — likely `
+        + 'reCAPTCHA v3 / invisible, or a click-triggered challenge that has '
+        + 'not been triggered). Failing fast.';
+    }
+    return `${base}, BUT ${loaded.join('/')} code IS loaded and running on this `
+      + 'page. The vendor\'s markup no longer matches anything in '
+      + 'VENDOR_WIDGET_LOCATORS — re-measure with '
+      + 'scripts/check_vendor_selectors.py and update BOTH solver ports.';
+  }
+
   public async hasInteractiveWidgetInDom(page: Page): Promise<boolean> {
     // reCAPTCHA v2 anchor, but NOT the invisible (v3 / invisible-v2) variant.
     const recaptchaAnchors = await page.$$('iframe[src*="recaptcha/api2/anchor"]');
@@ -3440,15 +3569,66 @@ export class CaptchaKrakenSolver {
     return null;
   }
 
+  /**
+   * Where a distorted-text captcha's answer goes.
+   *
+   * Inside the widget first. If the widget holds no text box at all, widen ONCE
+   * to its enclosing <fieldset>/<form> and look again for a VENDOR-NAMED box
+   * only.
+   *
+   * BotDetect is why, and nothing else needs it. BotDetect is a self-hosted
+   * LIBRARY, so the host application owns the layout: measured on captcha.com
+   * 2026-08-24, `.BDC_CaptchaDiv` — the element detectCaptcha returns — is
+   * 280x50 and holds the image alone, while `#captchaCode` sits in a sibling
+   * `<div class="validationDiv">` under the enclosing <fieldset>. Scoped to the
+   * widget the solver found no box, textMode stayed false, and it read the code
+   * correctly and never typed it. A clean solve thrown away, and
+   * indistinguishable in any report from a model that cannot read warped text.
+   *
+   * The widened pass is restricted to TEXT_INPUT_VENDOR_SELECTORS on purpose.
+   * The generic tail is what makes the in-widget lookup work for every other
+   * vendor, and OUTSIDE the widget it is exactly how a captcha's answer ends up
+   * in a login form's username box. One level, named selectors, never the page.
+   *
+   * Mirrors `_answer_box` in page_solver.py — CLAUDE.md 1c.
+   */
+  private async answerBox(
+    scope: Frame | ElementHandle,
+    element?: ElementHandle | null,
+  ): Promise<ElementHandle | null> {
+    const inside = await this.findControl(scope, TEXT_INPUT_SELECTORS);
+    if (inside !== null || !element) return inside;
+    // Nearest first: a <fieldset> inside a <form> is the tighter box, and a
+    // union query hands back whichever comes first in document order — the
+    // outer one.
+    for (const axis of ['ancestor::fieldset[1]', 'ancestor::form[1]']) {
+      let host: ElementHandle | null = null;
+      try {
+        host = await element.$(`xpath=${axis}`);
+      } catch {
+        continue;
+      }
+      if (!host) continue;
+      const found = await this.findControl(host, TEXT_INPUT_VENDOR_SELECTORS);
+      if (found) {
+        console.log('Widget holds no answer box; using the vendor-named one in '
+          + 'its enclosing form.');
+        return found;
+      }
+    }
+    return null;
+  }
+
   /** Put the model's reading of a distorted-text captcha into its box. */
   private async executeType(
     page: Page,
     scope: Frame | ElementHandle,
     action: TypeAction,
+    element?: ElementHandle | null,
   ): Promise<boolean> {
     const text = action.text ?? '';
     if (!text) return false;
-    const field = await this.findControl(scope, TEXT_INPUT_SELECTORS);
+    const field = await this.answerBox(scope, element);
     if (!field) {
       console.warn('Type action, but no text box in the widget; skipping.');
       return false;
