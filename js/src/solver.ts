@@ -12,7 +12,7 @@ import {
   PlaywrightFrame as Frame,
 } from './playwright-types';
 import { watchPage, CaptchaWatcher, WatchOptions } from './watcher';
-import { generate_trajectory } from './trajectory.js';
+import { Humanizer, resolveHumanizer } from './humanize.js';
 import { exec, execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -84,12 +84,6 @@ function cliEnv(cliRoot: string, extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 // Simple Vector interface for internal use moved to types.ts
-
-interface TimedVector {
-  x: number;
-  y: number;
-  timestamp?: number;
-}
 
 /** Cached geometry for one reCAPTCHA 3x3 dynamic-puzzle session. */
 interface GridSession {
@@ -347,7 +341,12 @@ export class CaptchaKrakenSolver {
   /** Extra ms this solve has been granted for a recording; see recordKeyframeBurst. */
   private videoBudgetMs: number = 0;
   private videoBudgetGranted: boolean = false;
-  private lastMousePosition: Vector; // Start at safe position
+  /**
+   * Every gesture goes through here, and it owns the pointer position. See
+   * humanize.ts — the solver names gestures, this decides what events they are
+   * and how long they take.
+   */
+  private human: Humanizer;
   private imageCounter: number = 0; // Track images sent to CLI for debugging
   private sessionDebugDir: string | null = null;
   // onStep instrumentation: monotonic step index + solve-start wall clock.
@@ -413,7 +412,22 @@ export class CaptchaKrakenSolver {
 
   constructor(config: CaptchaKrakenConfig = {}) {
     this.config = config;
-    this.lastMousePosition = config.startingMousePosition ?? { x: 100, y: 100 };
+    this.human = resolveHumanizer({
+      ...config,
+      startingMousePosition: config.startingMousePosition ?? { x: 100, y: 100 },
+    });
+  }
+
+  /**
+   * Where the pointer is. Owned by the humanizer, because a mode that
+   * dispatches no motion (mobile, between taps) still has to answer this.
+   */
+  private get lastMousePosition(): Vector {
+    return { x: this.human.at[0], y: this.human.at[1] };
+  }
+
+  private set lastMousePosition(v: Vector) {
+    this.human.at = [v.x, v.y];
   }
 
   async solve(page: Page): Promise<SolveResult | void> {
@@ -464,6 +478,7 @@ export class CaptchaKrakenSolver {
     this.imageCounter = 0;
     this.stepIndex = 0;
     this.solveStartMs = start;
+    await this.human.reset(page);
     this.resetSolveState();
     this.setState(CaptchaState.Detecting);
 
@@ -1049,7 +1064,7 @@ export class CaptchaKrakenSolver {
                 await this.waitForKeyframe(captchaElement, c.await_keyframe, ...bboxCenter(bbox));
               }
               await this.executeClick(page, captchaElement, { ...c, target_bounding_box: bbox } as ClickAction, elementBox);
-              await delay(Math.random() * 80 + 80);
+              await this.human.pause('between');
             }
           } else {
             await this.executeClick(page, captchaElement, c, elementBox);
@@ -2134,6 +2149,9 @@ export class CaptchaKrakenSolver {
 
   /** Smooth-move the mouse over one cell's center with intra-cell jitter. */
   private async hoverCell(page: Page, session: GridSession, cell: number): Promise<void> {
+    // A hover is mimicry of a resting CURSOR, so on a device that has none it
+    // is not weaker mimicry — it is a mousemove at a touch-only widget.
+    if (!this.human.hovers) return;
     const cellWPage = (session.gridBoxes[0][2] - session.gridBoxes[0][0]) * session.scaleX;
     const cellHPage = (session.gridBoxes[0][3] - session.gridBoxes[0][1]) * session.scaleY;
     const center = this.cellCenterPage(cell, session);
@@ -2549,7 +2567,7 @@ export class CaptchaKrakenSolver {
             clickedOrder.push(cell);
             clickedThisRound.push(cell);
           }
-          await delay(Math.random() * 80 + 80);
+          await this.human.pause('between');
         }
         performedAction = true;
         console.log(`[recaptcha-grid] round ${round}: clicked ${bboxes.length} tile(s) -> cells ${JSON.stringify(clickedThisRound)}.`);
@@ -3316,16 +3334,19 @@ export class CaptchaKrakenSolver {
   /**
    * Run `fn` (typically the model query) while idly drifting the cursor over
    * the captcha, so the mouse behaves like a human weighing the options instead
-   * of freezing during inference. Uses the same generate_trajectory paths as real
-   * clicks; cancelled the instant `fn` resolves. Best-effort — any wander error
-   * is swallowed and never fails the solve. Disable via config.idleMouseWander.
+   * of freezing during inference. Uses the same humanizer as real clicks, so a
+   * mode with no cursor skips it entirely; cancelled the instant `fn` resolves.
+   * Best-effort — any wander error is swallowed and never fails the solve.
+   * Disable via config.idleMouseWander.
    */
   private async withIdleWander<T>(
     page: Page,
     element: ElementHandle,
     fn: () => Promise<T>,
   ): Promise<T> {
-    if (this.config.idleMouseWander === false) return fn();
+    // Same rule as hoverCell: drifting a cursor that does not exist would emit
+    // mousemove at a touch-only widget.
+    if (this.config.idleMouseWander === false || !this.human.hovers) return fn();
     let box: { x: number; y: number; width: number; height: number } | null = null;
     try { box = await element.boundingBox(); } catch { box = null; }
     if (!box || box.width < 20 || box.height < 20) return fn();
@@ -3395,77 +3416,16 @@ export class CaptchaKrakenSolver {
 
   async moveAndClick(page: Page, element: ElementHandle) {
     await this.move(page, element);
-    await page.mouse.down();
-    await delay(Math.random() * 20 + 20);
-    await page.mouse.up();
+    await this.human.click(page, this.human.at);
   }
 
+  /**
+   * Travel to a point. What that MEANS is the humanizer's business — on a
+   * touchscreen with no finger down it is a bookkeeping update and emits
+   * nothing at all.
+   */
   private async performSmoothMove(page: Page, x: number, y: number) {
-    // 60Hz sampling; see src/trajectory.ts
-    const [points, timings] = generate_trajectory(
-      [this.lastMousePosition.x, this.lastMousePosition.y],
-      [x, y],
-      60 // 60 points per second
-    );
-
-    const SPEED_MULTIPLIER = 1;
-
-    const vectors: TimedVector[] = [];
-
-    for (let i = 0; i < points.length; i++) {
-      vectors.push({
-        x: points[i][0],
-        y: points[i][1],
-        timestamp: timings[i] / SPEED_MULTIPLIER // timings are cumulative from start
-      });
-    }
-
-    await this.tracePath(page, vectors);
-  }
-
-  private async tracePath(page: Page, vectors: TimedVector[]) {
-    // Get viewport for clamping
-    let viewport: { width: number, height: number } = { width: 1920, height: 1080 };
-    try {
-      const vp = page.viewportSize();
-      if (vp) viewport = vp;
-    } catch (e) { }
-
-    const startTime = Date.now();
-
-    for (let i = 0; i < vectors.length; i++) {
-      const v = vectors[i];
-
-      try {
-        // Clamp coordinates to viewport
-        const clampedX = Math.max(0, Math.min(v.x, viewport.width));
-        const clampedY = Math.max(0, Math.min(v.y, viewport.height));
-
-        // Move mouse
-        await page.mouse.move(clampedX, clampedY);
-
-        // Update last position
-        this.lastMousePosition = { x: clampedX, y: clampedY };
-
-        // Calculate delay to match target timestamp
-        if (v.timestamp !== undefined) {
-          const targetTime = startTime + v.timestamp;
-          const now = Date.now();
-          const delayMs = targetTime - now;
-
-          if (delayMs > 0) {
-            await delay(delayMs);
-          }
-        }
-      } catch (error) {
-        // Check if page closed or other fatal errors if needed, otherwise ignore
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (errorMessage.includes('Target closed') || errorMessage.includes('Session closed')) {
-          log('Warning: could not move mouse, page or session closed.');
-          return;
-        }
-      }
-    }
+    await this.human.move(page, [x, y]);
   }
 
   private async executeClick(
@@ -3508,16 +3468,7 @@ export class CaptchaKrakenSolver {
       return;
     }
 
-    const absoluteX = elementBox.x + relativeX;
-    const absoluteY = elementBox.y + relativeY;
-
-    // Use the shared smooth move method
-    await this.performSmoothMove(page, absoluteX, absoluteY);
-
-    // Perform click
-    await page.mouse.down();
-    await page.waitForTimeout(Math.random() * 30 + 20); // Random hold duration
-    await page.mouse.up();
+    await this.human.click(page, [elementBox.x + relativeX, elementBox.y + relativeY]);
   }
 
   private async executeDrag(
@@ -3533,13 +3484,7 @@ export class CaptchaKrakenSolver {
     };
     const src = bboxCenter(action.source_bounding_box);
     const dst = bboxCenter(action.target_bounding_box);
-
-    await this.performSmoothMove(page, src.x, src.y);
-    await page.mouse.down();
-    await page.waitForTimeout(Math.random() * 50 + 50);
-    await this.performSmoothMove(page, dst.x, dst.y);
-    await page.waitForTimeout(Math.random() * 50 + 50);
-    await page.mouse.up();
+    await this.human.drag(page, [src.x, src.y], [dst.x, dst.y]);
   }
 
   // ────────────────────────────────────────────────────────── typing + sliding
@@ -3634,24 +3579,10 @@ export class CaptchaKrakenSolver {
       return false;
     }
 
-    await this.moveAndClick(page, field);  // travel there, then press to focus
-    // A retry round arrives with the previous attempt still in the box, and
-    // typing would APPEND to it — submitting a string the model never read.
-    try {
-      await page.keyboard.press('Control+A');
-    } catch { /* an adapter without a keyboard shortcut path */ }
-    // Per character rather than one type(text, {delay}) call: a constant
-    // inter-key delay is itself a signal, and these are the vendors that score
-    // typing cadence.
-    for (const ch of text) {
-      try {
-        await page.keyboard.type(ch);
-      } catch (e) {
-        console.warn('Could not type into the captcha field:', e);
-        return false;
-      }
-      await page.waitForTimeout(Math.random() * 90 + 45);
-    }
+    // Tapping the box is what focuses it — and on a phone it is also what
+    // raises the keyboard, so this is not decoration on either device.
+    await this.moveAndClick(page, field);
+    if (!(await this.human.typeText(page, field, text))) return false;
     console.log(`Typed ${text.length} character(s) into the captcha field.`);
     return true;
   }
@@ -3701,6 +3632,17 @@ export class CaptchaKrakenSolver {
    * Returns false if there is nothing here to drag, leaving the caller's normal
    * no-op handling to deal with it.
    */
+  /**
+   * Device pixels per CSS pixel, read off the shot we are about to measure.
+   * 1 when the image cannot be read — an unreadable shot is already the
+   * trackPiece-returns-null path, and guessing a ratio would steer by it.
+   */
+  private shotScale(shot: string, cssWidth: number): number {
+    const dims = this.readPngDimensions(shot);
+    if (!dims || cssWidth <= 0) return 1;
+    return dims.width / cssWidth;
+  }
+
   private async executeSlide(
     page: Page,
     element: ElementHandle,
@@ -3730,12 +3672,11 @@ export class CaptchaKrakenSolver {
       const targetY = ((action.target_bounding_box[1] + action.target_bounding_box[3]) / 2)
         * elementBox.height;
       console.log('No slider track; dragging the piece to the slot directly.');
-      await this.performSmoothMove(page, box.x + box.width / 2, box.y + box.height / 2);
-      await page.mouse.down();
-      await page.waitForTimeout(Math.random() * 50 + 50);
-      await this.performSmoothMove(page, elementBox.x + targetX, elementBox.y + targetY);
-      await page.waitForTimeout(Math.random() * 50 + 50);
-      await page.mouse.up();
+      await this.human.drag(
+        page,
+        [box.x + box.width / 2, box.y + box.height / 2],
+        [elementBox.x + targetX, elementBox.y + targetY],
+      );
       return true;
     }
 
@@ -3749,7 +3690,7 @@ export class CaptchaKrakenSolver {
     // track behind it as it goes. Either would otherwise be the largest moving
     // thing in frame, and we would track the handle instead of the piece.
     const pad = Math.max(4, hbox.height * 0.35);
-    const exclude: [number, number, number, number] = [
+    const band: [number, number, number, number] = [
       0,
       hbox.y - elementBox.y - pad,
       elementBox.width,
@@ -3760,23 +3701,35 @@ export class CaptchaKrakenSolver {
       path.join(os.tmpdir(), `slide_${Date.now()}_${i}_${Math.floor(Math.random() * 1e9)}.png`));
     try {
       await this.move(page, handle, { paddingPercentage: 30 });
-      await page.mouse.down();
-      await page.waitForTimeout(Math.random() * 60 + 60);
+      await this.human.press(page);
+      await this.human.pause('grab');
       await element.screenshot({
         path: shots[0],
         timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
         animations: 'disabled',
       });
 
+      // CSS pixels out here, DEVICE pixels inside the shots. The same number on
+      // a 1x desktop and 2.625x apart on a phone, which is why this loop
+      // measured a slider correctly for a year and then missed every attempt
+      // the moment Tier 3 grew a mobile arm: the mask landed above the handle,
+      // the widths came back 2.6x too wide, and solveSlideGeometry threw them
+      // out as wider than the widget. Measured from the shot rather than asked
+      // of the page, for the same reason the grid path does it (`scaleX` in
+      // driveRecaptchaGrid): what the CV reads is the image, whatever the
+      // window thinks its ratio is.
+      const scale = this.shotScale(shots[0], elementBox.width);
+      const exclude = band.map((v) => v * scale) as [number, number, number, number];
+
       const widths: Array<[number, number]> = [];
       let lastBox: [number, number, number, number] | null = null;
       for (let i = 0; i < SLIDE_PROBE_OFFSETS_PX.length; i++) {
         const offset = SLIDE_PROBE_OFFSETS_PX[i];
         await this.performSmoothMove(page, startX + offset, holdY);
-        await page.waitForTimeout(Math.random() * 40 + 40);
+        await this.human.pause('probe');
         const box = await this.trackPiece(element, shots[0], shots[i + 1], exclude);
         if (box) {
-          widths.push([offset, box[2] - box[0]]);
+          widths.push([offset, (box[2] - box[0]) / scale]);
           lastBox = box;
         }
       }
@@ -3797,12 +3750,12 @@ export class CaptchaKrakenSolver {
         // neither the model nor the screen asked for.
         let offset = widths[widths.length - 1][0];
         for (let i = 0; i < SLIDE_MAX_CORRECTIONS; i++) {
-          const pieceCentre = lastBox[2] - pieceWidth / 2;
+          const pieceCentre = lastBox[2] / scale - pieceWidth / 2;
           const error = targetX - pieceCentre;
           if (Math.abs(error) <= SLIDE_TOLERANCE_PX) break;
           offset += error / ratio;
           await this.performSmoothMove(page, startX + offset, holdY);
-          await page.waitForTimeout(Math.random() * 40 + 40);
+          await this.human.pause('probe');
           const box = await this.trackPiece(element, shots[0], shots[3], exclude);
           if (!box) break;  // ran out of track; release where we are
           lastBox = box;
@@ -3812,9 +3765,9 @@ export class CaptchaKrakenSolver {
       // Settle before letting go. A release in the same tick as the last move
       // reads as a machine, and some vendors sample the final milliseconds of
       // the gesture.
-      await page.waitForTimeout(Math.random() * 120 + 90);
+      await this.human.pause('settle');
     } finally {
-      try { await page.mouse.up(); } catch { /* the page may have navigated */ }
+      try { await this.human.release(page); } catch { /* the page may have navigated */ }
       for (const shot of shots) {
         try { if (fs.existsSync(shot)) fs.unlinkSync(shot); } catch { /* best-effort */ }
       }

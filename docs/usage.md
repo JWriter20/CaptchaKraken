@@ -201,6 +201,167 @@ against CaptchaKraken's own `requests`, and is async-only against a synchronous
 driver — two independent blockers. Playwright is the Python path, and
 `patchright` / `camoufox` are stealth-patched builds of it.
 
+## How it moves — mouse, mobile, none, or yours
+
+Solving a captcha is two jobs: reading the puzzle, and *performing* the answer.
+The second one is a choice of **input device**, and it is yours to make.
+
+```typescript
+new CaptchaKrakenSolver({ humanization: 'mouse' })   // default
+new CaptchaKrakenSolver({ humanization: 'mobile' })  // touch events
+new CaptchaKrakenSolver({ humanization: 'none' })    // straight to the DOM effect
+new CaptchaKrakenSolver({ humanizer: myOwn })        // yours; overrides the above
+```
+
+```python
+PageSolver(config=PageSolverConfig(humanization="mobile"))
+PageSolver(config=PageSolverConfig(humanizer=my_own))
+```
+
+Unset, both ports read `CAPTCHA_HUMANIZATION` and then fall back to `mouse`.
+The env var deliberately **loses** to anything set in code: which mode is right
+is a property of the page you are driving, and a stray env var flipping a
+desktop solve to touch dispatch would break every one of them silently.
+
+| Mode | What it dispatches | Use it when |
+|---|---|---|
+| `mouse` | Bezier arcs, Fitts's-law durations, speed-scaled jitter, overshoot-and-correct | Default. Desktop pages. |
+| `mobile` | Real touch events with finger kinematics — see below | The page is a mobile site, or you are driving a phone |
+| `none` | One move, one press, one release. No dwell, no jitter | Your own fixtures, or your stack humanises elsewhere |
+| custom | Whatever you write | You already model your users' input |
+
+### `mobile` — touch, not a smaller mouse
+
+A mousemove at a touch-only widget is not weaker humanisation, it is **the wrong
+event**: the page's touch handlers never fire, and the solve fails for a reason
+nothing reports. So mobile mode never touches `page.mouse`. It emits
+`touchstart` / `touchmove` / `touchend`, with the differences that actually
+distinguish a finger from a cursor —
+
+- **there is no hover.** A move with nothing touching the glass dispatches
+  nothing at all; the tile-hover and the idle drift during inference switch
+  themselves off.
+- **taps carry a contact wobble.** A finger held for 90 ms does not report one
+  unchanging coordinate — the centroid of the contact patch rolls a pixel or two
+  under pressure. A tap with zero movement in between is a synthetic tap.
+- **swipes have their own kinematics.** A finger leaves fast and brakes late,
+  bows far less than a hand crossing a desk, and never overshoots — it occludes
+  its own target and commits. Jitter is a low-frequency wander of the reported
+  centroid, not white noise scaled by speed.
+- **everything is slower**, and more variable, including soft-keyboard typing.
+
+In a browser, that needs a Chromium-family page with touch turned on:
+
+```typescript
+import { chromium, devices } from 'playwright';
+
+const context = await browser.newContext({ ...devices['Pixel 7'], hasTouch: true });
+const page = await context.newPage();
+
+await new CaptchaKrakenSolver({ humanization: 'mobile' }).solve(page);
+```
+
+### On a real device — Appium, WebdriverIO, Selenium
+
+Point `touchDriver` at the WebDriver session and the gestures go out as **W3C
+pointer actions** with `pointerType: "touch"` instead of CDP. A whole swipe is
+sent as **one action chain with per-sample durations**, so the kinematics are
+reproduced by the device rather than by a loop round-tripping over the wire —
+over which a 90 Hz path is not 90 Hz at all.
+
+```typescript
+const solver = new CaptchaKrakenSolver({
+  humanization: 'mobile',
+  touchDriver: driver,                            // your Appium / WebdriverIO session
+  touchTransform: { scale: 3, origin: [0, 132] }, // CSS px -> screen px
+});
+```
+
+```python
+PageSolver(config=PageSolverConfig(
+    humanization="mobile",
+    touch_driver=driver,
+    touch_transform={"scale": 3.0, "origin": (0, 132)},
+))
+```
+
+**`touchDriver` moves the finger; it does not replace the page.** Detection and
+screenshots still go through a Playwright-compatible `page`, so the usual shape
+for a real handset is *two objects*: attach Playwright to the device's Chrome
+over CDP for the DOM reads, and hand the Appium session to `touchDriver` for the
+gestures.
+
+```bash
+adb forward tcp:9222 localabstract:chrome_devtools_remote
+```
+
+```typescript
+const browser = await chromium.connectOverCDP('http://localhost:9222');
+const page = browser.contexts()[0].pages()[0];
+
+await new CaptchaKrakenSolver({
+  humanization: 'mobile',
+  touchDriver: appiumDriver,
+}).solve(page);
+```
+
+That split is the point, not a workaround: the touches are injected by the
+**operating system**, where a real one comes from, while the DOM reads take the
+cheap path. If you do not need OS-level injection, drop `touchDriver` — mobile
+mode dispatches CDP touch events at that same page on its own.
+
+`touchTransform` exists because everything upstream is **CSS pixels in the
+page's viewport** — that is what `boundingBox()` returns — while a handset wants
+**screen pixels**. The two differ by `window.devicePixelRatio` and by whatever
+browser chrome sits above the webview. The default is the identity transform,
+which is right for emulation and for anyone who has already mapped the
+coordinates.
+
+**A missing `scale` is refused, not guessed.** Get the transform wrong and
+nothing raises: the action chain is valid W3C, the device performs it, and the
+finger lands somewhere else — the solve then fails looking exactly like a model
+that cannot read the puzzle. So if you pass a `touchDriver`, set no `scale`, and
+the page reports a `devicePixelRatio` other than 1, the first gesture raises and
+names the value to use. Passing `scale: 1` explicitly is how you say *"I have
+already mapped these"* — an unset scale and an explicit 1 are different facts and
+only the first is checked. The ratio is read once per solve, not per gesture.
+
+`origin` is never checked, because it cannot be measured from inside the page at
+all: it is the webview's top-left in screen coordinates, and only the device
+knows it. The refusal names it so you set both halves together.
+
+Nothing here imports Selenium: the payload is the raw WebDriver one, sent
+through `performActions()` / `execute("actions", …)`, so any client that speaks
+the protocol works. Press and release are separate calls on purpose — W3C input
+state persists per *session*, which is what lets the puzzle-slider driver press,
+screenshot, steer, screenshot and only then let go.
+
+### Writing your own
+
+Implement the gesture vocabulary — `move`, `press`, `release`, `typeText`, plus
+a pause table — and `click` / `drag` compose themselves. The humanizer also owns
+the pointer position, because a mode that dispatches no motion still has to
+answer where the next gesture starts.
+
+```typescript
+import { NullHumanizer, type Humanizer } from 'captchakraken';
+
+class HardwareMouse extends NullHumanizer implements Humanizer {
+  async move(page, to) {
+    await myUsbPointer.glideTo(to[0], to[1]);
+    this.at = to;
+  }
+}
+
+new CaptchaKrakenSolver({ humanizer: new HardwareMouse() });
+```
+
+This is also the right answer when your **browser already humanises**. Camoufox's
+`humanize` juggler re-humanises every `mouse.move()` it is handed, so running it
+against `mouse` mode composes two models: measured **82.1 s against 13.4 s** on
+one geetest slide, because each of the 60 trajectory points became its own
+humanised sub-trajectory. Use `none` there, and let camoufox do it.
+
 ## Solve captchas as they appear
 
 `solve(page)` is a one-shot: it solves whatever challenge is on the page right
