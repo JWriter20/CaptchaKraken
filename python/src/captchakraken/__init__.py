@@ -32,6 +32,21 @@ from .action_types import (
 from .image_processor import ImageProcessor
 from .overlay import add_overlays_to_image
 
+# How gestures are PERFORMED — mouse, touch, or nothing. Deliberately outside
+# the try below: `humanize` imports only `trajectory`, so it has no dependency
+# floor at all, and a caller writing a custom Humanizer must be able to import
+# the base class without the serving stack installed.
+from .humanize import (
+    AppiumTouchBackend,
+    CdpTouchBackend,
+    Humanizer,
+    MobileHumanizer,
+    MouseHumanizer,
+    NullHumanizer,
+    TouchBackend,
+    TouchscreenTouchBackend,
+)
+
 # The planner (requests) and solver (torch/vllm/transformers) pull in the heavy
 # serving stack. Keep them optional so leaf modules — e.g. tool_calls.find_grid,
 # which needs only cv2 + numpy + pillow — can be imported in a minimal env (CI's
@@ -70,6 +85,14 @@ __all__ = [
     "TypeAction",
     "WaitAction",
     "add_overlays_to_image",
+    "Humanizer",
+    "MouseHumanizer",
+    "MobileHumanizer",
+    "NullHumanizer",
+    "TouchBackend",
+    "CdpTouchBackend",
+    "AppiumTouchBackend",
+    "TouchscreenTouchBackend",
 ]
 
 __version__ = "2.6.0"

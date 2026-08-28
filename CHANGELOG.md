@@ -3,6 +3,82 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [Unreleased]
+
+Humanisation stops being something the driver *is* and becomes something it
+*has*. It used to be wired straight into the solver: every gesture was a
+`page.mouse.*` call with a Bezier trajectory in front of it and a random sleep
+behind it, and there was no way to ask for anything else — which meant no way to
+drive a phone, and no way to turn it off when your stack already did it.
+
+### Added
+
+- **`humanization: 'mouse' | 'mobile' | 'none'`** (`humanization=` in Python),
+  and **`humanizer`** for one of your own. Unset reads `CAPTCHA_HUMANIZATION`,
+  then defaults to `mouse` — which is byte-for-byte what the driver did before,
+  so nothing moves for an existing caller. The env var deliberately loses to
+  anything set in code: which mode is right is a property of the page you are
+  driving, not a deployment decision.
+
+- **`'mobile'` — real touch events with finger kinematics.** It never touches
+  `page.mouse`. A mousemove at a touch-only widget is the *wrong event*, not a
+  weaker one: the page's touch handlers never fire and the solve fails for a
+  reason nothing reports. What it does instead:
+  - **no hover.** A move with nothing on the glass dispatches nothing at all,
+    and the reCAPTCHA tile-hover and the idle drift during inference switch
+    themselves off rather than emitting a cursor that does not exist.
+  - **taps wobble.** A finger held for 90 ms does not report one unchanging
+    coordinate — the contact centroid rolls a pixel or two under pressure. A tap
+    with zero movement between `touchstart` and `touchend` is a synthetic tap.
+  - **`generate_swipe`**, a separate motion model rather than the mouse one
+    retuned. A finger leaves fast and brakes late (where a mouse hand is
+    symmetric), bows far less, wanders low-frequency instead of jittering with
+    speed, and **never overshoots** — that tell is a hand arriving past a target
+    it cannot see under the cursor, and a finger occludes its own target.
+  - Fitts's law with touch constants: a wider effective target (a fingertip is
+    the 44 pt / 48 dp both platform guidelines are built around) and a slower
+    intercept, so every gesture takes longer than its mouse equivalent.
+
+- **Appium / WebdriverIO / Selenium support**, via `touchDriver`
+  (`touch_driver=`). Gestures go out as **W3C pointer actions** with
+  `pointerType: "touch"`, and a whole swipe is **one action chain with
+  per-sample durations** — the kinematics are reproduced by the device rather
+  than by a loop round-tripping over the wire, over which a 90 Hz path is not
+  90 Hz at all. Press and release stay separate calls, because W3C input state
+  persists per session and that is what lets the puzzle-slider driver press,
+  screenshot, steer, screenshot and only then let go. Nothing imports Selenium:
+  the payload is the raw protocol one.
+  `touchTransform` / `touch_transform` maps CSS pixels onto screen pixels
+  (`{scale, origin}`) — upstream is whatever `boundingBox()` returned, a handset
+  wants device coordinates, and the difference is `devicePixelRatio` plus the
+  chrome above the webview. Neither is guessable from inside the solver, so it
+  is a parameter and not a heuristic.
+
+- **`'none'`** — one move, one press, one release, and text in a single `fill()`.
+  Roughly an order of magnitude faster on a slider, and detectable by anything
+  scoring pointer telemetry. That is the trade, stated plainly: it is for your
+  own fixtures, and for stacks that humanise elsewhere. Camoufox is the concrete
+  case — its `humanize` juggler re-humanises every `mouse.move()` it is handed,
+  and composing the two measured **82.1 s against 13.4 s** on one geetest slide.
+
+- **`startingMousePosition` is now honoured on the first gesture too.** The
+  camoufox origin-seeding step used to overwrite it with the window centre.
+
+### Changed
+
+- **The pointer position moved out of the solver** and into the humanizer, in
+  both ports — a mode that dispatches no motion still has to answer where the
+  next gesture starts. `SolveResult.finalMousePosition` /
+  `final_mouse_position` are unchanged.
+
+- **Every inter-gesture wait is named** (`tap`, `between`, `grab`, `drop`,
+  `probe`, `settle`, `key`) and comes from the mode's own table, rather than
+  from a literal at each call site. A finger dwells on a tap about four times as
+  long as a mouse button is held, and neither number means anything to a caller
+  who turned humanisation off. An unknown name yields no wait rather than
+  raising, so a new pause site cannot break a humanizer written against an older
+  release.
+
 ## [2.6.0] - 2026-08-19
 
 A solve-timing release. Nothing here changes what the model answers; it changes
@@ -52,6 +128,35 @@ that had no way to succeed.
   itemised.
 
 ### Fixed
+
+- **A missing Appium `touchTransform` scale is now refused instead of
+  dispatched.** The transform is the one part of the touch path that fails
+  silently: hand it a wrong (or absent) `scale` and nothing raises anywhere —
+  the W3C chain is valid, the device performs it, the finger lands somewhere
+  else, and the solve fails looking exactly like a model that cannot read the
+  puzzle. Same shape as the slider bug below, one seam over. A `touchDriver`
+  with no `scale` on a page reporting `devicePixelRatio != 1` now raises on the
+  first gesture and names the value to pass. An explicit `scale: 1` is taken as
+  the caller's word that the coordinates are already mapped — unset and an
+  explicit 1 are different facts, and only the first is checked. An unreadable
+  ratio falls through to the identity: absent evidence is not evidence of a
+  mismatch. `origin` cannot be measured from inside the page, so it is named in
+  the refusal rather than guessed at.
+
+- **The slider missed every attempt on a phone.** `executeSlide` closes a loop
+  between two pixel spaces — it steers the handle in CSS pixels (`boundingBox`,
+  the probe offsets, the slot the model named) and MEASURES the piece in the
+  screenshot's pixels, where the CV masks the handle and reports what moved.
+  Those are the same number on a 1x desktop, so the loop was right for a year
+  and the two spaces were never told apart. At a device-pixel ratio of 2.625 the
+  mask landed on a strip of empty card ABOVE the handle, leaving the handle the
+  largest moving thing in frame; the widths came back 2.6x too wide;
+  `solveSlideGeometry` threw them out as wider than the widget; and the drive
+  fell back to open-loop guessing. Measured on the geetest_v3_slide fixture:
+  0/2 ports on a Pixel 7 against 2/2 on the same three boards under a mouse,
+  and 2/2 after. The scale is read off the shot rather than asked of the page —
+  what the CV measures is the image, whatever the window thinks its ratio is.
+  Both ports, same commit.
 
 - **GeeTest's OK button was never pressed.** It ships as
   `<div class="geetest_submit geetest_disable">OK</div>` — invisible to both

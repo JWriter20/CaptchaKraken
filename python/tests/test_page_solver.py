@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from captchakraken.humanize import MobileHumanizer, MouseHumanizer  # noqa: E402
 from captchakraken.page_solver import (  # noqa: E402
     AnimatedChallengeError,
     CaptchaSolveError,
@@ -98,12 +99,13 @@ class FakeMouse:
     def __init__(self) -> None:
         self.moves: List[tuple] = []
         self.clicks = 0
+        self.presses = 0
 
     def move(self, x: float, y: float) -> None:
         self.moves.append((x, y))
 
     def down(self) -> None:
-        pass
+        self.presses += 1
 
     def up(self) -> None:
         self.clicks += 1
@@ -162,8 +164,11 @@ def _solver(**overrides: Any) -> PageSolver:
     solver = PageSolver(config=PageSolverConfig(**overrides), solver=_NO_MODEL)
     solver._solver = None
     # Deliberately NOT __init__'s value: these tests call the mouse helpers
-    # directly, and an unseeded cursor takes the seeding path first.
-    solver._cursor_seeded = True
+    # directly, and an unseeded cursor takes the seeding path first. Set on the
+    # HUMANIZER, which is where that flag lives — setting it on the solver would
+    # silently do nothing and the seeding move would come back.
+    if hasattr(solver._human, "_cursor_seeded"):
+        solver._human._cursor_seeded = True
     return solver
 
 
@@ -342,6 +347,79 @@ class TestSolveLoop:
         solver._solve_single = lambda *_: (True, [])  # type: ignore[method-assign]
         solver.is_captcha_solved = lambda _page: True  # type: ignore[method-assign]
         assert solver.solve(FakePage()).is_solved is True
+
+
+class TestHumanizationMode:
+    """The mode is a choice of INPUT DEVICE, and the solver must honour it
+    everywhere — not just at the one call site somebody remembered."""
+
+    def _driven(self, mode, backend=None):
+        """Run one full round against a click answer, and report what was
+        dispatched."""
+        cfg: Dict[str, Any] = {"humanization": mode}
+        if backend is not None:
+            cfg = {"humanizer": MobileHumanizer(backend=backend)}
+        solver = _solver(**cfg)
+        element = FakeElement(src="recaptcha/api2/bframe")
+        page = FakePage({RECAPTCHA_BFRAME: element})
+        solver.detect_captcha = lambda _page: element  # type: ignore[method-assign]
+        solver._solve_single = lambda *_: (  # type: ignore[method-assign]
+            solver._execute_click(
+                page,
+                {"target_bounding_box": [0.1, 0.1, 0.3, 0.3]},
+                element.bounding_box(),
+            ),
+            [],
+        ) and (True, [])
+        solver.is_captcha_solved = lambda _page: True  # type: ignore[method-assign]
+        solver.solve(page)
+        return page
+
+    def test_mobile_never_reaches_for_the_mouse(self):
+        # THE regression. A mousemove at a touch-only widget is the wrong event,
+        # not a weaker one: the page's touch handlers never fire, and the solve
+        # fails for a reason nothing reports.
+        backend = _RecordingTouch()
+        page = self._driven("mobile", backend=backend)
+        assert page.mouse.moves == [] and page.mouse.presses == 0
+        assert backend.kinds == ["down", "move", "up"]
+
+    #: `_execute_click` insets 10% and picks a random point inside the bbox
+    #: (0.1..0.3 of a 400px element, offset 100), so the landing point is a
+    #: band, not a constant.
+    _TARGET = (148.0, 212.0)
+
+    def _lands_on_target(self, at) -> bool:
+        lo, hi = self._TARGET
+        return lo <= at[0] <= hi and lo <= at[1] <= hi
+
+    def test_none_spends_one_move_per_gesture(self):
+        page = self._driven("none")
+        assert len(page.mouse.moves) == 1
+        assert self._lands_on_target(page.mouse.moves[0])
+
+    def test_mouse_is_still_a_full_trajectory(self):
+        page = self._driven("mouse")
+        assert len(page.mouse.moves) > 5
+        assert self._lands_on_target(page.mouse.moves[-1])
+
+
+class _RecordingTouch:
+    """Stands in for a CDP/Appium backend — see humanize.TouchBackend."""
+
+    name = "recording"
+
+    def __init__(self) -> None:
+        self.kinds: List[str] = []
+
+    def down(self, x: float, y: float) -> None:
+        self.kinds.append("down")
+
+    def move(self, path) -> None:
+        self.kinds.append("move")
+
+    def up(self, x: float, y: float) -> None:
+        self.kinds.append("up")
 
 
 class TestFreshnessGuard:
@@ -533,9 +611,12 @@ class TestDeadline:
 
 
 class TestTracePathClamping:
+    """Lives on `humanize.MouseHumanizer` now, but it is the same rule and the
+    same camoufox deadlock it exists to avoid."""
+
     def _points(self, page, pts):
-        solver = _solver()
-        solver._trace_path(page, pts, [0.0] * len(pts))
+        human = MouseHumanizer()
+        human._trace(page, pts, [0.0] * len(pts))
         return page.mouse.moves
 
     def test_falls_back_to_the_page_when_viewport_size_is_none(self):
@@ -742,18 +823,28 @@ class TestSlideDriver:
 
     PIECE_LEFT, PIECE_W = 10.0, 40.0
 
-    def _rig(self, target_px: float, widget_w: float = 400.0):
+    def _rig(self, target_px: float, widget_w: float = 400.0, dpr: float = 1.0):
+        """`dpr` is the screen's device-pixel ratio, and it is the one thing in
+        here that is not the same number twice: the shots come back in DEVICE
+        pixels while every coordinate the loop steers by is a CSS pixel. Both
+        are simulated in that space, and the masks the loop hands the CV are
+        recorded on `page.excludes` so a test can read what space they arrived
+        in."""
         solver = _solver()
         page = _typing_page()
         handle = FakeElement(box={"x": 120.0, "y": 420.0, "width": 40.0, "height": 30.0})
         element = FakeElement(box={"x": 100.0, "y": 100.0, "width": widget_w, "height": 400.0})
+        element.screenshot = lambda path, **_: _write_png(  # type: ignore[method-assign]
+            path, int(round(widget_w * dpr)), int(round(400.0 * dpr)))
         scope = _Scope({".geetest_slider_button": handle})
         start_x = handle._box["x"] + handle._box["width"] / 2
+        page.excludes = []  # type: ignore[attr-defined]
 
-        def fake_track(_element, _before, _after, _exclude):
+        def fake_track(_element, _before, _after, exclude):
+            page.excludes.append(list(exclude))  # type: ignore[attr-defined]
             offset = page.mouse.moves[-1][0] - start_x
             right = self.PIECE_LEFT + self.PIECE_W + offset
-            return [int(self.PIECE_LEFT), 0, int(round(right)), 20]
+            return [int(self.PIECE_LEFT * dpr), 0, int(round(right * dpr)), int(20 * dpr)]
 
         solver._track_piece = fake_track  # type: ignore[method-assign]
         frac = target_px / widget_w
@@ -799,6 +890,32 @@ class TestSlideDriver:
         released_at = next(x for kind, x, _ in reversed(page.mouse.log) if kind == "move")
         # piece centre = 30 + 2*offset -> 200 wants offset 85.
         assert abs((released_at - start_x) - 85.0) <= solver.config.slide_tolerance_px
+
+    def test_a_hidpi_screen_still_lands_the_piece(self):
+        """Regression, 2026-08-27. Tier 3's mobile arm drove this fixture on a
+        Pixel 7 — device-pixel ratio 2.625 — and the slider missed on every
+        attempt while the mouse arm solved the same three boards. The loop
+        measures the piece in the SHOT's pixels and steers the handle in the
+        PAGE's, and those are the same number only at 1x. At 2.625 the widths
+        come back 2.6x too wide, `_solve_slide_geometry` rejects them as larger
+        than the widget, and the drive falls back to open-loop guessing."""
+        solver, page, element, scope, action, start_x = self._rig(target_px=150.0, dpr=2.625)
+        solver._execute_slide(page, element, scope, action, element._box)
+        released_at = next(x for kind, x, _ in reversed(page.mouse.log) if kind == "move")
+        assert abs((released_at - start_x) - 120.0) <= solver.config.slide_tolerance_px
+
+    def test_the_handle_mask_is_in_the_shot_s_pixel_space(self):
+        """`changed_bbox` masks in IMAGE pixels. A CSS-pixel band handed to it on
+        a 2.625x screen masks a strip of empty card ABOVE the handle and leaves
+        the handle itself unmasked — the largest moving thing in frame, and what
+        the loop would then measure as the piece."""
+        solver, page, element, scope, action, _ = self._rig(target_px=150.0, dpr=2.625)
+        solver._execute_slide(page, element, scope, action, element._box)
+        # The handle's own band, in the shot's pixels: y 420..450 page = 320..350
+        # within the element, x across the full 400-wide widget.
+        x1, y1, x2, y2 = page.excludes[0]
+        assert y1 <= 320.0 * 2.625 and y2 >= 350.0 * 2.625
+        assert x1 == 0.0 and x2 == pytest.approx(400.0 * 2.625, abs=1.0)
 
     def test_a_sliderless_widget_drags_the_piece_itself(self):
         """Lemin's 'cropped' puzzle has no track — you drag the piece onto the

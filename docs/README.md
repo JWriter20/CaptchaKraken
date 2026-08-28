@@ -14,7 +14,7 @@ guides. Start here.
 |---|---|
 | [☁️ Hosted API](./hosted-api.md) | Sign in, keys, pricing, per-session billing, and every error code — the no-GPU path. |
 | [🖥️ Self-hosting](./self-hosting.md) | One-command install, model-size gate, server management, configuration, and **updating** (`captchakraken fetch`). |
-| [🧑‍💻 Usage](./usage.md) | Install both ports, the Python one-liner, all four browser frameworks (Playwright / Patchright / camoufox-js / Puppeteer), and migrating from v1. |
+| [🧑‍💻 Usage](./usage.md) | Install both ports, the Python one-liner, all four browser frameworks (Playwright / Patchright / camoufox-js / Puppeteer), **how it moves** (mouse / mobile touch / none / your own), and migrating from v1. |
 | [⚙️ How it works](./how-it-works.md) | The detect → grid → click → verify pipeline, the OpenCV grid tracer, the stale-frame freshness guard, and solution dedup. |
 | [📊 Performance](./performance.md) | Model accuracy, the memory-bandwidth speed model + per-device throughput, and IP-reputation guidance. |
 | [🗺️ Roadmap](./roadmap.md) | What shipped recently, what's in progress, and what's planned (more captcha types). |

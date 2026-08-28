@@ -1,3 +1,5 @@
+import type { Humanizer, HumanizationMode, TouchTransform } from './humanize.js';
+
 /**
  * Lifecycle event emitted by {@link CaptchaKrakenConfig.onStep}. One is fired
  * before any interaction (`stage: 'initial'`) and one after every executed
@@ -47,6 +49,69 @@ export interface SolveStepEvent {
 }
 
 export interface CaptchaKrakenConfig {
+  /**
+   * How the driver MOVES — a choice of input DEVICE, not a realism dial.
+   *
+   *  - `'mouse'`  (default) Bezier arcs, Fitts's-law durations, overshoot.
+   *  - `'mobile'` touch events with finger kinematics. On a touch-only widget
+   *               this is the difference between the page's handlers firing and
+   *               not; a mousemove there is the wrong event, not a weaker one.
+   *               Needs a Chromium-family page launched with `hasTouch: true`,
+   *               or an Appium/WebdriverIO driver in {@link touchDriver}.
+   *  - `'none'`   the shortest legal path to the same DOM effect. Much faster,
+   *               and detectable by anything scoring pointer telemetry — for
+   *               fixtures, self-hosted targets, and stacks that humanise
+   *               elsewhere.
+   *
+   * Unset falls back to `CAPTCHA_HUMANIZATION`, then `'mouse'`. Set
+   * {@link humanizer} instead to supply your own implementation.
+   *
+   * @example
+   * ```typescript
+   * const context = await browser.newContext({ ...devices['Pixel 7'], hasTouch: true });
+   * const solver = new CaptchaKrakenSolver({ humanization: 'mobile' });
+   * await solver.solve(await context.newPage());
+   * ```
+   */
+  humanization?: HumanizationMode;
+
+  /**
+   * Your own {@link Humanizer}. Overrides {@link humanization} entirely — the
+   * driver then makes no decisions about pointer motion at all.
+   *
+   * Use it when you already model your users' input (a hardware pointer, a
+   * device farm, a recorded trace), or when the browser humanises for you:
+   * camoufox's `humanize` juggler re-humanises every `mouse.move()` it is
+   * handed, and composing both measured 82.1s against 13.4s on one solve.
+   *
+   * @example
+   * ```typescript
+   * import { NullHumanizer, type Humanizer } from 'captchakraken';
+   *
+   * class MyPointer extends NullHumanizer implements Humanizer {
+   *   async move(page, to) { await myHardwareMouse.glideTo(to[0], to[1]); this.at = to; }
+   * }
+   * new CaptchaKrakenSolver({ humanizer: new MyPointer() });
+   * ```
+   */
+  humanizer?: Humanizer;
+
+  /**
+   * `humanization: 'mobile'` only. The thing that is actually TOUCHED, when it
+   * is not the page object — an Appium / WebdriverIO / Selenium driver on a real
+   * handset. Left unset, the mode dispatches CDP touch events at the page it
+   * was given, which is what browser mobile emulation wants.
+   */
+  touchDriver?: any;
+
+  /**
+   * `humanization: 'mobile'` only. CSS-pixel → device-pixel transform for
+   * {@link touchDriver}. `scale` is usually `window.devicePixelRatio`; `origin`
+   * is the top-left of the webview in screen coordinates. The default identity
+   * is right for emulation and for callers who map coordinates themselves.
+   */
+  touchTransform?: TouchTransform;
+
   /**
    * Optional observer fired at each intermediate solve stage. Receives a
    * baseline screenshot before any action and one after every executed action.

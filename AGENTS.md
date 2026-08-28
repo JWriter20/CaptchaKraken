@@ -229,6 +229,34 @@ const watcher = solver.watch(page);   // handles captchas in the background
 await watcher.stop();
 ```
 
+**On a phone, or driving a real device?** How the answer is PERFORMED is a
+choice of input device:
+
+```typescript
+// Chromium mobile emulation — needs hasTouch on the context.
+const context = await browser.newContext({ ...devices['Pixel 7'], hasTouch: true });
+await new CaptchaKrakenSolver({ humanization: 'mobile' }).solve(await context.newPage());
+
+// A real handset over Appium / WebdriverIO / Selenium.
+new CaptchaKrakenSolver({
+  humanization: 'mobile',
+  touchDriver: driver,
+  touchTransform: { scale: 3, origin: [0, 132] },   // CSS px -> screen px
+});
+
+new CaptchaKrakenSolver({ humanization: 'none' });  // no humanisation at all
+new CaptchaKrakenSolver({ humanizer: myOwn });      // your own implementation
+```
+
+Same keys in Python, snake_cased: `PageSolverConfig(humanization="mobile",
+touch_driver=driver, touch_transform={"scale": 3.0, "origin": (0, 132)})`.
+
+`mobile` never touches `page.mouse` — a mousemove at a touch-only widget is the
+wrong event, not a weaker one. `none` is much faster and detectable by anything
+scoring pointer telemetry; use it for your own fixtures, or when your browser
+already humanises (camoufox does). See
+[docs/usage.md § How it moves](./docs/usage.md#how-it-moves--mouse-mobile-none-or-yours).
+
 **No browser, just an image:**
 
 ```bash
@@ -276,6 +304,7 @@ Advanced — only to change **which** model is served:
 | `CAPTCHA_KRAKEN_STATE_DIR` | Where the pidfile, log, and credentials live | `~/.captchakraken` |
 | `CAPTCHA_KRAKEN_SESSION` | Groups rounds of one solve for billing | set per solve by both drivers |
 | `CAPTCHA_DEBUG` | `1` prints solver diagnostics to stderr | `0` |
+| `CAPTCHA_HUMANIZATION` | `mouse`, `mobile` or `none` — how gestures are performed. Loses to anything set in code, because the right mode is a property of the page | `mouse` |
 
 The defaults for model identity come from `python/src/captchakraken/models.json`.
 Do not hardcode a model name in your own code — read it from the config, or the

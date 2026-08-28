@@ -113,6 +113,22 @@ export interface PlaywrightPage {
   ): Promise<PlaywrightElementHandle | null>;
   /** Current viewport size, or null if not set. */
   viewportSize(): ViewportSize | null;
+  /**
+   * The browser context this page belongs to. OPTIONAL because only
+   * `humanization: 'mobile'` needs it, and then only to open a CDP session for
+   * `Input.dispatchTouchEvent` — the mouse and none modes never touch it. A
+   * launcher that does not expose it simply cannot serve mobile mode, and says
+   * so at construction rather than mid-solve.
+   */
+  context?(): { newCDPSession(page: PlaywrightPage): Promise<any> };
+  /**
+   * Playwright's touchscreen, present when the context was created with
+   * `hasTouch: true`. OPTIONAL, and tap-only: it is the fallback for a browser
+   * with touch support but no CDP, and cannot express a drag.
+   */
+  touchscreen?: {
+    tap(x: number, y: number): Promise<void>;
+  };
   /** First matching element handle, or null. */
   $(selector: string): Promise<PlaywrightElementHandle | null>;
   /** All matching element handles. */

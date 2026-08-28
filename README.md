@@ -311,6 +311,21 @@ Check your setup any time with `captchakraken server status`. Every browser
 framework (Playwright, Patchright, camoufox, Puppeteer) and the background
 watcher are in **[docs/usage.md](./docs/usage.md)**.
 
+**On a phone?** How the solver *performs* the answer is a choice of input
+device, not a realism dial:
+
+```typescript
+new CaptchaKrakenSolver({ humanization: 'mobile' })   // touch events, finger kinematics
+new CaptchaKrakenSolver({ humanization: 'none' })     // straight to the DOM effect
+new CaptchaKrakenSolver({ humanizer: myOwn })         // yours
+```
+
+`mobile` never touches `page.mouse` — a mousemove at a touch-only widget is the
+wrong event, not a weaker one. It drives a Chromium page with `hasTouch: true`,
+or a real handset over **Appium / WebdriverIO / Selenium** via `touchDriver`.
+Full details in
+[docs/usage.md § How it moves](./docs/usage.md#how-it-moves--mouse-mobile-none-or-yours).
+
 **Stay current** — pull the latest model + engine in one step, no reinstall:
 
 ```bash
@@ -546,7 +561,7 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 |---|---|
 | ☁️ [Hosted API](./docs/hosted-api.md) | Sign in, keys, pricing, per-session billing, error codes |
 | 📦 [Self-hosting](./docs/self-hosting.md) | `setup.sh`, model sizes, server management, config, **updating** |
-| 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, the Python CLI, migrating from v1 |
+| 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, **mouse / mobile / no humanization**, the Python CLI, migrating from v1 |
 | ⚙️ [How it works](./docs/how-it-works.md) | The solve pipeline, `find_grid`, the freshness guard, dedup |
 | 📊 [Performance](./docs/performance.md) | Accuracy, speed-by-device tables, IP-reputation & rate limits |
 | 🗺️ [Roadmap](./docs/roadmap.md) | What shipped, what's in progress, and what's planned |
