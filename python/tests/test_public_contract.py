@@ -86,8 +86,24 @@ _ENV_ROOTS = ("python/src", "js/src", "js/scripts", "mcp/src")
 
 
 def _sig(fn) -> str:
-    """A signature as text, so a moved `*` or a renamed parameter is a diff."""
-    return str(inspect.signature(fn))
+    """Parameter names, kinds and defaults — NOT annotations.
+
+    A moved `*`, a renamed parameter, a changed default and a removed argument
+    are all diffs here, which is the whole contract a caller depends on.
+
+    Annotations are deliberately stripped because their RENDERING is not stable
+    across interpreters: `inspect.signature` prints the same
+    `List[Union[ClickAction, DragAction]]` as `List[ClickAction | DragAction]`
+    on a newer Python, so a snapshot taken on 3.14 failed the 3.12 leg of the CI
+    matrix on the first run — a red gate reporting an interpreter version, not a
+    change to anything anyone ships. A gate that cries wolf about the machine it
+    ran on is a gate people learn to re-record without reading.
+    """
+    sig = inspect.signature(fn)
+    return str(sig.replace(
+        return_annotation=inspect.Signature.empty,
+        parameters=[p.replace(annotation=inspect.Parameter.empty)
+                    for p in sig.parameters.values()]))
 
 
 def _env_vars() -> dict:
