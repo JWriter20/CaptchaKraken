@@ -53,11 +53,16 @@ def captured(monkeypatch):
     """Send one request, hand back the payload instead of doing any I/O."""
     seen = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(self, url, headers=None, json=None, timeout=None):
         seen["payload"] = json
         return _Resp()
 
-    monkeypatch.setattr(P.requests, "post", fake_post)
+    # The planner posts through its OWN pooled session, not the module
+    # function — one connection reused for every round of every solve, because
+    # re-dialling the endpoint measured 258ms against 144ms pooled. Patching
+    # `requests.post` here would leave the real socket in play and this test
+    # would reach the network.
+    monkeypatch.setattr(P.requests.Session, "post", fake_post)
     monkeypatch.setattr(P, "ensure_server", lambda *a, **k: None)
     return seen
 

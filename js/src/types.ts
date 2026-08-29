@@ -487,6 +487,19 @@ export interface CaptchaKrakenConfig {
   elementScreenshotTimeoutMs?: number;
 
   /**
+   * How long an `onStep` observer's screenshot may take, ms (default 2000).
+   *
+   * Deliberately separate from `elementScreenshotTimeoutMs`, which is sized for
+   * the picture the MODEL reads. This one is a trace snapshot: it is taken with
+   * `animations: 'disabled'`, which makes Playwright wait for the element to
+   * stop moving first, and on a still-animating widget that ran to the full 8s
+   * on every step — 8.0s of a measured 12.0s solve. An observer must never cost
+   * more than the action it observes, and a missed frame in a trace costs
+   * nothing. Ignored entirely when no `onStep` is set.
+   */
+  stepScreenshotTimeoutMs?: number;
+
+  /**
    * After a submit, hCaptcha may replace the challenge iframe for the next
    * round, detaching the handle we just detected ("element is not visible").
    * This is a transition, not a dead puzzle: how many times to back off,
@@ -617,4 +630,14 @@ export interface SolveResult {
     cachedInputTokens: number;
     estimatedCost: number;
   };
+  /**
+   * Where this solve's wall-clock went, in milliseconds per phase — the same
+   * partition `CAPTCHA_TIMINGS=1` prints, handed to the caller instead of to
+   * stderr. Mirrors `SolveResult.phases` on the Python port.
+   *
+   * Returned rather than only logged because "the solve took 12s" is not
+   * actionable and "the settle monitor spent 4s of it" is, and a caller
+   * measuring a fleet cannot scrape another process's stderr.
+   */
+  phases?: Record<string, number>;
 }

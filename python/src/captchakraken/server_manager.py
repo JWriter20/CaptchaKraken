@@ -170,11 +170,16 @@ def ensure_server(base_url: "str | None" = None) -> None:
     """
     base_url = base_url or config.base_url()
 
-    if is_healthy(base_url):
-        return
+    # REMOTE FIRST. There is nothing to ensure about a server we do not manage,
+    # so asking it for /health before deciding that is a round trip spent to
+    # reach a `return` — and up to `timeout=2.0` of it against a hosted gateway
+    # that serves no /health at all. Paid once per ActionPlanner, which for a
+    # caller using `solve_captcha_on_page` is once per solve.
     if not is_local(base_url):
-        # Remote server we don't manage: let the actual request raise a clear
-        # connection error rather than silently trying to boot vLLM locally.
+        # Let the actual request raise a clear connection error rather than
+        # silently trying to boot vLLM locally.
+        return
+    if is_healthy(base_url):
         return
     if not config.autostart_enabled():
         return
