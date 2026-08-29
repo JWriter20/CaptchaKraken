@@ -13,10 +13,17 @@
  * stdout, which IS the protocol channel: one stray console.log corrupts every
  * frame. This catches both.
  *
+ * It also checks the version the server ADVERTISES against the one in
+ * package.json. That is not cosmetic: `serverInfo.version` is what an MCP
+ * client logs and reports in a bug, and the two had already drifted — the
+ * server said 0.1.0 while npm published 0.1.2. A literal that nothing compares
+ * to anything has no way of staying right.
+ *
  * Hermetic: tools/list is answered before any sign-in, so no credentials, no
  * network, and nothing to clean up.
  */
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
@@ -57,6 +64,16 @@ try {
     clientInfo: { name: 'smoke', version: '0.0.0' },
   });
   console.log('initialize OK — server:', JSON.stringify(init.result?.serverInfo));
+
+  // Run from the package directory, so package.json is the one being served.
+  const declared = JSON.parse(readFileSync('package.json', 'utf8')).version;
+  const advertised = init.result?.serverInfo?.version;
+  if (advertised !== declared) {
+    throw new Error(
+      `serverInfo.version is ${advertised} but package.json says ${declared} — ` +
+        'the version an MCP client sees must be the version that shipped',
+    );
+  }
 
   send({ jsonrpc: '2.0', method: 'notifications/initialized' });
 

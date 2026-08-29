@@ -176,7 +176,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export function createServer(baseUrl: string, clientName: string): McpServer {
   const api = new ControlPlane(baseUrl);
   const server = new McpServer(
-    { name: 'captchakraken', version: '0.1.0' },
+    { name: 'captchakraken', version: '0.1.2' },
     {
       instructions:
         'CaptchaKraken account management. Use sign_in once to connect a GitHub account, ' +
