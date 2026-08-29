@@ -64,6 +64,20 @@ drive a phone, and no way to turn it off when your stack already did it.
 - **`startingMousePosition` is now honoured on the first gesture too.** The
   camoufox origin-seeding step used to overwrite it with the window centre.
 
+- **`SolveResult.phases`** — where a solve's wall clock went, in milliseconds
+  per phase (`detect`, `settle`, `inference`, `mouse`, `await-verdict`, …), on
+  both ports. The same partition `CAPTCHA_TIMINGS=1` prints to stderr, handed
+  back to you instead: "the solve took 12s" is not actionable and "the settle
+  monitor spent 4s of it" is. Phases nest, so one inside a differently-named one
+  counts under both — the cursor drifting over the widget *while* the model
+  generates is genuinely mouse time and inference time — and the totals can
+  therefore exceed the elapsed time.
+
+- **`stepScreenshotTimeoutMs`** (default 2000) — how long an `onStep`
+  observer's snapshot may take. Separate from `elementScreenshotTimeoutMs`,
+  which is sized for the picture the model reads. Ignored entirely when no
+  `onStep` is set.
+
 ### Changed
 
 - **The pointer position moved out of the solver** and into the humanizer, in
@@ -78,6 +92,33 @@ drive a phone, and no way to turn it off when your stack already did it.
   who turned humanisation off. An unknown name yields no wait rather than
   raising, so a new pause site cannot break a humanizer written against an older
   release.
+
+- **Solves are markedly faster, without moving any humanisation.** Nine waits
+  came out of the driver, all of them found by asking `SolveResult.phases`
+  where the time was going on solves that already *worked*. Across the full
+  fixture suite, both ports: median solve 6.8s -> 5.7s, p95 33.6s -> 21.6s.
+  No pause table, trajectory constant or gesture changed.
+
+  - the reCAPTCHA grid driver now reports the Verify press as an interaction,
+    so the caller polls for the vendor's verdict instead of taking the
+    no-interaction wait — and can no longer abort a correctly submitted answer
+    with "performed no interactions";
+  - its round 1 no longer re-waits for a grid the caller has just waited for;
+  - there is ONE wait after a round and it is polled, not slept: a round that
+    finished the captcha now ends when the widget goes, not 1200ms later;
+  - the widget's submit control is travelled to once, not twice;
+  - the planner keeps ONE pooled connection instead of re-dialling the endpoint
+    per inference (measured 258ms fresh vs 144ms pooled);
+  - `ensure_server` decides an endpoint is remote before asking it for /health.
+
+  Node-only, and the reason that port measured seconds slower per solve:
+  `scrollIntoViewIfNeeded` and the `onStep` observer's snapshot are both now
+  bounded (they inherited Playwright's 30s and the model's 8s budget, and both
+  wait for the widget to stop animating — 8.0s of one measured 12.0s solve);
+  the cursor drift during inference is interruptible; the interpreter and the
+  adapter name are resolved once per solver rather than per inference; and the
+  widget disappearing now ends the post-submit window for the eight vendors
+  that ship no response token, as it already did in Python.
 
 ## [2.6.0] - 2026-08-19
 
