@@ -71,6 +71,13 @@ drive a phone, and no way to turn it off when your stack already did it.
   branching on it — and every bug report quoting it — named a release that was
   not the one running. Now checked by a test.
 
+- **The MCP server told every client it was `0.1.0`** while npm published
+  `0.1.2`. `serverInfo.version` is what an MCP client logs and what a user
+  quotes in a bug report, so the drift pointed every report at the wrong
+  release. The CI handshake smoke now compares the advertised version against
+  `package.json` and fails the build on a mismatch — the literal had nothing
+  comparing it to anything, which is why it drifted twice without notice.
+
 - **`CaptchaKrakenAPIError` is exported from the Python package root**, as it
   already was from the TypeScript one. `docs/hosted-api.md` tells every caller
   to branch on its `.code`, and that recipe did not work in one of the two
