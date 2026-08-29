@@ -417,8 +417,11 @@ export class CaptchaKrakenSolver {
   /** The LoRA name models.json calls `latest`, read once. See askModel. */
   private loraNameCache: string | null = null;
 
-  /** Per-solve phase accounting; see timing.ts. Null outside a solve. */
-  private budget: PhaseBudget | null = null;
+  /**
+   * Phase accounting for the CURRENT or MOST RECENT solve; see timing.ts.
+   * Null before the first solve, and readable after a failed one.
+   */
+  budget: PhaseBudget | null = null;
 
   /**
    * Attribute the enclosed wall-clock to `name` for this solve's budget.
@@ -462,8 +465,12 @@ export class CaptchaKrakenSolver {
     } finally {
       // Printed on the way out of every solve, success or failure — a solve
       // that FAILED is exactly the one whose time you want itemised.
-      if (timingsEnabled()) console.error(this.budget.report());
-      this.budget = null;
+      if (timingsEnabled()) console.error(this.budget!.report());
+      // NOT cleared. A solve that FAILED is exactly the one whose time you want
+      // itemised, and by the time the caller catches the error the result — the
+      // only thing `phases` rides on — does not exist. `solve()` replaces it on
+      // entry, so the next solve cannot read the last one's. Same lifetime as
+      // page_solver.py's `_budget`.
       // Always shut the persistent CV worker down when a solve ends (success,
       // failure, or timeout) so we never leak a python process between solves.
       this.teardownCvWorker();
