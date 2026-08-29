@@ -75,6 +75,35 @@ def _pip_upgrade_cmd() -> "list[str]":
     return [sys.executable, "-m", "pip", "install", "--upgrade", *ENGINE_PACKAGES]
 
 
+class LicensedModelError(RuntimeError):
+    """Raised when `fetch` is pointed at weights that are not downloadable."""
+
+
+def _refuse_licensed(repo_id: str) -> None:
+    """A licensed model has no Hub repo. Say so, instead of 404ing at the Hub.
+
+    Without this the failure is `RepositoryNotFoundError` from huggingface_hub,
+    which reads as "you are not logged in" or "typo" — so the next thing a
+    self-hoster does is hunt for a token that will never exist. It is also the
+    one place a licensed model's name can plausibly be typed by accident:
+    CAPTCHA_LORA_ADAPTER takes any string and `fetch` hands it straight to the
+    Hub.
+    """
+    from . import prompts
+
+    if not prompts.is_licensed(repo_id):
+        return
+    raise LicensedModelError(
+        f"{repo_id} is a LICENSED model: its weights are not published and "
+        "there is nothing at that Hub id to download.\n"
+        "  Reach it through the hosted API (https://api.captchakraken.com), "
+        "which needs no weights at all,\n"
+        "  or ask us about a self-hosting licence: https://captchakraken.com/contact\n"
+        "  To fetch a downloadable model instead, unset CAPTCHA_LORA_ADAPTER "
+        "or point it at a published one."
+    )
+
+
 def plan(
     *,
     weights: bool = True,
@@ -84,10 +113,20 @@ def plan(
     lora: "str | None" = None,
 ) -> dict:
     """Assemble the fetch plan WITHOUT running anything. Pure + side-effect-free
-    so `--dry-run` and the tests can assert exactly what a real run would do."""
+    so `--dry-run` and the tests can assert exactly what a real run would do.
+
+    Raises `LicensedModelError` rather than planning a download that cannot
+    succeed. Refusing HERE and not at the download call is deliberate: `plan()`
+    is what `--dry-run` prints, so the refusal is visible before anyone runs the
+    real thing, and there is exactly one place to keep it correct.
+    """
     base_model = base or config.base_model()
     lora_adapter = lora or config.lora_adapter()
     base_url = config.base_url()
+
+    if weights:
+        _refuse_licensed(lora_adapter)
+        _refuse_licensed(base_model)
 
     repos = [lora_adapter, base_model] if weights else []
     return {

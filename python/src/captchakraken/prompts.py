@@ -247,6 +247,48 @@ def canonical_model_id(model: Optional[str]) -> Optional[str]:
     return alias if isinstance(alias, str) else None
 
 
+# ── availability: can these weights be obtained at all? ─────────────────────
+#
+# Same registry, same reason as prompt_version and pixel_budget: it is a fact
+# about the MODEL, and the one place that already decides what an unpinned
+# client downloads. See models.json's header comment.
+
+PUBLIC = "public"
+LICENSED = "licensed"
+#: Anything outside this set is a typo, and a typo must not read as "public".
+#: The whole class of bug this file exists to prevent is a field that fails
+#: open — `check_prompt_parity.py` rejects an unknown value at release time,
+#: and `is_licensed` below treats one as licensed rather than guessing.
+#:
+#: Spelled out as literals rather than `(PUBLIC, LICENSED)`: the release gate
+#: reads this file by AST so it can run in a training venv with no client
+#: installed, and `ast.literal_eval` cannot follow a name. A tuple of names
+#: reads as "unset" to the gate, which is the check silently not running.
+#: `tests/test_prompt_registry.py` pins that all three constants agree.
+AVAILABILITIES = ("public", "licensed")
+
+
+def availability(model: Optional[str]) -> str:
+    """`"public"` or `"licensed"` for `model`. Absent field means public.
+
+    An unregistered model is public too: it is not ours, and refusing to
+    download a stranger's adapter because we have never heard of it would break
+    every self-hoster who trained their own.
+    """
+    entry = registered_models().get(canonical_model_id(model) or "") or {}
+    value = entry.get("availability")
+    return value if isinstance(value, str) and value else PUBLIC
+
+
+def is_licensed(model: Optional[str]) -> bool:
+    """True if these weights are not obtainable — hosted API or licence only.
+
+    Fails CLOSED on an unrecognised value. A registry that says `"licenced"`
+    must not hand out a proprietary model because of a spelling.
+    """
+    return availability(model) != PUBLIC
+
+
 # ── prompt sets ─────────────────────────────────────────────────────────────
 
 @dataclass
