@@ -163,6 +163,14 @@ class SolveResult:
     is_solved: bool
     final_mouse_position: Tuple[float, float]
     token_usage: List[Dict[str, Any]] = field(default_factory=list)
+    #: Where this solve's wall-clock went, in milliseconds per phase — the same
+    #: partition `CAPTCHA_TIMINGS=1` prints, handed to the caller instead of to
+    #: stderr. `{}` when the result was built outside a solve.
+    #:
+    #: Returned rather than only logged because "the solve took 12s" is not
+    #: actionable and "the settle monitor spent 4s of it" is, and a caller
+    #: measuring a fleet cannot scrape stderr from inside its own process.
+    phases: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -2313,19 +2321,29 @@ class PageSolver:
             # Each round can legitimately spend ~10s waiting on fades, so eight
             # of them plus the model calls can outlast the whole solve budget.
             self._check_deadline(f"recaptcha grid round {round_index}")
-            with self._phase("grid-load"):
-                self._wait_for_grid_cells_loaded(element)
+            # Round 1 skips it: `_solve_single` has just waited for these cells,
+            # read the grid boxes off the loaded board and handed over, and
+            # nothing has touched the widget in between. Rounds 2..N still wait,
+            # because by then THIS driver has clicked and the tiles really are
+            # reloading. Measured 2148ms x2 on one solve.
+            if round_index > 1:
+                with self._phase("grid-load"):
+                    self._wait_for_grid_cells_loaded(element)
             shot = _tmp_png("recap")
             action: Optional[Dict[str, Any]] = None
             try:
-                self._screenshot(element, shot, timeout_ms=cfg.element_screenshot_timeout_ms)
+                with self._phase("screenshot"):
+                    self._screenshot(element, shot,
+                                     timeout_ms=cfg.element_screenshot_timeout_ms)
                 retry_for_round = pending_retry
                 pending_retry = None  # only round 1 carries the inbound hint
-                actions, usage = self._solve_frame_freshness_guarded(
-                    element,
-                    shot,
-                    lambda image_path: self._get_solution(image_path, "recaptcha", retry_for_round),
-                )
+                with self._phase("inference"):
+                    actions, usage = self._solve_frame_freshness_guarded(
+                        element,
+                        shot,
+                        lambda image_path: self._get_solution(
+                            image_path, "recaptcha", retry_for_round),
+                    )
                 all_usage.extend(usage)
                 action = _as_dict(actions[0]) if actions else None
             finally:
@@ -2338,8 +2356,11 @@ class PageSolver:
 
             if action.get("action") == "wait":
                 _log(f"[recaptcha-grid] round {round_index}: waiting for tiles.")
-                loading, _ = self._watch_clicked_tiles(page, element, session, clicked_order)
-                self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
+                with self._phase("fade-wait"):
+                    loading, _ = self._watch_clicked_tiles(
+                        page, element, session, clicked_order)
+                    self._wait_for_any_clicked_tile_loaded(
+                        page, element, session, loading)
                 continue
 
             if action.get("action") == "click":
@@ -2369,9 +2390,10 @@ class PageSolver:
                     f"-> cells {clicked_this_round}."
                 )
 
-                loading, chipped = self._watch_clicked_tiles(
-                    page, element, session, clicked_this_round
-                )
+                with self._phase("fade-wait"):
+                    loading, chipped = self._watch_clicked_tiles(
+                        page, element, session, clicked_this_round
+                    )
                 if chipped or not loading:
                     # Either the widget ticked our clicks and kept the photos
                     # (a board that does that is answered), or nothing faded
@@ -2383,7 +2405,9 @@ class PageSolver:
                     )
                     should_submit = True
                     break
-                self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
+                with self._phase("fade-wait"):
+                    self._wait_for_any_clicked_tile_loaded(
+                        page, element, session, loading)
                 continue
 
             _log(f"[recaptcha-grid] round {round_index}: unexpected action; re-solving.")
@@ -2395,6 +2419,17 @@ class PageSolver:
                 if verify:
                     _log("[recaptcha-grid] clicking Verify to submit.")
                     self._move_and_click(page, verify)
+                    # The press IS an interaction, and saying so is load-bearing
+                    # — the same rule `_solve_single` learned on
+                    # prosopo_grid_3x3, in the other driver, on another day. A
+                    # `done` round clicks no tile, so without this the one
+                    # answer shape that submits and does nothing else reports
+                    # having done nothing: the caller then takes the
+                    # no-interaction wait instead of polling for the verdict
+                    # (~1s of dead time on every static reCAPTCHA), and raises
+                    # "performed no interactions" if the widget has not
+                    # finished tearing down — on an answer correctly sent.
+                    performed_action = True
 
         return performed_action, all_usage
 
@@ -2541,8 +2576,10 @@ class PageSolver:
 
             if not is_animated:
                 if not have_shot:
-                    self._screenshot(element, shot,
-                                     timeout_ms=self.config.element_screenshot_timeout_ms)
+                    with self._phase("screenshot"):
+                        self._screenshot(
+                            element, shot,
+                            timeout_ms=self.config.element_screenshot_timeout_ms)
                 with self._phase("inference"):
                     actions, all_usage = self._solve_frame_freshness_guarded(
                         element,
@@ -2650,11 +2687,16 @@ class PageSolver:
             # burning all ten solve loops on a puzzle they had answered on
             # the first one. The press itself is still bounded by
             # `should_submit` below, which is where the hazard belongs.
+            # RESOLVED, not travelled to. `_move_and_click` below moves to the
+            # button itself and picks its own random point inside it, so moving
+            # here first bought a second humanised trajectory that ended a few
+            # dozen pixels from where the first one stopped, plus a second
+            # bounded scroll-into-view. Two hops onto one button is slower AND
+            # is not something a hand does. A round that decides not to submit
+            # no longer walks to the control either.
             lookup = frame or (scope if not slid else None)
             if lookup is not None:
                 verify_button = self._get_verify_button(lookup)
-                if verify_button:
-                    self._move_to_element(page, verify_button)
 
             # Submit policy: press the widget's own submit control whenever we
             # have put an ANSWER into it — a selection, a placed piece, a typed
@@ -2761,7 +2803,12 @@ class PageSolver:
         previous_session = os.environ.get(_SESSION_ENV)
         os.environ[_SESSION_ENV] = str(uuid.uuid4())
         try:
-            return self._solve_impl(page, start, cumulative_usage)
+            result = self._solve_impl(page, start, cumulative_usage)
+            # Attached HERE rather than at each of the seven `return
+            # SolveResult(...)` sites, so a new early exit cannot forget it.
+            result.phases = dict(self._budget.totals)
+            result.phases["total"] = self._budget.elapsed_ms()
+            return result
         finally:
             # Printed on the way out of every solve, success or failure — a
             # solve that FAILED is exactly the one whose time you want itemised.
@@ -2965,60 +3012,74 @@ class PageSolver:
             render_waits = 0
             cumulative_usage.extend(usage)
 
-            if did_interact:
-                # Poll for the vendor's SOLVED signal before re-entering the
-                # pipeline. hCaptcha keeps the challenge visible for a couple of
-                # seconds while verifying; without this the loop re-solves that
-                # closing frame and burns ~18s. Only ever early-RETURNS on a
-                # definitive signal, so it cannot loop.
-                deadline = time.monotonic() * 1000.0 + cfg.post_solve_outcome_timeout_ms
-                solved = False
-                widget_gone = 0
-                _verdict_t0 = time.perf_counter()
-                while time.monotonic() * 1000.0 < deadline:
-                    if self.is_captcha_solved(page):
+            # ONE wait after a round, polled, whichever kind of round it was.
+            #
+            # There used to be two: this poll when the round interacted, and a
+            # flat `_delay(post_solve_delay_ms + jitter)` when it did not. The
+            # flat sleep observed NOTHING — it ran to the end and only then
+            # asked whether the widget was still there — so a round that had in
+            # fact finished the captcha paid 1200-1500ms to find that out. The
+            # poll below already asks exactly that question and answers it the
+            # moment it becomes true.
+            #
+            # The two windows keep different LENGTHS, because different things
+            # size them: `post_solve_outcome_timeout_ms` covers how late a
+            # vendor's success signal can arrive (measured — see the constant),
+            # while `post_solve_delay_ms` is the dwell a round that answered
+            # nothing takes before deciding the page has settled.
+            window_ms = (cfg.post_solve_outcome_timeout_ms if did_interact
+                         else cfg.post_solve_delay_ms + random.random() * 300)
+            # Poll for the vendor's SOLVED signal before re-entering the
+            # pipeline. hCaptcha keeps the challenge visible for a couple of
+            # seconds while verifying; without this the loop re-solves that
+            # closing frame and burns ~18s. Only ever early-RETURNS on a
+            # definitive signal, so it cannot loop.
+            deadline = time.monotonic() * 1000.0 + window_ms
+            solved = False
+            widget_gone = 0
+            _verdict_t0 = time.perf_counter()
+            while time.monotonic() * 1000.0 < deadline:
+                if self.is_captcha_solved(page):
+                    solved = True
+                    break
+                # The eight inline vendors have no response token, so
+                # `is_captcha_solved` — which reads only the hCaptcha and
+                # reCAPTCHA anchors — can never fire for them and this loop
+                # ran out its whole 2.5s budget on EVERY round, waiting for
+                # a signal that cannot arrive. Measured on geetest_v4_slide:
+                # 5.2s of a 12.3s solve, spent after the puzzle was already
+                # answered, with the widget sitting there visibly solved.
+                #
+                # "The widget is gone" is the completion signal for those
+                # vendors and is already the authority immediately after
+                # this loop, so this only reaches the same verdict sooner —
+                # confirmed over two polls so a frame caught mid-swap
+                # between rounds cannot read as a solve.
+                if self.detect_captcha(page) is None:
+                    widget_gone += 1
+                    if widget_gone >= 2:
                         solved = True
                         break
-                    # The eight inline vendors have no response token, so
-                    # `is_captcha_solved` — which reads only the hCaptcha and
-                    # reCAPTCHA anchors — can never fire for them and this loop
-                    # ran out its whole 2.5s budget on EVERY round, waiting for
-                    # a signal that cannot arrive. Measured on geetest_v4_slide:
-                    # 5.2s of a 12.3s solve, spent after the puzzle was already
-                    # answered, with the widget sitting there visibly solved.
-                    #
-                    # "The widget is gone" is the completion signal for those
-                    # vendors and is already the authority immediately after
-                    # this loop, so this only reaches the same verdict sooner —
-                    # confirmed over two polls so a frame caught mid-swap
-                    # between rounds cannot read as a solve.
-                    if self.detect_captcha(page) is None:
-                        widget_gone += 1
-                        if widget_gone >= 2:
-                            solved = True
-                            break
-                    else:
-                        widget_gone = 0
-                    if self._is_challenge_freshly_rendered(page):
-                        break  # next round is up; go solve it now
-                    _delay(cfg.post_solve_outcome_poll_ms)
-                _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0
-                if self._budget is not None:
-                    self._budget.add("await-verdict", _verdict_ms)
-                # How long a SUCCESS actually took to show itself. This is the
-                # only number that can size `post_solve_outcome_timeout_ms`: the
-                # window exists to catch a late success, so it needs to cover
-                # the slowest real one and nothing beyond it. A round that ends
-                # any other way spends the whole window by construction — there
-                # is no signal on a wrong answer — so its duration says nothing
-                # about how long the window ought to be.
-                if solved:
-                    _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
-                if solved:
-                    return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
-            else:
-                with self._phase("post-submit-delay"):
-                    _delay(cfg.post_solve_delay_ms + random.random() * 300)
+                else:
+                    widget_gone = 0
+                if self._is_challenge_freshly_rendered(page):
+                    break  # next round is up; go solve it now
+                _delay(cfg.post_solve_outcome_poll_ms)
+            _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0
+            if self._budget is not None:
+                self._budget.add(
+                    "await-verdict" if did_interact else "post-submit-delay",
+                    _verdict_ms)
+            # How long a SUCCESS actually took to show itself. This is the
+            # only number that can size `post_solve_outcome_timeout_ms`: the
+            # window exists to catch a late success, so it needs to cover
+            # the slowest real one and nothing beyond it. A round that ends
+            # any other way spends the whole window by construction — there
+            # is no signal on a wrong answer — so its duration says nothing
+            # about how long the window ought to be.
+            if solved:
+                _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
+                return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
 
             if self._has_recaptcha_underselect_error(page):
                 if already_retried_underselect:
