@@ -26,17 +26,17 @@
       "solve_captcha_on_page"
     ],
     "signatures": {
-      "solve_captcha": "(media_path: str, instruction: str = '', *, puzzle_source: str = 'unknown', retry_mode: str | None = None, text_mode: bool = False, **kwargs: Any) -> Any",
-      "CaptchaSolver.__init__": "(self, model: str | None = None, provider: str = 'captchaKrakenApi', api_key: str | None = None)",
-      "CaptchaSolver.solve": "(self, media_path: str, instruction: str = '', puzzle_source: str = 'unknown', retry_mode: str | None = None, text_mode: bool = False) -> captchakraken.action_types.ClickAction | captchakraken.action_types.DragAction | captchakraken.action_types.TypeAction | captchakraken.action_types.WaitAction | captchakraken.action_types.DoneAction | List[captchakraken.action_types.ClickAction | captchakraken.action_types.DragAction | captchakraken.action_types.TypeAction | captchakraken.action_types.WaitAction | captchakraken.action_types.DoneAction]",
-      "CaptchaSolver.solve_keyframes": "(self, keyframe_paths: Sequence[str]) -> List[captchakraken.action_types.ClickAction | captchakraken.action_types.DragAction]",
-      "PageSolver.__init__": "(self, config: 'Optional[PageSolverConfig]' = None, solver: 'Optional[CaptchaSolver]' = None, **solver_kwargs: 'Any') -> 'None'",
-      "PageSolver.solve": "(self, page: 'Any') -> 'SolveResult'",
-      "PageSolver.watch": "(self, page: 'Any', **options: 'Any') -> \"'CaptchaWatcher'\"",
-      "solve_captcha_on_page": "(page: 'Any', **kwargs: 'Any') -> 'SolveResult'",
-      "CaptchaKrakenAPIError.__init__": "(self, message: str, *, status: int | None = None, code: str | None = None, resolution_url: str | None = None, retry_after_seconds: float | None = None)",
-      "add_overlays_to_image": "(image_path: str, boxes: list[dict], output_path: str = None, label_position='top-left')",
-      "humanize.resolve": "(config: 'Any') -> 'Humanizer'"
+      "solve_captcha": "(media_path, instruction='', *, puzzle_source='unknown', retry_mode=None, text_mode=False, **kwargs)",
+      "CaptchaSolver.__init__": "(self, model=None, provider='captchaKrakenApi', api_key=None)",
+      "CaptchaSolver.solve": "(self, media_path, instruction='', puzzle_source='unknown', retry_mode=None, text_mode=False)",
+      "CaptchaSolver.solve_keyframes": "(self, keyframe_paths)",
+      "PageSolver.__init__": "(self, config=None, solver=None, **solver_kwargs)",
+      "PageSolver.solve": "(self, page)",
+      "PageSolver.watch": "(self, page, **options)",
+      "solve_captcha_on_page": "(page, **kwargs)",
+      "CaptchaKrakenAPIError.__init__": "(self, message, *, status=None, code=None, resolution_url=None, retry_after_seconds=None)",
+      "add_overlays_to_image": "(image_path, boxes, output_path=None, label_position='top-left')",
+      "humanize.resolve": "(config)"
     },
     "page_solver_config_fields": [
       "animated_challenge_after_ms",
