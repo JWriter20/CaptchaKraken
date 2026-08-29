@@ -3079,7 +3079,6 @@ class PageSolver:
             # about how long the window ought to be.
             if solved:
                 _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
-            if solved:
                 return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
 
             if self._has_recaptcha_underselect_error(page):
