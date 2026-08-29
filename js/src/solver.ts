@@ -862,9 +862,17 @@ export class CaptchaKrakenSolver {
       `step_${this.stepIndex}_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
     );
     try {
+      // ITS OWN, SHORT TIMEOUT — not `elementScreenshotTimeoutMs`, which is
+      // sized for the picture the MODEL reads and is 8s. This one is an
+      // observability snapshot, and `animations: 'disabled'` makes Playwright
+      // wait for the element to stop moving before it will take it. On a widget
+      // that is still animating that wait ran to the full 8s, per step:
+      // measured 8.0s of a 12.0s mtcaptcha_text solve, spent photographing a
+      // text box for a trace. An observer must never cost more than the action
+      // it is observing, and a missed frame in a trace costs nothing.
       await captchaElement.screenshot({
         path: screenshotPath,
-        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        timeout: this.config.stepScreenshotTimeoutMs ?? 2000,
         animations: 'disabled',
       });
     } catch {
@@ -3508,7 +3516,20 @@ export class CaptchaKrakenSolver {
       throw new Error(`Element not found: ${selectorOrElement}`);
     }
 
-    await elem.scrollIntoViewIfNeeded();
+    // BOUNDED. Playwright's default is 30s and it waits for the element to be
+    // STABLE — not animating — before it will scroll. This runs once per action
+    // and once per submit, so on a challenge that is mid-animation it burned
+    // the full default every time: measured 10.1s of a 12.0s mtcaptcha_text
+    // solve, spent scrolling to a text box that was already on screen. The
+    // element is on screen in every real case here (we just screenshotted it),
+    // so a short bound loses nothing: on timeout we move to wherever it is.
+    // page_solver.py has had this since it turned a ~5s solve loop into minutes
+    // in live testing; this port never got it.
+    try {
+      await elem.scrollIntoViewIfNeeded({ timeout: 2000 });
+    } catch {
+      /* an unscrolled element is still where boundingBox says it is */
+    }
 
     const box = await elem.boundingBox();
     if (!box) {
