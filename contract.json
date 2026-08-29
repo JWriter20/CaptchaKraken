@@ -1,0 +1,512 @@
+{
+  "python": {
+    "version": "2.6.1",
+    "exports": [
+      "ActionPlanner",
+      "AppiumTouchBackend",
+      "CaptchaAction",
+      "CaptchaSolver",
+      "CaptchaWatcher",
+      "CdpTouchBackend",
+      "ClickAction",
+      "DragAction",
+      "Humanizer",
+      "ImageProcessor",
+      "MobileHumanizer",
+      "MouseHumanizer",
+      "NullHumanizer",
+      "PageSolver",
+      "SolveResult",
+      "TouchBackend",
+      "TouchscreenTouchBackend",
+      "TypeAction",
+      "WaitAction",
+      "add_overlays_to_image",
+      "solve_captcha",
+      "solve_captcha_on_page"
+    ],
+    "signatures": {
+      "solve_captcha": "(media_path: str, instruction: str = '', *, puzzle_source: str = 'unknown', retry_mode: str | None = None, text_mode: bool = False, **kwargs: Any) -> Any",
+      "CaptchaSolver.__init__": "(self, model: str | None = None, provider: str = 'captchaKrakenApi', api_key: str | None = None)",
+      "CaptchaSolver.solve": "(self, media_path: str, instruction: str = '', puzzle_source: str = 'unknown', retry_mode: str | None = None, text_mode: bool = False) -> captchakraken.action_types.ClickAction | captchakraken.action_types.DragAction | captchakraken.action_types.TypeAction | captchakraken.action_types.WaitAction | captchakraken.action_types.DoneAction | List[captchakraken.action_types.ClickAction | captchakraken.action_types.DragAction | captchakraken.action_types.TypeAction | captchakraken.action_types.WaitAction | captchakraken.action_types.DoneAction]",
+      "CaptchaSolver.solve_keyframes": "(self, keyframe_paths: Sequence[str]) -> List[captchakraken.action_types.ClickAction | captchakraken.action_types.DragAction]",
+      "PageSolver.__init__": "(self, config: 'Optional[PageSolverConfig]' = None, solver: 'Optional[CaptchaSolver]' = None, **solver_kwargs: 'Any') -> 'None'",
+      "PageSolver.solve": "(self, page: 'Any') -> 'SolveResult'",
+      "PageSolver.watch": "(self, page: 'Any', **options: 'Any') -> \"'CaptchaWatcher'\"",
+      "solve_captcha_on_page": "(page: 'Any', **kwargs: 'Any') -> 'SolveResult'",
+      "CaptchaKrakenAPIError.__init__": "(self, message: str, *, status: int | None = None, code: str | None = None, resolution_url: str | None = None, retry_after_seconds: float | None = None)",
+      "add_overlays_to_image": "(image_path: str, boxes: list[dict], output_path: str = None, label_position='top-left')",
+      "humanize.resolve": "(config: 'Any') -> 'Humanizer'"
+    },
+    "page_solver_config_fields": [
+      "animated_challenge_after_ms",
+      "animated_probe_enabled",
+      "element_screenshot_timeout_ms",
+      "grid_load_poll_interval_ms",
+      "grid_load_timeout_ms",
+      "hcaptcha_images_timeout_ms",
+      "humanization",
+      "humanizer",
+      "keyframe_wait_poll_ms",
+      "keyframe_wait_timeout_ms",
+      "max_no_progress_rounds",
+      "max_solve_loops",
+      "max_stale_element_retries",
+      "max_stale_frame_resolves",
+      "max_unsupported_resolves",
+      "overall_solve_timeout_ms",
+      "post_solve_delay_ms",
+      "post_solve_outcome_poll_ms",
+      "post_solve_outcome_timeout_ms",
+      "post_submit_change_timeout_ms",
+      "recaptcha_dynamic_fade_poll_ms",
+      "recaptcha_dynamic_fade_wait_ms",
+      "recaptcha_fade_onset_grace_ms",
+      "recaptcha_max_dynamic_rounds",
+      "recaptcha_tile_hover_enabled",
+      "settle_diff_threshold",
+      "settle_frames",
+      "settle_poll_ms",
+      "settle_timeout_ms",
+      "slide_max_corrections",
+      "slide_probe_offsets_px",
+      "slide_tolerance_px",
+      "stale_element_backoff_ms",
+      "stale_frame_diff_threshold",
+      "stale_frame_resolve_enabled",
+      "starting_mouse_position",
+      "touch_driver",
+      "touch_transform",
+      "video_burst_duration_ms",
+      "video_burst_fps",
+      "video_extra_inference_ms",
+      "video_solve_enabled"
+    ],
+    "solve_result_fields": [
+      "final_mouse_position",
+      "is_solved",
+      "token_usage"
+    ],
+    "config_functions": [
+      "api_key",
+      "autostart_enabled",
+      "base_model",
+      "base_url",
+      "credentials_path",
+      "extra_serve_args",
+      "gpu_memory_utilization",
+      "lora_adapter",
+      "lora_name",
+      "lora_revision",
+      "max_lora_rank",
+      "max_model_len",
+      "pinned",
+      "port",
+      "state_dir"
+    ],
+    "error_codes": [
+      "account_suspended",
+      "insufficient_credits",
+      "invalid_api_key",
+      "missing_api_key",
+      "rate_limited",
+      "request_too_large",
+      "solve_abandoned",
+      "upstream_unavailable"
+    ],
+    "humanization_modes": [
+      "mobile",
+      "mouse",
+      "none"
+    ]
+  },
+  "cli": {
+    "entry_point": "captchakraken = captchakraken.cli:main",
+    "subcommands": [
+      "check-movement",
+      "check-movement-batch",
+      "detect-selected",
+      "fetch",
+      "find-checkbox",
+      "find-grid",
+      "find-movable",
+      "find-move",
+      "get-numbered-grid",
+      "grid-cell-states",
+      "grid-cell-states-fixed",
+      "is-cell-changing",
+      "is-cell-selected",
+      "is-empty-cell",
+      "match-region",
+      "serve",
+      "server",
+      "solve-animated",
+      "track-piece",
+      "update",
+      "wait-for-cell-loaded"
+    ],
+    "solve_parser": [
+      "--puzzle-source",
+      "--retry-mode",
+      "--text-mode",
+      "api_key",
+      "api_provider",
+      "image_path",
+      "model"
+    ],
+    "exit_codes": {
+      "ok": 0,
+      "failure": 1,
+      "unsupported": 2,
+      "api_error": 3
+    }
+  },
+  "env": {
+    "CAPTCHAKRAKEN_BASE_URL": [
+      "mcp/src/index.ts"
+    ],
+    "CAPTCHAKRAKEN_CLIENT_NAME": [
+      "mcp/src/index.ts"
+    ],
+    "CAPTCHA_BASE_MODEL": [
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_DEBUG": [
+      "js/src/solver.ts",
+      "python/src/captchakraken/page_solver.py",
+      "python/src/captchakraken/planner.py",
+      "python/src/captchakraken/server_manager.py",
+      "python/src/captchakraken/solver.py"
+    ],
+    "CAPTCHA_HUMANIZATION": [
+      "js/src/humanize.ts",
+      "python/src/captchakraken/humanize.py"
+    ],
+    "CAPTCHA_KRAKEN_API_KEY": [
+      "js/src/cli-invocation.ts",
+      "js/src/solver.ts",
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_KRAKEN_AUTOSTART": [
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_KRAKEN_CLIENT": [
+      "python/src/captchakraken/planner.py"
+    ],
+    "CAPTCHA_KRAKEN_EXTRA_HEADERS": [
+      "python/src/captchakraken/planner.py"
+    ],
+    "CAPTCHA_KRAKEN_PYTHON": [
+      "js/scripts/setup-python.js",
+      "js/src/python-command.ts"
+    ],
+    "CAPTCHA_KRAKEN_PYTHON_SETUP_STRICT": [
+      "js/scripts/setup-python.js"
+    ],
+    "CAPTCHA_KRAKEN_SESSION": [
+      "python/src/captchakraken/page_solver.py",
+      "python/src/captchakraken/planner.py"
+    ],
+    "CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP": [
+      "js/scripts/setup-python.js"
+    ],
+    "CAPTCHA_KRAKEN_STARTUP_TIMEOUT": [
+      "python/src/captchakraken/server_manager.py"
+    ],
+    "CAPTCHA_KRAKEN_STATE_DIR": [
+      "mcp/src/credentials.ts",
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_LORA_ADAPTER": [
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_LORA_NAME": [
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_LORA_REVISION": [
+      "python/src/captchakraken/config.py"
+    ],
+    "CAPTCHA_MAX_PIXELS": [
+      "python/src/captchakraken/prompts.py"
+    ],
+    "CAPTCHA_MIN_PIXELS": [
+      "python/src/captchakraken/prompts.py"
+    ],
+    "CAPTCHA_PIXEL_BOX_HALF": [
+      "python/src/captchakraken/solver.py"
+    ],
+    "CAPTCHA_PROMPTS_FILE": [
+      "python/src/captchakraken/prompts.py"
+    ],
+    "CAPTCHA_PROMPTS_NO_FETCH": [
+      "python/src/captchakraken/prompts.py"
+    ],
+    "CAPTCHA_REQUEST_PRIORITY": [
+      "python/src/captchakraken/planner.py"
+    ],
+    "CAPTCHA_TIMINGS": [
+      "python/src/captchakraken/timing.py"
+    ],
+    "PYTHONPATH": [
+      "js/src/solver.ts"
+    ],
+    "VLLM_API_KEY": [
+      "js/src/solver.ts",
+      "python/src/captchakraken/config.py"
+    ],
+    "VLLM_BASE_URL": [
+      "python/src/captchakraken/config.py"
+    ],
+    "VLLM_EXTRA_ARGS": [
+      "python/src/captchakraken/config.py"
+    ],
+    "VLLM_GPU_MEMORY_UTILIZATION": [
+      "python/src/captchakraken/config.py"
+    ],
+    "VLLM_MAX_LORA_RANK": [
+      "python/src/captchakraken/config.py"
+    ],
+    "VLLM_MAX_MODEL_LEN": [
+      "python/src/captchakraken/config.py"
+    ],
+    "VLLM_PORT": [
+      "python/src/captchakraken/config.py"
+    ],
+    "XDG_CONFIG_HOME": [
+      "mcp/src/credentials.ts"
+    ]
+  },
+  "model_resolution": {
+    "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
+    "registered_models": [
+      "CaptchaKraken/CaptchaKraken-Lora-v1.2",
+      "CaptchaKraken/CaptchaKrakenV1_Lora",
+      "CaptchaKraken/CaptchaKraken_v1.1",
+      "CaptchaKraken/Sunlight-AWQ-4bit",
+      "CaptchaKraken/Sunlight-v1.2-AWQ-4bit",
+      "CaptchaKraken/Twilight-FP8",
+      "CaptchaKraken/Twilight-v1.2-FP8"
+    ],
+    "latest_prompt_version": "2",
+    "pinned_fallback_fields": [
+      "base_model",
+      "lora_adapter",
+      "lora_name",
+      "lora_revision",
+      "prompt_sha256"
+    ]
+  },
+  "parity": {
+    "_comment": [
+      "Where the two ports genuinely differ. Rule 1c says they must behave the",
+      "same; these are the places they do not, recorded so the list can only",
+      "shrink. A NEW divergence fails js/src/contract.test.ts.",
+      "",
+      "None of these is fixed here. Each is a breaking change to one port or the",
+      "other and belongs in its own commit with the version bump it deserves —",
+      "which is exactly the decision this file exists to force someone to make.",
+      "",
+      "python_only_config: solver knobs the Python PageSolverConfig has and",
+      "CaptchaKrakenConfig does not, so the behaviour is unreachable from JS.",
+      "The three `slide_*` ones are the slider correction loop; a JS caller",
+      "cannot tune it. `max_unsupported_resolves`, `max_stale_frame_resolves`",
+      "and `stale_frame_resolve_enabled` DO exist in TS — spelled `Re`Solves,",
+      "which is not the snake->camel transform every other field follows, so a",
+      "caller porting a config between the two ports gets a silently ignored",
+      "option rather than a type error.",
+      "",
+      "js_only_config: options with no Python twin. onStep/repoPath/",
+      "pythonCommand exist because the TS port SPAWNS the Python one and Python",
+      "has nothing to spawn; idleMouseWander is a real behaviour gap."
+    ],
+    "python_only_config": [
+      "animated_probe_enabled",
+      "max_stale_frame_resolves",
+      "max_unsupported_resolves",
+      "slide_max_corrections",
+      "slide_probe_offsets_px",
+      "slide_tolerance_px",
+      "stale_frame_resolve_enabled"
+    ],
+    "js_only_config": [
+      "apiKey",
+      "idleMouseWander",
+      "maxStaleFrameReSolves",
+      "maxUnsupportedReSolves",
+      "model",
+      "onStep",
+      "pythonCommand",
+      "repoPath",
+      "staleFrameReSolveEnabled"
+    ]
+  },
+  "js": {
+    "package": {
+      "name": "captchakraken",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "bin": null,
+      "files": [
+        "dist",
+        "python",
+        "scripts",
+        "LICENSE"
+      ],
+      "postinstall": "node scripts/setup-python.js"
+    },
+    "exports": [
+      "AppiumTouchBackend",
+      "BaseHumanizer",
+      "CaptchaKrakenAPIError",
+      "CaptchaKrakenSolver",
+      "CdpTouchBackend",
+      "HUMANIZATION_MODES",
+      "MobileHumanizer",
+      "MouseHumanizer",
+      "NullHumanizer",
+      "PAUSE_KINDS",
+      "TouchscreenTouchBackend",
+      "fromPuppeteer",
+      "resolveHumanizer",
+      "resolveLoraName",
+      "touchBackendFor",
+      "watchPage"
+    ],
+    "humanization_modes": [
+      "mobile",
+      "mouse",
+      "none"
+    ],
+    "config_fields": [
+      "animatedChallengeAfterMs",
+      "apiKey",
+      "elementScreenshotTimeoutMs",
+      "gridLoadPollIntervalMs",
+      "gridLoadTimeoutMs",
+      "hcaptchaImagesTimeoutMs",
+      "humanization",
+      "humanizer",
+      "idleMouseWander",
+      "keyframeWaitPollMs",
+      "keyframeWaitTimeoutMs",
+      "maxNoProgressRounds",
+      "maxSolveLoops",
+      "maxStaleElementRetries",
+      "maxStaleFrameReSolves",
+      "maxUnsupportedReSolves",
+      "model",
+      "onStep",
+      "overallSolveTimeoutMs",
+      "postSolveDelayMs",
+      "postSolveOutcomePollMs",
+      "postSolveOutcomeTimeoutMs",
+      "postSubmitChangeTimeoutMs",
+      "pythonCommand",
+      "recaptchaDynamicFadePollMs",
+      "recaptchaDynamicFadeWaitMs",
+      "recaptchaFadeOnsetGraceMs",
+      "recaptchaMaxDynamicRounds",
+      "recaptchaTileHoverEnabled",
+      "repoPath",
+      "settleDiffThreshold",
+      "settleFrames",
+      "settlePollMs",
+      "settleTimeoutMs",
+      "staleElementBackoffMs",
+      "staleFrameDiffThreshold",
+      "staleFrameReSolveEnabled",
+      "startingMousePosition",
+      "touchDriver",
+      "touchTransform",
+      "videoBurstDurationMs",
+      "videoBurstFps",
+      "videoExtraInferenceMs",
+      "videoSolveEnabled"
+    ],
+    "solve_result_fields": [
+      "finalMousePosition",
+      "isSolved",
+      "tokenUsage"
+    ],
+    "error_codes": [
+      "account_suspended",
+      "insufficient_credits",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "rate_limited",
+      "request_too_large",
+      "solve_abandoned",
+      "unrecognized_prompt",
+      "upstream_unavailable"
+    ],
+    "mcp_package": {
+      "name": "captchakraken-mcp",
+      "bin": {
+        "captchakraken-mcp": "dist/index.js"
+      },
+      "main": null
+    }
+  },
+  "mcp": {
+    "server_name": "captchakraken",
+    "tools": {
+      "create_api_key": {
+        "properties": [
+          "name"
+        ],
+        "required": []
+      },
+      "get_account": {
+        "properties": [],
+        "required": []
+      },
+      "get_balance": {
+        "properties": [],
+        "required": []
+      },
+      "get_models": {
+        "properties": [],
+        "required": []
+      },
+      "get_pricing": {
+        "properties": [],
+        "required": []
+      },
+      "get_topup_link": {
+        "properties": [
+          "usd"
+        ],
+        "required": []
+      },
+      "get_usage": {
+        "properties": [
+          "days"
+        ],
+        "required": []
+      },
+      "list_api_keys": {
+        "properties": [],
+        "required": []
+      },
+      "revoke_api_key": {
+        "properties": [
+          "id"
+        ],
+        "required": [
+          "id"
+        ]
+      },
+      "sign_in": {
+        "properties": [
+          "client_name"
+        ],
+        "required": []
+      },
+      "sign_out": {
+        "properties": [],
+        "required": []
+      }
+    }
+  }
+}
