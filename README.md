@@ -68,9 +68,9 @@ neither is one we could not classify — only rounds where a challenge was on
 screen and had to be solved.
 
 One row is marked **not scored**. hCaptcha deals its drag puzzle too rarely for
-us to have collected a scored run of it, so that clip is a demonstration and the
-figures beside it are an estimate rather than a measurement. It is labelled
-where it appears rather than quietly averaged in with the rest.
+us to have collected a scored run of it, so that clip is a demonstration and
+carries no count or median at all. It is labelled where it appears rather than
+given numbers that would look exactly like the measured ones.
 
 <details open>
 <summary><b>hCaptcha</b> — 4 puzzle types</summary>
