@@ -135,12 +135,14 @@
       "kind": "lora",
       "base_model": "Qwen/Qwen3.8-27B",
       "lora_name": "abyss",
-      "note": "IN DEVELOPMENT. Never published, never downloadable — see `availability`. Registered before it exists so the licence gates are armed rather than retrofitted after the first artifact is sitting on a disk: the publisher, the parity gate and `captchakraken fetch` all read this entry, and a rule added the day it is first needed is a rule that was absent on the day it was first needed. prompt_version is 2 because that is what src.synthetic.reasoning.instructions.PROMPT_VERSION builds training data at today; it is confirmed from training_runs/<run_id>/model.json when it trains, and until then nothing resolves it — there is no served_aliases entry, so no caller can name it."
+      "note": "IN DEVELOPMENT. Never published, never downloadable — see `availability`. Registered before it exists so the licence gates are armed rather than retrofitted after the first artifact is sitting on a disk: the publisher, the parity gate and `captchakraken fetch` all read this entry, and a rule added the day it is first needed is a rule that was absent on the day it was first needed. prompt_version is 2 because that is what the training data is built at today; CONFIRM IT from the training run's record when it trains, because a licence holder DOES name this model — it has a served_aliases entry (`abyss`), which is what makes their prompts resolve from this entry rather than through the `latest` fallback. Being nameable is not being downloadable: `availability` above is what refuses the weights, and the two are independent on purpose."
     }
   },
   "served_aliases": {
     "_comment": "A hosted endpoint serves a bare name, not a repo id. Map it back so prompt resolution works for callers who only ever see the alias. api.captchakraken.com now serves ONE model behind the permanent public name `captcha`, whatever the caller sends, so `captcha` means whichever adapter is current there — today CaptchaKraken-Lora-v1.2 — and NOT the v1.1 weights that share the name as a local vLLM alias. Self-hosters resolve by repo id via CAPTCHA_LORA_ADAPTER and are unaffected. Move this in the same change as the gateway's CKGATE_UPSTREAM_MODEL or the hosted model answers a prompt generation it was not trained on.",
     "captcha": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
-    "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2"
+    "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
+    "_comment_abyss": "`abyss` is here for the OPPOSITE reason to the two above, and it is not a contradiction of `availability: licensed`. An alias says which model a served NAME means; availability says whether its weights can be downloaded. A licence holder does name this model — the hosted API accepts it from a licensed key and lists it to them on /v1/models so their SDK can — and without this line `canonical_model_id('abyss')` is None, so their prompts resolve through the `latest` fallback: the exact model/generation mispairing this file exists to prevent, silent, and only accidentally right while `latest` happens to share the generation. It does NOT make the weights fetchable; `captchakraken fetch` reads availability and refuses this name, which is also the clear error a self-hoster who typed it deserves.",
+    "abyss": "CaptchaKraken/Abyss"
   }
 }
