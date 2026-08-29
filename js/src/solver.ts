@@ -732,19 +732,30 @@ export class CaptchaKrakenSolver {
       renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
 
-      // After acting, poll for the vendor's SOLVED signal (anchor checkbox
-      // checked / response token) for a short window before falling back to the
-      // normal re-detect. hCaptcha keeps the challenge iframe visible for a
-      // couple seconds while it verifies the final answer; without this, the
-      // loop re-entered the pipeline on that closing frame and burned ~18s
-      // (waitForHcaptchaChallengeImages timing out on a prompt-less frame).
-      // This ONLY early-returns on a definitive solved signal — it never
-      // re-solves, so it can't loop. If not solved in the window, the original
-      // detectCaptcha path below handles a genuine next round exactly as before.
+      // ONE wait after a round, polled, whichever kind of round it was.
+      //
+      // There used to be two: this poll when the round interacted, and a flat
+      // `delay(postSolveDelayMs + jitter)` when it did not. The flat sleep
+      // observed NOTHING — it ran to the end and only then asked whether the
+      // widget was still there — so a round that had in fact finished the
+      // captcha paid 1200-1500ms to find that out. The poll below already asks
+      // exactly that question and answers it the moment it becomes true.
+      //
+      // The two windows keep different LENGTHS, because different things size
+      // them: postSolveOutcomeTimeoutMs covers how late a vendor's success
+      // signal can arrive (measured — see types.ts), while postSolveDelayMs is
+      // the dwell a round that answered nothing takes before deciding the page
+      // has settled. Mirrors page_solver.py; the ports must not disagree about
+      // how long a round costs.
+      //
+      // hCaptcha keeps the challenge iframe visible for a couple of seconds
+      // while it verifies the final answer; without this window the loop
+      // re-entered the pipeline on that closing frame and burned ~18s. It ONLY
+      // early-returns on a definitive signal, so it cannot loop.
       const settleMs = didInteract
         ? (this.config.postSolveOutcomeTimeoutMs ?? 1000)
         : postSolveDelayMs + Math.random() * 300;
-      if (didInteract) {
+      {
         const deadline = Date.now() + settleMs;
         const verdictT0 = Date.now();
         let solved = false;
@@ -773,7 +784,8 @@ export class CaptchaKrakenSolver {
           if (await this.isChallengeFreshlyRendered(page)) break;
           await delay(this.config.postSolveOutcomePollMs ?? 75);
         }
-        this.budget?.add('await-verdict', Date.now() - verdictT0);
+        this.budget?.add(didInteract ? 'await-verdict' : 'post-submit-delay',
+                         Date.now() - verdictT0);
         // How long a SUCCESS actually took to show itself — the only number
         // that can size postSolveOutcomeTimeoutMs. A round that ends any other
         // way spends the whole window by construction.
@@ -785,8 +797,6 @@ export class CaptchaKrakenSolver {
             tokenUsage: aggregateTokenUsage(cumulativeTokenUsage),
           };
         }
-      } else {
-        await this.ph('post-submit-delay', () => delay(settleMs));
       }
 
       // Detect reCAPTCHA's under-selection error banner. If present, the
