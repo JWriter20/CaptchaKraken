@@ -103,15 +103,78 @@ await browser.close();
 
 Puppeteer users wrap the page once with `fromPuppeteer(page)`.
 
+## How it moves — mouse, mobile, none, or yours
+
+Solving a captcha is two jobs: reading the puzzle, and *performing* the answer.
+The second is a choice of **input device**, not a realism dial.
+
+```typescript
+new CaptchaKrakenSolver({ humanization: 'mouse' })   // default
+new CaptchaKrakenSolver({ humanization: 'mobile' })  // real touch events
+new CaptchaKrakenSolver({ humanization: 'none' })    // straight to the DOM effect
+new CaptchaKrakenSolver({ humanizer: myOwn })        // yours; overrides the above
+```
+
+Unset, it reads `CAPTCHA_HUMANIZATION` and then falls back to `mouse` — which is
+byte-for-byte what the driver did before the option existed, so nothing moves for
+an existing caller. Anything set in code **wins** over the env var: which mode is
+right is a property of the page you are driving, not a deployment decision.
+
+`mobile` never touches `page.mouse`. A mousemove at a touch-only widget is the
+*wrong event*, not a weaker one — the page's touch handlers never fire and the
+solve fails for a reason nothing reports. It needs a Chromium-family page with
+touch turned on:
+
+```typescript
+import { chromium, devices } from 'playwright';
+
+const context = await browser.newContext({ ...devices['Pixel 7'], hasTouch: true });
+await new CaptchaKrakenSolver({ humanization: 'mobile' }).solve(await context.newPage());
+```
+
+Or drive a real handset over **Appium / WebdriverIO / Selenium** — gestures go
+out as W3C pointer actions with `pointerType: "touch"`:
+
+```typescript
+new CaptchaKrakenSolver({
+  humanization: 'mobile',
+  touchDriver: driver,                            // your Appium / WebdriverIO session
+  touchTransform: { scale: 3, origin: [0, 132] }, // CSS px -> screen px
+});
+```
+
+`touchTransform` is required rather than guessed: get it wrong and nothing
+raises — the action chain is valid, the device performs it, and the finger lands
+somewhere else. A `touchDriver` with no `scale` on a page reporting
+`devicePixelRatio !== 1` refuses on the first gesture and names the value to pass.
+
+Full details, including writing your own humanizer:
+[docs/usage.md § How it moves](https://github.com/JWriter20/CaptchaKraken/blob/main/docs/usage.md#how-it-moves--mouse-mobile-none-or-yours).
+
 ## Configuration
 
-| Variable | Meaning |
-|---|---|
-| `VLLM_BASE_URL` | Inference endpoint (local vLLM, a server you run, or `https://api.captchakraken.com/v1`) |
-| `CAPTCHA_KRAKEN_API_KEY` | Bearer token (`VLLM_API_KEY` also accepted) |
+| Variable | Meaning | Default |
+|---|---|---|
+| `VLLM_BASE_URL` | Inference endpoint (local vLLM, a server you run, or `https://api.captchakraken.com/v1`) | credentials file, else `http://localhost:8000/v1` |
+| `CAPTCHA_KRAKEN_API_KEY` | Bearer token (`VLLM_API_KEY` also accepted) | credentials file, else `EMPTY` |
+| `CAPTCHA_HUMANIZATION` | How gestures are performed: `mouse`, `mobile` or `none`. Loses to anything set in code | `mouse` |
+| `CAPTCHA_BASE_MODEL` | Base weights vLLM loads | `RedHatAI/Qwen3.5-9B-FP8-dynamic` |
+| `CAPTCHA_LORA_ADAPTER` | Captcha adapter (HF id or path) | `CaptchaKraken/CaptchaKraken-Lora-v1.2` |
+| `CAPTCHA_LORA_NAME` | Served adapter name sent as `model` | `captcha-v12` |
+| `CAPTCHA_KRAKEN_AUTOSTART` | `0` never auto-starts a local server | `1` |
+| `CAPTCHA_KRAKEN_PYTHON` | Interpreter used for the bundled engine | the package's venv, else `python3` |
+| `CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP` | `1` skips the `postinstall` bootstrap | unset |
+| `CAPTCHA_DEBUG` | `1` prints solver diagnostics to stderr | `0` |
 
-Both fall back to `~/.captchakraken/credentials` when unset, so the hosted API
-needs no environment variables at all.
+`VLLM_BASE_URL` and `CAPTCHA_KRAKEN_API_KEY` fall back to
+`~/.captchakraken/credentials` when unset, so the hosted API needs no
+environment variables at all.
+
+**Why the model and server variables appear here.** This package bundles the
+Python engine and spawns it, forwarding the environment wholesale — so every
+variable the engine reads applies to a TypeScript solve too. The full list, and
+the vLLM server knobs, are in
+[AGENTS.md § Environment variables](https://github.com/JWriter20/CaptchaKraken/blob/main/AGENTS.md#environment-variables).
 
 ## License
 

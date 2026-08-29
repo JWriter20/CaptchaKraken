@@ -43,10 +43,12 @@ To run a solver against a model you'll need a vLLM server — see
 
 ## Tests & CI
 
-CI runs a small, fast suite on every PR (no GPU, no network) — primarily the
-**grid-detection** checks in the Python port (`python/`), which are the
-foundation of the whole solve, plus a TypeScript build of the driver. Run them
-locally before opening a PR:
+Two gates run on every PR.
+
+**1. A hermetic suite** (no GPU, no network): the whole Python `pytest` suite —
+primarily the **grid-detection** checks in `python/`, which are the foundation
+of the whole solve — plus a TypeScript build of the driver. Run it locally
+before opening a PR:
 
 ```bash
 # Python: find_grid / grid-detection unit tests (fast, deterministic)
@@ -63,27 +65,40 @@ cd js
 npx tsc --noEmit -p tsconfig.json
 ```
 
-This package has **no browser end-to-end tests of its own** — it never launches a
-browser. The live solve-and-record tests (`record_demos.spec.ts` et al.) live in
-the parent `CaptchaKrakenFinetune` repo, which owns a Playwright launcher and
-drives the built solver. Grid detection is exercised by the Python tests above.
+**2. A driver gate.** Both ports are driven end to end through a real browser
+against a fixture suite, and the result comes back as the `tier3/driver-gate`
+commit status plus a PR comment with per-port and per-vendor pass rates. The
+fixtures and the model live in a private repo, so this one runs there and
+reports back — you cannot run it locally, and you do not need to. It is the gate
+that catches what a type-check cannot: a selector that moved, a click landing
+off-widget, or one port asking for something the other does not.
+
+This package has **no browser tests of its own** — it never launches a browser,
+and it ships none. Everything you can run locally is the hermetic suite above.
+
+> On a **fork PR** the driver gate cannot run: GitHub does not expose the
+> dispatch secret to a fork's workflow, so the check sits as pending. That is
+> expected. A maintainer re-runs it by pushing your branch into this repo.
 
 ## Pull requests
 
-- Branch off `main`, keep PRs focused, and describe what you changed and how you
-  verified it.
+- **Branch off `dev`, and open your PR against `dev`.** `main` is the release
+  branch and only ever takes a `dev` → `main` merge, so a PR straight into
+  `main` will be redirected.
+- Keep PRs focused, and describe what you changed and how you verified it.
 - If you touched grid detection, paste the `test_find_grid_corpus.py` per-type
   table before/after so reviewers can see the delta.
-- New end-to-end solving capability? Include a short clip or the
-  `record_demos_summary.json` numbers from a local run of the demo recorder in
-  the parent `CaptchaKrakenFinetune` repo
-  (`npx playwright test tests/record_demos.spec.ts` there).
+- New end-to-end solving capability? Say which vendor and puzzle it covers and
+  how you drove it. The driver gate above will exercise it; you do not need to
+  produce your own recording.
 
 ## What we'd love help with
 
 - More **real labeled samples** for under-represented hCaptcha grid prompts.
 - Robustness on **reCAPTCHA 4×4** (our weakest grid type end-to-end).
-- Out-of-scope puzzle types (drag/path/tetris) — currently detected and skipped.
+- Accuracy on the **freehand hCaptcha puzzles** — connect-the-path, the
+  numbered-line and missing-piece drags. Every hCaptcha family now routes and is
+  driven; these are the ones where the model is least reliable.
 - Smaller / faster quantizations so lower-VRAM hardware can self-host.
 
 Questions? Open an issue. Please don't open PRs that add a paid captcha-solving

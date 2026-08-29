@@ -364,8 +364,14 @@ client unless you have a reason not to.
 
 ## Rules for agents
 
-- **Never invent accuracy numbers.** Published figures are being re-measured.
-  Say they are not published yet.
+- **Never invent accuracy numbers.** The only figures we publish are the
+  recorded end-to-end solves in the
+  [README](./README.md#watch-it-work) — each puzzle driven on the vendor's own
+  demo page, quoted as counts rather than percentages, with the date and the
+  adapter beside them. Quote those or quote nothing. One row there is marked
+  **not scored**; do not turn it into a number. There is no published per-type
+  model-accuracy table, so do not produce one, derive one, or convert a count
+  into a percentage.
 - **Abyss is not serving yet** and is never downloadable. Do not tell a user
   the hosted API runs it, and do not suggest weights or a workaround for it.
   The hosted endpoint answers with **Twilight v1.2**. Verify with
