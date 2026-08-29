@@ -64,9 +64,37 @@ could not RECORD — note this no longer means "the challenge moves"; a moving
 challenge is recorded and solved from keyframes), and `CaptchaSolveError` for
 everything else.
 
-Tune with `PageSolverConfig`; its fields are the snake_cased names of the
-TypeScript `CaptchaKrakenConfig` keys, so a value tuned on one driver is findable
-on the other.
+Tune with `PageSolverConfig`. Its fields are the snake_cased names of the
+TypeScript `CaptchaKrakenConfig` keys, so a value tuned on one driver is
+findable on the other — with the exceptions below, which are worth knowing
+because guessing wrong is silent on the Python side.
+
+**Three keys are not a plain snake_case of the TypeScript name.** The TS names
+capitalise the `S` in "re-solve":
+
+| Python | TypeScript |
+|---|---|
+| `stale_frame_resolve_enabled` | `staleFrameReSolveEnabled` |
+| `max_stale_frame_resolves` | `maxStaleFrameReSolves` |
+| `max_unsupported_resolves` | `maxUnsupportedReSolves` |
+
+**Two have different shapes.** `starting_mouse_position` is a `(x, y)` tuple in
+Python and a `{ x, y }` object in TypeScript; `touch_transform`'s `origin` is a
+tuple in Python and an array in TypeScript.
+
+**A few exist on one side only**, because they configure something only that
+side has:
+
+| Only in Python | Only in TypeScript |
+|---|---|
+| `animated_probe_enabled` | `onStep` — a per-step callback for progress UI |
+| `slide_probe_offsets_px` | `idleMouseWander` |
+| `slide_tolerance_px` | `repoPath`, `pythonCommand` — where the bundled engine lives |
+| `slide_max_corrections` | `model`, `apiKey` — Python takes these on `PageSolver(...)` itself |
+
+Everything that decides **accuracy** — the prompts, the CV, the pixel budget,
+the model — lives in the shared Python half and is identical by construction.
+The differences above are all in the driving layer.
 
 > **The Python driver is synchronous only.** A sync Playwright handle cannot be
 > driven from inside an event loop, so `async_playwright` and `AsyncCamoufox`

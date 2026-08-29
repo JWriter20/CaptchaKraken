@@ -121,6 +121,14 @@ Refusals arrive as `CaptchaKrakenAPIError` with a machine-readable `code`.
 **Branch on the code, never on the message text** — wording changes, codes are
 the contract.
 
+```typescript
+import { CaptchaKrakenAPIError } from 'captchakraken';
+```
+
+```python
+from captchakraken import CaptchaKrakenAPIError
+```
+
 | `code` | Meaning | What to do |
 |---|---|---|
 | `insufficient_credits` | Balance is empty | Top up — MCP `get_topup_link`, or the dashboard |
