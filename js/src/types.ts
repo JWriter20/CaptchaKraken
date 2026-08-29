@@ -617,4 +617,14 @@ export interface SolveResult {
     cachedInputTokens: number;
     estimatedCost: number;
   };
+  /**
+   * Where this solve's wall-clock went, in milliseconds per phase — the same
+   * partition `CAPTCHA_TIMINGS=1` prints, handed to the caller instead of to
+   * stderr. Mirrors `SolveResult.phases` on the Python port.
+   *
+   * Returned rather than only logged because "the solve took 12s" is not
+   * actionable and "the settle monitor spent 4s of it" is, and a caller
+   * measuring a fleet cannot scrape another process's stderr.
+   */
+  phases?: Record<string, number>;
 }

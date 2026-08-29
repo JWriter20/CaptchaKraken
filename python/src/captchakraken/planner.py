@@ -312,6 +312,16 @@ class ActionPlanner:
         # Auto-start a local vLLM server on the first request if one isn't up
         # (no-op for a healthy or remote endpoint). Guarded so we only try once.
         self._server_ensured = False
+        # ONE connection, reused for every round of every solve this planner
+        # serves. `requests.post` opens a fresh TCP connection each call — and
+        # to a hosted endpoint a TLS handshake with it. Measured against the
+        # gate's own endpoint: 258ms per request connectionless vs 144ms
+        # pooled, so every inference was paying ~110ms to re-dial a server it
+        # had just finished talking to. A multi-round grid pays it per round.
+        #
+        # The planner is per-PageSolver and a PageSolver is reusable across
+        # solves, so a caller who keeps one keeps the connection warm too.
+        self._http = requests.Session()
 
     def _log(self, message: str) -> None:
         if DEBUG:
@@ -391,7 +401,7 @@ class ActionPlanner:
                   f"images={len(parts)}")
 
         with timed("planner.chat"):
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            resp = self._http.post(url, headers=headers, json=payload, timeout=120)
 
         # Surface auth / billing / server errors as something the reader can act
         # on, instead of letting resp.json() blow up with a cryptic "Expecting

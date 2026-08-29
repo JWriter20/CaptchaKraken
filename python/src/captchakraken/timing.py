@@ -56,9 +56,14 @@ class PhaseBudget:
     monitor spent 31s of it" is. Always on — it is a few dict updates per phase
     against multi-second waits — but only PRINTED under CAPTCHA_TIMINGS=1.
 
-    Phases may nest (a burst contains its screenshots); only the outermost of a
-    given name accumulates, so the totals stay a partition of the solve rather
-    than double-counting.
+    Phases may nest (a burst contains its screenshots). Only the outermost of a
+    GIVEN NAME accumulates, so re-entering one cannot double-count it — but a
+    phase nested inside a differently-named one counts under both, deliberately:
+    the cursor drifting over the widget WHILE the model generates is genuinely
+    both `mouse` and `inference`, and hiding either would misreport what the
+    solve was doing. The totals are therefore an attribution, not a partition,
+    and can exceed the elapsed time. `report()` prints the residual as
+    `(unattributed)` and it can go negative when they do.
     """
 
     def __init__(self) -> None:
