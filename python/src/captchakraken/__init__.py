@@ -32,6 +32,12 @@ from .action_types import (
 from .image_processor import ImageProcessor
 from .overlay import add_overlays_to_image
 
+# The hosted API's refusal type. Outside the try below on purpose: `errors`
+# imports nothing but `typing`, and docs/hosted-api.md tells every caller to
+# branch on its `.code` — a recipe that has to work in both ports, and in a
+# minimal install that has no serving stack.
+from .errors import CaptchaKrakenAPIError
+
 # How gestures are PERFORMED — mouse, touch, or nothing. Deliberately outside
 # the try below: `humanize` imports only `trajectory`, so it has no dependency
 # floor at all, and a caller writing a custom Humanizer must be able to import
@@ -85,6 +91,7 @@ __all__ = [
     "TypeAction",
     "WaitAction",
     "add_overlays_to_image",
+    "CaptchaKrakenAPIError",
     "Humanizer",
     "MouseHumanizer",
     "MobileHumanizer",
