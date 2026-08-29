@@ -5,6 +5,7 @@
       "ActionPlanner",
       "AppiumTouchBackend",
       "CaptchaAction",
+      "CaptchaKrakenAPIError",
       "CaptchaSolver",
       "CaptchaWatcher",
       "CdpTouchBackend",
@@ -85,6 +86,7 @@
     "solve_result_fields": [
       "final_mouse_position",
       "is_solved",
+      "phases",
       "token_usage"
     ],
     "config_functions": [
@@ -245,6 +247,7 @@
       "python/src/captchakraken/planner.py"
     ],
     "CAPTCHA_TIMINGS": [
+      "js/src/timing.ts",
       "python/src/captchakraken/timing.py"
     ],
     "PYTHONPATH": [
@@ -279,6 +282,7 @@
   "model_resolution": {
     "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
     "registered_models": [
+      "CaptchaKraken/Abyss",
       "CaptchaKraken/CaptchaKraken-Lora-v1.2",
       "CaptchaKraken/CaptchaKrakenV1_Lora",
       "CaptchaKraken/CaptchaKraken_v1.1",
