@@ -1,10 +1,11 @@
 {
   "python": {
-    "version": "2.6.1",
+    "version": "2.7.0",
     "exports": [
       "ActionPlanner",
       "AppiumTouchBackend",
       "CaptchaAction",
+      "CaptchaKrakenAPIError",
       "CaptchaSolver",
       "CaptchaWatcher",
       "CdpTouchBackend",
@@ -85,6 +86,7 @@
     "solve_result_fields": [
       "final_mouse_position",
       "is_solved",
+      "phases",
       "token_usage"
     ],
     "config_functions": [
@@ -245,6 +247,7 @@
       "python/src/captchakraken/planner.py"
     ],
     "CAPTCHA_TIMINGS": [
+      "js/src/timing.ts",
       "python/src/captchakraken/timing.py"
     ],
     "PYTHONPATH": [
@@ -279,6 +282,7 @@
   "model_resolution": {
     "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
     "registered_models": [
+      "CaptchaKraken/Abyss",
       "CaptchaKraken/CaptchaKraken-Lora-v1.2",
       "CaptchaKraken/CaptchaKrakenV1_Lora",
       "CaptchaKraken/CaptchaKraken_v1.1",
@@ -317,7 +321,8 @@
       "",
       "js_only_config: options with no Python twin. onStep/repoPath/",
       "pythonCommand exist because the TS port SPAWNS the Python one and Python",
-      "has nothing to spawn; idleMouseWander is a real behaviour gap."
+      "has nothing to spawn; idleMouseWander is a real behaviour gap.",
+      "stepScreenshotTimeoutMs is js_only because it bounds onStep, which is itself js_only and listed above. Python has no on_step mechanism at all, so the option would be inert there — an inert knob is worse than an absent one. It shrinks off this list only when Python grows an observer."
     ],
     "python_only_config": [
       "animated_probe_enabled",
@@ -337,7 +342,8 @@
       "onStep",
       "pythonCommand",
       "repoPath",
-      "staleFrameReSolveEnabled"
+      "staleFrameReSolveEnabled",
+      "stepScreenshotTimeoutMs"
     ]
   },
   "js": {
@@ -416,6 +422,7 @@
       "staleFrameDiffThreshold",
       "staleFrameReSolveEnabled",
       "startingMousePosition",
+      "stepScreenshotTimeoutMs",
       "touchDriver",
       "touchTransform",
       "videoBurstDurationMs",
@@ -426,6 +433,7 @@
     "solve_result_fields": [
       "finalMousePosition",
       "isSolved",
+      "phases",
       "tokenUsage"
     ],
     "error_codes": [
