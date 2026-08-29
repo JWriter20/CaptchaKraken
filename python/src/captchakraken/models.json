@@ -6,10 +6,9 @@
     "Why a map and not a constant: a model answers in whatever schema its prompt",
     "asks for. Send a version-1 model the version-2 prompt and nothing errors —",
     "it just answers worse, on every puzzle, silently. That is exactly the",
-    "2026-07-18 regression (failure-mode 3 in the finetune repo's",
-    "scripts/check_prompt_parity.py), where the shipped prompt kept asking for",
-    "the legacy output/simulate_drag/PascalCase schema long after the LoRA had",
-    "been retrained on action: drag / drags[].",
+    "2026-07-18 regression, where the shipped prompt kept asking for the legacy",
+    "output/simulate_drag/PascalCase schema long after the LoRA had been",
+    "retrained on action: drag / drags[].",
     "",
     "Hardcoding one generation makes that inevitable the moment a new model",
     "trains on different prompts: updating the constants breaks every already-",
@@ -27,10 +26,9 @@
     "never see `latest`, so they are not silently moved onto prompts they cannot",
     "produce.",
     "",
-    "Adding a model: add its entry here IN THE SAME COMMIT as publishing it. The",
-    "finetune repo's check_prompt_parity.py fails if any registered model names a",
-    "prompt_version this client ships no built-ins for, so an unmapped model",
-    "cannot reach a release.",
+    "Adding a model: add its entry here IN THE SAME COMMIT as publishing it. A",
+    "release gate fails if any registered model names a prompt_version this",
+    "client ships no built-ins for, so an unmapped model cannot reach a release.",
     "",
     "`pixel_budget` is the same idea for RESOLUTION. Qwen reads MIN_PIXELS /",
     "MAX_PIXELS from the environment and clamps each image's AREA into that band,",
@@ -47,7 +45,25 @@
     "",
     "Omit it and the client keeps its historical behaviour (floor at 448 squared,",
     "no ceiling). Absent means UNKNOWN, not zero — set it only where it has been",
-    "measured or the training run is known."
+    "measured or the training run is known.",
+    "",
+    "`availability` says whether the WEIGHTS are obtainable. Two values:",
+    "  \"public\"   — on the Hub; anyone may download and self-host it. This is",
+    "               the default when the field is absent, so every entry that",
+    "               predates the field keeps its meaning exactly.",
+    "  \"licensed\" — NOT downloadable by anyone. Reachable only through",
+    "               api.captchakraken.com, or by a holder of a licence we issue.",
+    "               There is no Hub repo to point CAPTCHA_LORA_ADAPTER at, and",
+    "               `captchakraken fetch` refuses rather than 404ing at the Hub.",
+    "",
+    "Why it lives HERE and not only in a policy doc: this file is already the one",
+    "place that decides what an unpinned client downloads and what prompts it",
+    "sends. A second list of 'models you may not publish' kept somewhere else",
+    "would be a list that drifts, and the drift is silent in the direction that",
+    "costs the most. The finetune repo's publisher reads this field and REFUSES",
+    "to upload a licensed model to the Hub; check_prompt_parity.py refuses to let",
+    "`latest` be one, because an unpinned self-hoster would resolve to weights",
+    "they cannot obtain."
   ],
   "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
   "models": {
@@ -61,7 +77,7 @@
         "min": 518400,
         "max": 518400
       },
-      "note": "Run 20260812-005302 (ready-to-deploy). PUBLIC on the Hub under Source-Available License v1.1, and the first published generation-2 model. TRAINED with floor 448^2 / ceiling 720^2, but MEASURED best served at a flat 720^2 — floor == ceiling, so every image arrives at exactly one size. Tier 2 overall 0.6115 -> 0.6412 across the full 1458-sample real eval and reCAPTCHA 3x3 exact 0.648 -> 0.715, against run-to-run noise of +/-0.001. Swept 2026-08-18 over 448/576/640/704/720/736/768/896/1024^2: the plateau is 704-736^2 and it falls off above 768^2, where a 400x580 portrait capture runs more than 40% past the ViT's 48x48 position grid. Note 640^2 is where that grid is exactly saturated and it scores WORSE (0.6357) — mild extrapolation plus real pixels beats staying inside the grid. Was served as `captcha-v12` while absent from this file, which resolved it to generation 1 prompts against generation-2 weights — the failure this file exists to prevent."
+      "note": "PUBLIC on the Hub under Source-Available License v1.1, and the first published generation-2 model. TRAINED with floor 448^2 / ceiling 720^2, but MEASURED best served at a flat 720^2 — floor == ceiling, so every image arrives at exactly one size and the band cannot drift. The band was chosen by sweeping the serving floor over 448/576/640/704/720/736/768/896/1024^2 and scoring each arm: the plateau is 704-736^2, and it falls off above 768^2, where a 400x580 portrait capture runs more than 40% past the ViT's 48x48 position grid. Do not \"just use the ViT's native grid\": 640^2 is where that grid is exactly saturated for a portrait capture, and it scores WORSE than 720^2 — mild position-embedding extrapolation plus real pixels beats staying inside the grid. Was served as `captcha-v12` while absent from this file, which resolved it to generation 1 prompts against generation-2 weights — the failure this file exists to prevent."
     },
     "CaptchaKraken/Twilight-v1.2-FP8": {
       "prompt_version": "2",
@@ -110,11 +126,21 @@
       "kind": "merged",
       "lora_name": "captcha",
       "note": "Ships its own prompts.json; this entry keeps it resolvable offline."
+    },
+    "CaptchaKraken/Abyss": {
+      "availability": "licensed",
+      "prompt_version": "2",
+      "kind": "lora",
+      "base_model": "Qwen/Qwen3.8-27B",
+      "lora_name": "abyss",
+      "note": "IN DEVELOPMENT. Never published, never downloadable — see `availability`. Registered before it exists so the licence gates are armed rather than retrofitted after the first artifact is sitting on a disk: the publisher, the parity gate and `captchakraken fetch` all read this entry, and a rule added the day it is first needed is a rule that was absent on the day it was first needed. prompt_version is 2 because that is what the training data is built at today; CONFIRM IT from the training run's record when it trains, because a licence holder DOES name this model — it has a served_aliases entry (`abyss`), which is what makes their prompts resolve from this entry rather than through the `latest` fallback. Being nameable is not being downloadable: `availability` above is what refuses the weights, and the two are independent on purpose."
     }
   },
   "served_aliases": {
     "_comment": "A hosted endpoint serves a bare name, not a repo id. Map it back so prompt resolution works for callers who only ever see the alias. api.captchakraken.com now serves ONE model behind the permanent public name `captcha`, whatever the caller sends, so `captcha` means whichever adapter is current there — today CaptchaKraken-Lora-v1.2 — and NOT the v1.1 weights that share the name as a local vLLM alias. Self-hosters resolve by repo id via CAPTCHA_LORA_ADAPTER and are unaffected. Move this in the same change as the gateway's CKGATE_UPSTREAM_MODEL or the hosted model answers a prompt generation it was not trained on.",
     "captcha": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
-    "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2"
+    "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
+    "_comment_abyss": "`abyss` is here for the OPPOSITE reason to the two above, and it is not a contradiction of `availability: licensed`. An alias says which model a served NAME means; availability says whether its weights can be downloaded. A licence holder does name this model — the hosted API accepts it from a licensed key and lists it to them on /v1/models so their SDK can — and without this line `canonical_model_id('abyss')` is None, so their prompts resolve through the `latest` fallback: the exact model/generation mispairing this file exists to prevent, silent, and only accidentally right while `latest` happens to share the generation. It does NOT make the weights fetchable; `captchakraken fetch` reads availability and refuses this name, which is also the clear error a self-hoster who typed it deserves.",
+    "abyss": "CaptchaKraken/Abyss"
   }
 }

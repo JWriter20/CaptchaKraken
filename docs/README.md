@@ -32,7 +32,15 @@ CaptchaKraken detects the captcha, solves it, clicks, and verifies.
 | ✅ **hCaptcha 3×3 image grid** | Works end-to-end |
 | ✅ **hCaptcha click / drag puzzles** | Full-puzzle model → pixel click/drag actions |
 | ✅ Cloudflare Turnstile | Works via the checkbox flow |
+| ✅ **GeeTest** (v3 + v4) | Slide, icon, nine, svg, gobang, iconcrush |
+| ✅ **NetEase Yidun** | Jigsaw, picture-click, icon-click |
+| ✅ **Lemin, Prosopo, Tencent** | Cropped-image, grid, and slide flows |
+| ✅ **Distorted text** | BotDetect, MTCaptcha, Yandex — read and typed, not clicked |
 | ✅ **Animated / video challenges** | Recorded (4 s @ 10 fps), cut into keyframes, solved as one multi-image prompt, then clicked once the widget returns to the chosen frame. The model half shipped with **v1.2**, which `setup.sh` installs and the hosted API serves |
+
+44 puzzle types across those 10 vendors. The per-type record — each puzzle
+driven on the vendor's own demo page, with the attempts scored — is in the
+[main README](../README.md#watch-it-work).
 
 Non-grid still-image puzzles — **click** ("click each …"), **drag** ("drag the
 piece into place"), path/connect, "choose the card" — route to the full-puzzle
