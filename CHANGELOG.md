@@ -64,6 +64,20 @@ drive a phone, and no way to turn it off when your stack already did it.
 - **`startingMousePosition` is now honoured on the first gesture too.** The
   camoufox origin-seeding step used to overwrite it with the window centre.
 
+### Fixed
+
+- **`captchakraken.__version__` said `2.6.0` while 2.6.1 was on PyPI and npm.**
+  Nothing compared it against the manifest pip actually reads, so every caller
+  branching on it — and every bug report quoting it — named a release that was
+  not the one running. Now checked by a test.
+
+- **`CaptchaKrakenAPIError` is exported from the Python package root**, as it
+  already was from the TypeScript one. `docs/hosted-api.md` tells every caller
+  to branch on its `.code`, and that recipe did not work in one of the two
+  languages the docs claim parity for: the type existed only at
+  `captchakraken.errors`. Purely additive — the old import path still works, and
+  `errors` imports nothing but `typing`, so this adds no dependency floor.
+
 ### Changed
 
 - **The pointer position moved out of the solver** and into the humanizer, in
