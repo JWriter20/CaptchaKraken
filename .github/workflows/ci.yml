@@ -3,9 +3,16 @@ name: CI
 # Fast, hermetic checks for both ports: no GPU, no network, no model weights.
 # The core guard is grid detection (the foundation of every solve) plus a
 # TypeScript build check on the browser solver.
+#
+# `dev` IS LISTED, and it was not. A pull request into `dev` ran nothing here at
+# all — checked 2026-08-28 on #16, whose only check was GitGuardian — so work
+# landed on the integration branch ungated and first met CI at the `dev -> main`
+# promotion, where a failure blocks the RELEASE instead of the change that
+# caused it. These jobs are hermetic and run on ubuntu-latest, which is free for
+# a public repo, so there was never a cost argument for the narrower trigger.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   # Reused by publish.yml as the pre-publish gate on main pushes.
   workflow_call:
 

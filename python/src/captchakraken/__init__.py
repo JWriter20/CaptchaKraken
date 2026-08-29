@@ -102,4 +102,9 @@ __all__ = [
     "TouchscreenTouchBackend",
 ]
 
+# KEEP IN STEP with python/pyproject.toml and js/package.json — the two ports
+# ship together (rule 1c) and this is the only one importable code can read.
+# It said 2.6.0 while the wheel on PyPI said 2.6.1, so anyone gating on the
+# runtime attribute saw a version that had not been current for weeks.
+# tests/test_public_contract.py compares all three.
 __version__ = "2.6.1"
