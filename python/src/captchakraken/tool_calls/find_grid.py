@@ -18,6 +18,21 @@ from ..image_processor import ImageProcessor
 # region (white wall, sky, watermark haze) has "cells" the same colour as its
 # "gutters". Ported from the grid_tracer dev harness; see that harness + the
 # project memory note `project_find_grid_tracer_*` for the iteration history.
+#
+# SECOND CUE — the colour comb (_comb_lines) + the seal test (_seal_fraction).
+# The tracer is a LOCAL walk, so it fails on the one board captcha vendors draw
+# often: a gutter whose neighbours are nearly its own colour. It cannot tell the
+# two apart pixel by pixel, every neighbour seeds a trace of its own, and the
+# cluster average lands off the separator. The comb asks the complementary GLOBAL
+# question — is this whole straight line the gutter colour, end to end? — and the
+# seal asks it of a candidate LATTICE: does every separator run the full width of
+# the grid it implies, so the cells are closed boxes and the rectangle really does
+# repeat? That is positive, content-independent proof of a grid, which is what
+# lets the content gates stand down (SEALED_DIVERGE_TOL) on a 4x4 of open sky
+# whose tiles are photographs of nothing. Both only ever look for a colour the
+# TRACER already proved is painted here, so neither can conjure a lattice out of a
+# flat image. Measured over the 1423 real grid captures: 15 misses -> 3, with
+# end-to-end false positives (find_grid + solver._is_real_grid) 23 -> 16.
 # =============================================================================
 
 
@@ -228,6 +243,68 @@ MAX_OFF_LATTICE_CLEAN = 1   # max stray CLEAN off-lattice lines forgiven on a pr
                        # strays are counted — a textured photo whose white-ish edges
                        # are clean produces several, so the off-lattice FP gate still
                        # fires; a real sky-bordered grid has at most one or two.
+# The colour comb (second detection cue — see _comb_lines):
+COMB_TOL = 3.0         # LAB ΔE: every pixel of a comb line must be this close to the
+                       # gutter colour. TIGHT on purpose, because this is the whole
+                       # discriminator: on the failing 4x4s the gutter is pure white
+                       # (L 100.0) against sky at L 95-97, so ~4 upward re-admits the
+                       # very neighbours the tracer already drowned in, while real
+                       # gutters read 0-1 along their entire length.
+COMB_COVER = 0.9       # frac of the central scan a comb line must match. Below 1.0
+                       # because a V gutter's scan band runs THROUGH the vendor's
+                       # header/footer chrome — the grid does not fill the widget
+                       # vertically — which costs a true gutter ~8% of its scan.
+                       # A non-gutter line scores ~0 at COMB_TOL, so the gate sits in
+                       # an empty gap rather than on a measured edge.
+COMB_GAP = 8           # px: gaps this small are closed before a comb line's extent is
+                       # measured. COMB_COVER already admits a line that misses a
+                       # tenth of the scan, so the extent must tolerate the same
+                       # misses: taking the strictly CONTIGUOUS run instead reported a
+                       # full-width 520px gutter as a 43px stub (JPEG ringing where
+                       # tile content meets the gutter) and killed it on the full-span
+                       # gate — a line the tracer had read correctly before.
+SEALED_DIVERGE_TOL = 2.0   # LAB ΔE: the cell-content bar for a lattice EVERY separator
+                       # of which is sealed (see _seal_fraction). A sealed lattice is
+                       # already proven structurally — a repeated rectangle closed on
+                       # all sides by one painted colour — so the content gate is no
+                       # longer carrying the proof and only has to rule out the flat
+                       # image it exists for. It is deliberately NOT zero: a blank
+                       # canvas seals every lattice you can draw on it and its cells
+                       # read EXACTLY 0.0, while a 4x4 of open sky reads 2.3-11.2
+                       # against a pure-white gutter. Sky is the whole point — those
+                       # tiles are real photographs of nothing, and at the standard
+                       # 12.0 they scored 1/16 and the grid was thrown away.
+SEALED_FLANK_MIN_DE = 6.0  # LAB ΔE: the flank bar under the same proof. It asks the
+                       # same question as GRID_FLANK_MIN_DE — do these separators
+                       # divide anything? — of a lattice that has already answered it
+                       # a stronger way, so it drops to a floor a uniform region still
+                       # cannot clear. Real 4x4s over unbroken SKY measure 6.x-7.1,
+                       # because both flanks of every gutter are the same sky; at 8.0
+                       # two of them stayed undetected.
+                       #
+                       # What this admits, and why it is still the right number:
+                       # geetest_v4_svg is line art, so its drawn strokes ARE sealed
+                       # lattices, and 86 of them start returning a grid here (0 at
+                       # 7.0+). They cost nothing. Measured end to end — find_grid
+                       # followed by solver._is_real_grid, which is the only path a
+                       # detection can reach a caller through — every one is rejected
+                       # as a sprite board, by 0.31 against a bar of 6.0. False
+                       # positives that actually REACH _solve_grid are 16 at 6.0, 7.0
+                       # and 8.0 alike, against 23 before this cue existed. The
+                       # threshold is therefore free on the FP side and only decides
+                       # how many real grids are found, so it is set where the real
+                       # grids are.
+GRID_SEAL_MIN = 0.85   # frac of a chosen separator's length, ACROSS THE CANDIDATE
+                       # GRID'S OWN EXTENT, that must be the gutter colour for the
+                       # cells it borders to count as sealed. See _seal_fraction.
+UNSEALED_PENALTY = 700.0  # score added per chosen separator that fails GRID_SEAL_MIN.
+                       # Set ABOVE UNUSED_LINE_PENALTY: leaving a real internal line
+                       # out costs 400, so without this a candidate that swallowed a
+                       # half-width sky belt to avoid that charge outscored the true
+                       # lattice. Sealing is the stronger evidence and must outrank it.
+COMB_MAX_THICK = MAX_THICKNESS  # px: a matching block wider than this is a BAND (a
+                       # white footer, a sky belt, a blank margin), not a separator.
+                       # Measured: real comb blocks are 2-12px, chrome bands 19-83.
 OFF_LATTICE_CLEAN_STD = 2.6   # in the off-lattice FP gate, a same-colour internal
                        # line this clean that lies OFF the chosen pitch is treated as
                        # a stray painted edge (sky horizon / UI rule), not proof the
@@ -296,7 +373,7 @@ def _cell_divergences(lab, boxes, gutter_color):
     return out
 
 
-def _cells_have_content(lab, boxes, rows, cols, gutter_lines):
+def _cells_have_content(lab, boxes, rows, cols, gutter_lines, sealed=False):
     """True if a MAJORITY of cells diverge from the gutter colour (real content,
     not a flat region). This is the FP killer. We do NOT require every row/column
     to have content: a legitimate grid can have an extrapolated OUTER row/column
@@ -318,7 +395,8 @@ def _cells_have_content(lab, boxes, rows, cols, gutter_lines):
     # and stay on the strict content fraction.
     gutter_std = float(np.mean([l.color_std for l in gutter_lines]))
     frac = CELL_DIVERGE_FRAC_CLEAN if gutter_std < CLEAN_GUTTER_STD else CELL_DIVERGE_FRAC
-    return sum(1 for d in divs if d > CELL_DIVERGE_TOL) >= frac * len(divs)
+    tol = SEALED_DIVERGE_TOL if sealed else CELL_DIVERGE_TOL
+    return sum(1 for d in divs if d > tol) >= frac * len(divs)
 
 
 #: Scale OKLab's native ranges (L 0..1, a/b ~±0.4) onto the CIELAB conventions the
@@ -1184,6 +1262,114 @@ def _pick(group):
     return best
 
 
+# ── Second cue: the full-span colour comb ────────────────────────────
+# The tracer is a LOCAL walk, so it loses a gutter whose NEIGHBOURS are nearly its
+# own colour: every near-colour row seeds a trace of its own, _merge_lines clusters
+# the whole neighbourhood together, and the 2px painted line is averaged away by the
+# hundreds of pixels either side of it. Measured on recaptcha_1775818840074_rrv7m (a
+# 4x4 over open sky): pure-white gutters at x=103/200/297 came back as 66/96/215, and
+# no lattice was recoverable from them. hCaptcha's white-background artwork tiles fail
+# the same way on the other axis.
+#
+# The comb is the complementary GLOBAL test — is this whole straight line the gutter
+# colour, end to end? — which a near-colour neighbour fails outright at COMB_TOL even
+# though the local walk cannot tell the two apart. It is the "grid-like section
+# repeated" cue: the lattice is found from the REPETITION of whole matching lines
+# rather than from any one of them being individually traceable.
+#
+# The safety property is that the comb only ever looks for a colour the TRACER ALREADY
+# PROVED is painted in this image — a clean, uniform line it walked itself — so it
+# cannot conjure a lattice out of an image with no painted line at all, and everything
+# it proposes still faces every existing structural, colour and content gate.
+def _comb_lines(lab, axis, color):
+    """Straight full-span lines every pixel of which is `color`: the gutters the
+    tracer's local walk lost. Axis-aligned by construction, so this cue does not
+    recover TILTED grids — the tracer still owns those."""
+    h, w = lab.shape[:2]
+    d = lab - color
+    m = (d * d).sum(axis=2) < COMB_TOL * COMB_TOL
+    if axis == 1:                   # H lines: spread over y, measured across x
+        lo, hi = int(w * (0.5 - MAX_SEED_FRAC)), int(w * (0.5 + MAX_SEED_FRAC))
+        cov = m[:, lo:hi].mean(axis=1)
+    else:                           # V lines: spread over x, measured across y
+        lo, hi = int(h * (0.5 - MAX_SEED_FRAC)), int(h * (0.5 + MAX_SEED_FRAC))
+        cov = m[lo:hi, :].mean(axis=0)
+    mid = (lo + hi) // 2
+    total = h if axis == 1 else w
+    out = []
+    for blk in _split_runs(np.where(cov >= COMB_COVER)[0]):
+        if len(blk) > COMB_MAX_THICK:
+            continue
+        pos = float(blk.mean())
+        # The page MARGIN is the gutter colour too, and it runs the whole image.
+        # _internal drops such a line from its own axis, but _corroborate reads the
+        # perpendicular lines unfiltered — so a margin left in here corroborates
+        # every line on the other axis, including the grid's own borders, and a 3x3
+        # is reported as a 4x3. Apply the same edge rule at the source.
+        if not (total * EDGE_MARGIN < pos < total * (1 - EDGE_MARGIN)):
+            continue
+        i = int(round(pos))
+        along = m[i] if axis == 1 else m[:, i]
+        # EXTENT is measured, not assumed: the run of gutter colour through the
+        # scan centre. The full-span gate downstream compares it against the grid
+        # width, which the scan band alone would always fail.
+        idx = np.where(along)[0]
+        grp = (np.split(idx, np.where(np.diff(idx) > COMB_GAP)[0] + 1)
+               if idx.size else [])
+        run = next((r for r in grp if r[0] <= mid <= r[-1]), None)
+        if run is None or len(run) < MIN_RUN:
+            continue
+        a, b = float(run[0]), float(run[-1])
+        cols = (lab[i, run] if axis == 1 else lab[run, i]).astype(np.float64)
+        out.append(PotentialGridLine(
+            orientation='h' if axis == 1 else 'v', angle=0.0,
+            thickness=float(len(blk)),
+            start=(a, pos) if axis == 1 else (pos, a),
+            end=(b, pos) if axis == 1 else (pos, b),
+            color_lab=cols.mean(axis=0),
+            color_std=float(np.mean(np.std(cols, axis=0))),
+            midline_pos=pos, support=int(len(run))))
+    return out
+
+
+def _comb_axis(lines, comb):
+    """One axis' lines with the comb's findings folded in.
+
+    Where the two overlap the comb wins on POSITION and only on position: it is the
+    exact measurement (THIS line is the gutter colour, the one 7px away is not),
+    whereas a trace is a cluster average that a near-colour neighbourhood drags off
+    the gutter — rrv7m's true x=103 came back as x=96, and averaging the two would
+    just split the difference. Everything else is kept from the longer TRACE, which
+    walked the gutter's real extent and tilt; a comb line's extent stops at the first
+    stretch of the line that is not quite the colour, so promoting it wholesale
+    reported a full-width 520px gutter as a 43px stub and failed it on the full-span
+    gate. The comb is only additive where it finds a line the tracer missed."""
+    out, used = [], set()
+    for c in comb:
+        near = [l for l in lines if abs(l.midline_pos - c.midline_pos) < MERGE_PX]
+        best = max(near, key=_line_extent, default=None)
+        if best is not None and _line_extent(best) > _line_extent(c):
+            best.midline_pos = c.midline_pos
+            c = best
+        used.update(id(l) for l in near)
+        out.append(c)
+    return sorted(out + [l for l in lines if id(l) not in used],
+                  key=lambda l: l.midline_pos)
+
+
+def _add_comb_lines(lab, h_lines, v_lines):
+    """Both axes' lines with the colour comb applied. The colour is the median of the
+    CLEAN traced lines of BOTH axes: a real grid's gutters are one colour, so either
+    axis can supply it — which is precisely what lets a starved axis be rescued by
+    the evidence the other one found."""
+    clean = [l for l in h_lines + v_lines if l.color_std < CLEAN_LATTICE_STD]
+    if not clean:
+        return h_lines, v_lines
+    color = np.median(np.array([l.color_lab for l in clean]), axis=0)
+    return (_comb_axis(h_lines, _comb_lines(lab, 1, color)),
+            _comb_axis(v_lines, _comb_lines(lab, 0, color)))
+
+
 # ── _generate_grid: cell boxes for a (rows x cols) grid of any size ──────────
 def _generate_grid(rows, cols, hs, vs, hd, vd, h, w, slant):
     """Cell bounding boxes for a `rows` x `cols` grid. `hs` are the `rows-1`
@@ -1346,6 +1532,39 @@ def _flank_contrast(lab, line, pitch):
     return float(np.median((d_lo + d_hi) / 2.0))
 
 
+def _seal_fraction(lab, color, orientation, pos, angle, lo, hi):
+    """Does this separator actually SEAL the cells it is supposed to divide?
+
+    A grid is one rectangle REPEATED, so every internal separator runs the whole way
+    across the grid — the cells either side are closed boxes. A line that is the
+    gutter colour for only part of that span is not sealing anything: it is a sky
+    belt, a roofline or a chrome edge that happens to be pale where it was traced.
+    That distinction is invisible to the per-line gates (which judge a line by the
+    stretch it WAS traced along) and it is what the candidate loop needs, because the
+    comb hands it real, clean, full-length white lines that are nonetheless not
+    gutters.
+
+    Measured across the CANDIDATE's extent (lo..hi on the perpendicular axis), not the
+    line's own or the image's: the same line seals a 3x3 and fails a 4x4 whose implied
+    grid reaches further, which is exactly the discrimination the dimension choice
+    needs."""
+    h, w = lab.shape[:2]
+    a = np.arange(max(0.0, lo), min(float(w if orientation == 'h' else h), hi), 2.0)
+    if a.size < 3:
+        return 0.0
+    t = np.tan(angle)
+    if orientation == 'h':
+        xs, ys = a, pos + t * (a - w / 2.0)
+    else:
+        ys, xs = a, pos + t * (a - h / 2.0)
+    jx = np.round(xs).astype(np.intp); jy = np.round(ys).astype(np.intp)
+    ok = (jx >= 0) & (jx < w) & (jy >= 0) & (jy < h)
+    if ok.sum() < 3:
+        return 0.0
+    d = lab[jy[ok], jx[ok]].astype(np.float64) - color
+    return float(((d * d).sum(axis=1) < COMB_TOL * COMB_TOL).mean())
+
+
 def _line_span_perp(line):
     """(lo, hi) extent of a line along its OWN run direction (H -> x span, V -> y
     span) — i.e. how far it reaches in the perpendicular axis' coordinate."""
@@ -1371,12 +1590,46 @@ def _corroborate(lines, perp_lines, total):
     perp = sorted(perp_lines, key=lambda l: l.midline_pos)
     if len(lines) < 2:
         return lines
-    # cell size estimate: median gap between consecutive candidate lines (this axis)
+    # Cell size estimate: median gap between consecutive candidate lines (this
+    # axis) — over the gaps that COULD be a cell. A gap under MIN_CELL is not a
+    # cell by this module's own definition, so letting one into the median can only
+    # understate the pitch, and the pitch is a BAR: it is how far the perpendicular
+    # lines must reach past a candidate before it counts as a real internal
+    # separator. Understate it and chrome clears it.
+    #
+    # The comb is what made that reachable. It reports vendor chrome BELOW a board
+    # — a button row, a brand mark — as clean full-span lines of the gutter colour,
+    # which the tracer never produced, and they arrive clustered a few px apart
+    # rather than at the cell pitch. On a 3x3 above a footer they took the median
+    # from the true 87 px pitch to 55.8, which is low enough that the grid's own
+    # BOTTOM BORDER became corroborated: the correct 3x3 was then charged
+    # UNUSED_LINE_PENALTY for declining to build a row out of its own border, the
+    # 4x3 that swallowed it scored 320 lower and won, and that lattice died outside
+    # the candidate loop on _boxes_are_regular with nothing to fall back to.
+    # Detection went 20/20 -> 5/20 on a generator whose boards are that shape.
+    #
+    # The GUARD below deliberately still reads the RAW median. Where strays drag it
+    # under MIN_CELL outright, the perpendicular pitch is the better estimate and is
+    # what should be used; filtering first lifts such an axis back over the line and
+    # silently skips that rescue, which costs a real 4x4 its fourth row
+    # (recaptcha_1776250807779_ttvu9 — raw median 34.5, filtered 80.9, perpendicular
+    # 97.0, and only the last of those is the cell). So the two estimates answer two
+    # different questions and both are kept.
     pos = [l.midline_pos for l in lines]
     gaps = np.diff(pos)
-    cell = float(np.median(gaps)) if len(gaps) else 0.0
-    if cell < MIN_CELL:
-        return lines
+    raw_cell = float(np.median(gaps)) if len(gaps) else 0.0
+    cell_gaps = [g for g in gaps if g >= MIN_CELL]
+    cell = float(np.median(cell_gaps)) if cell_gaps else 0.0
+    if raw_cell < MIN_CELL:
+        # This axis' own spacing is not a usable cell estimate — a few stray lines
+        # close together drag the median under one cell and corroboration was then
+        # SKIPPED ENTIRELY, which is how a grid's own border survived as an internal
+        # separator and a 3x3 came back as a 4x3. Cells are square, so fall back to
+        # what this docstring always claimed to use: the perpendicular lines' pitch.
+        pgaps = np.diff([l.midline_pos for l in perp])
+        cell = float(np.median(pgaps)) if len(pgaps) else 0.0
+        if cell < MIN_CELL:
+            return lines
     need = CORROB_FRAC * cell
     kept = []
     for l in lines:
@@ -1607,8 +1860,26 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
     # filter H using V and V using H, on the raw traced lines.
     h_keep = _corroborate(h_lines, v_lines, h)
     v_keep = _corroborate(v_lines, h_lines, w)
-    n_hkeep = len(_internal(h_keep, h))     # # corroborated internal lines per axis
-    n_vkeep = len(_internal(v_keep, w))     # — a candidate should USE all of them
+    h_keep_int = _internal(h_keep, h)       # corroborated internal lines per axis
+    v_keep_int = _internal(v_keep, w)       # — a candidate should USE all of them
+    # One reference colour for every seal test, so the answers can be cached across
+    # candidates: it is the PAINTED colour the tracer proved is in this image, the
+    # same one the comb went looking for, not a per-candidate mean.
+    clean = [l for l in h_lines + v_lines if l.color_std < CLEAN_LATTICE_STD]
+    seal_col = np.median(np.array([l.color_lab for l in clean]), axis=0) if clean else None
+    seal_cache = {}
+
+    def sealed(orientation, pos, angle, lo, hi):
+        """Is this separator the gutter colour the whole way across the candidate's
+        grid? Asked of INVENTED lattice positions as well as traced ones — a node the
+        image seals is not an invention, it is a gutter the tracer happened to miss."""
+        if lab is None or seal_col is None:
+            return True
+        k = (orientation, round(pos), round(angle, 3), int(lo), int(hi))
+        if k not in seal_cache:
+            seal_cache[k] = (_seal_fraction(lab, seal_col, orientation, pos, angle,
+                                            lo, hi) >= GRID_SEAL_MIN)
+        return seal_cache[k]
     h_cand = _axis_candidates(h_keep, h)
     v_cand = _axis_candidates(v_keep, w)
     best = None
@@ -1671,7 +1942,6 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                     # and an unclamped count turns negative there — paying a BONUS
                     # for inventing rows, which is how a half-pitch 5x4 once outscored
                     # a 4x4 built from the same two real gutters.
-                    unused = max(0, n_hkeep - (rows - 1)) + max(0, n_vkeep - (cols - 1))
                     # Grid-span fit: the perpendicular gutters run the WHOLE grid and
                     # stop at its outer borders. The grid's extrapolated borders are
                     # one pitch beyond the outer internal lines: H rows occupy
@@ -1719,20 +1989,74 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                         + _missing(max(0.0, vy_hi - row_bot), hd, v_bot_edge and not v_top_edge)
                         + _missing(max(0.0, col_lft - hx_lo), vd, h_lft_edge and not h_rgt_edge)
                         + _missing(max(0.0, hx_hi - col_rgt), vd, h_rgt_edge and not h_lft_edge))
+                    # Does the repeated rectangle actually close? Every chosen
+                    # separator must be the gutter colour the whole way across the
+                    # grid this candidate implies.
+                    def _seal(orientation, pos, angle):
+                        return sealed(orientation, pos, angle,
+                                      *((col_lft, col_rgt) if orientation == 'h'
+                                        else (row_top, row_bot)))
+                    unsealed = sum(1 for l in alll
+                                   if not _seal(l.orientation, l.midline_pos, l.angle))
+                    # Refund the invention charge for every node the IMAGE confirms.
+                    # A completed lattice pays VIRTUAL_NODE_PENALTY per interpolated
+                    # line because a guessed line is unsupported — but a guess the
+                    # gutter colour runs straight through is not a guess, it is the
+                    # gutter the tracer lost. Without the refund the true 4x4 on every
+                    # sky-backed reCAPTCHA lost by ~470 to a 3-row lattice built on a
+                    # pale belt: the correct answer was being charged 600 for the one
+                    # thing that made it correct.
+                    # Only INTERIOR nodes — ones bracketed by a real gutter on both
+                    # sides — can be refunded. An interpolated line sits in a span the
+                    # tracer has already proved is grid, so sealing it confirms a
+                    # gutter that was missed. An EXTRAPOLATED one grows the lattice
+                    # into unproven ground, and on a white-backgrounded hCaptcha board
+                    # the margin beyond the last gutter is the gutter colour too, so it
+                    # seals trivially: refunding it turned a correct 3x3 into a 3x4
+                    # whose extra column boundary ran down the middle of a tile.
+                    def _confirm(pos, lns, orientation, angle):
+                        if len(lns) < 2:
+                            return 0
+                        lo = min(l.midline_pos for l in lns)
+                        hi = max(l.midline_pos for l in lns)
+                        return sum(1 for p in pos
+                                   if lo < p < hi
+                                   and all(abs(p - l.midline_pos) >= 1.0 for l in lns)
+                                   and _seal(orientation, p, angle))
+                    confirmed = (_confirm(hpos, hlns, 'h', h_ang)
+                                 + _confirm(vpos, vlns, 'v', v_ang))
+                    # Prefer the candidate that USES every real internal separator, so
+                    # a 4x4's [r1,r2,r3] is not silently dropped to a 3-row [r2,r3].
+                    # Only SEALED lines are counted: the comb hands this loop clean,
+                    # full-length lines of the gutter colour that are nonetheless not
+                    # cell boundaries (a white sky belt, a chrome rule), and charging
+                    # a candidate 400 for declining to build a grid out of one is how
+                    # the true 4x4 lost on every sky-backed reCAPTCHA. A line that
+                    # seals nothing is not a separator, so leaving it out is free.
+                    chosen = {id(l) for l in alll}
+                    unused = (sum(1 for l in h_keep_int if id(l) not in chosen
+                                  and _seal('h', l.midline_pos, l.angle))
+                              + sum(1 for l in v_keep_int if id(l) not in chosen
+                                    and _seal('v', l.midline_pos, l.angle)))
                     score = (hsc + vsc + s_diff * 1000 + abs(slant) * 500
-                             + unused * UNUSED_LINE_PENALTY + ang_inc + span_pen)
+                             + unused * UNUSED_LINE_PENALTY + ang_inc + span_pen
+                             + unsealed * UNSEALED_PENALTY
+                             - confirmed * VIRTUAL_NODE_PENALTY)
                     if score < best_score:
                         boxes = _generate_grid(rows, cols, hpos, vpos, hd, vd, h, w, slant)
                         # Cell-content gate IN the loop so a rejected (over-counted)
                         # candidate lets a smaller valid one win, instead of killing
                         # detection outright.
-                        if boxes and _cells_have_content(lab, boxes, rows, cols, hlns + vlns):
+                        if boxes and _cells_have_content(lab, boxes, rows, cols,
+                                                         hlns + vlns, unsealed == 0):
                             best_score = score
                             best = (boxes, rows, cols, slant, avg,
-                                    sorted(hpos), hd, sorted(vpos), vd, hlns + vlns)
+                                    sorted(hpos), hd, sorted(vpos), vd, hlns + vlns,
+                                    unsealed == 0)
     if best is None:
         return None, None, None
-    boxes, rows, cols, slant, gutter_color, hpos, hd, vpos, vd, chosen_lns = best
+    (boxes, rows, cols, slant, gutter_color, hpos, hd, vpos, vd, chosen_lns,
+     fully_sealed) = best
     # Is the CHOSEN grid built from clean painted gutters? If so the lattice is
     # already proven a real grid (a textured-photo FP has noisy pseudo-gutters,
     # std well above the threshold). For such a proven grid we do NOT count a few
@@ -1755,7 +2079,7 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
     # the first internal line or BELOW the last — those are frame/chrome, not
     # evidence the central cells are irregular, and must not count. The central
     # closed region is the only reliable signal (per design).
-    def _off_lattice(lines, total, anchors, pitch):
+    def _off_lattice(lines, total, anchors, pitch, orientation, ext):
         off_pos = []
         clean_skipped = 0
         lo, hi = anchors[0], anchors[-1]
@@ -1764,6 +2088,14 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                 continue                      # outside the central span — frame/chrome
             if _de(l.color_lab, gutter_color) > GRID_COLOR_TOL:
                 continue                      # different colour — not a gutter
+            if not sealed(orientation, l.midline_pos, l.angle, *ext):
+                # Gutter-coloured for only PART of the grid's width, so it divides
+                # nothing: a pale belt across a sky, a roofline, a chrome rule. This
+                # gate exists to catch cell boundaries that break the pitch, and a
+                # line that is not a boundary anywhere is not evidence of that. Three
+                # such belts on one sky-backed 4x4 were enough to reject the correct
+                # lattice on a gate that allows one stray.
+                continue
             # distance to the nearest lattice node (anchor + k*pitch)
             off = min(abs((l.midline_pos - anchors[0]) - round((l.midline_pos - anchors[0]) / pitch) * pitch),
                       abs((l.midline_pos - anchors[-1]) - round((l.midline_pos - anchors[-1]) / pitch) * pitch))
@@ -1788,8 +2120,10 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
         off_pos.sort()
         return sum(1 for i, p in enumerate(off_pos)
                    if i == 0 or p - off_pos[i - 1] > OFF_LATTICE_CLUSTER_PX)
-    if (_off_lattice(h_lines, h, hpos, hd) > MAX_OFF_LATTICE
-            or _off_lattice(v_lines, w, vpos, vd) > MAX_OFF_LATTICE):
+    rows_ext = (hpos[0] - hd, hpos[-1] + hd)
+    cols_ext = (vpos[0] - vd, vpos[-1] + vd)
+    if (_off_lattice(h_lines, h, hpos, hd, 'h', cols_ext) > MAX_OFF_LATTICE
+            or _off_lattice(v_lines, w, vpos, vd, 'v', rows_ext) > MAX_OFF_LATTICE):
         return None, None, None
     if not _boxes_are_regular(boxes, rows, cols):
         return None, None, None
@@ -1797,7 +2131,8 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
     # An H separator's flanks lie a row pitch away, a V separator's a column pitch away.
     if lab is not None:
         if float(np.median([_flank_contrast(lab, l, hd if l.orientation == 'h' else vd)
-                            for l in chosen_lns])) < GRID_FLANK_MIN_DE:
+                            for l in chosen_lns])) < (SEALED_FLANK_MIN_DE if fully_sealed
+                                                      else GRID_FLANK_MIN_DE):
             return None, None, None
     x0 = min(b[0] for b in boxes); x1 = max(b[2] for b in boxes)
     y0 = min(b[1] for b in boxes); y1 = max(b[3] for b in boxes)
@@ -1814,10 +2149,12 @@ def _detect_grid(image_path, seed_bias=0.0):
     lab = _to_lab(img)
     tols = walk_tolerances(image_noise(lab))   # once per image, not per axis
     h_lines = _trace_lines(lab, axis=1, seed_bias=seed_bias, tols=tols)
-    if len(_internal(h_lines, h)) < 2:
-        return None
     v_lines = _trace_lines(lab, axis=0, seed_bias=-seed_bias, tols=tols)
-    if len(_internal(v_lines, w)) < 2:
+    # Both axes are traced before either is judged: the comb takes its colour from
+    # whichever axis found a clean painted line, so an axis with too few traces of
+    # its own is exactly the case the other axis' evidence is there to rescue.
+    h_lines, v_lines = _add_comb_lines(lab, h_lines, v_lines)
+    if len(_internal(h_lines, h)) < 2 or len(_internal(v_lines, w)) < 2:
         return None
     boxes, dims, slant = extract_grid_from_lines(h_lines, v_lines, h, w, lab=lab)
     return boxes

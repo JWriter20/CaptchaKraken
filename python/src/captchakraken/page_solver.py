@@ -477,6 +477,18 @@ VENDOR_WIDGET_LOCATORS = [
 #
 # Hosts measured 2026-08-24 by loading each vendor's demo page and recording
 # every third-party request (see scripts/check_vendor_selectors.py --hosts).
+#: The two vendors with bespoke handling in this file. EVERYTHING else shares the
+#: generic path, and the two behaviours below are gated on "not one of these" —
+#: spelled as this set rather than as `== "unknown"`, which is what they used to
+#: say. The two were identical only while `unknown` was the sole third value, so
+#: the day anyone reports a vendor by name — to constrain which grid shapes it may
+#: be solved as, say — `== "unknown"` silently turns OFF typed-challenge detection
+#: for MTCaptcha, Yandex and BotDetect (all three ARE typed captchas) and the
+#: animated settle probe for GeeTest and Tencent. Neither failure raises; the text
+#: captcha just becomes unsolvable and the animated board gets answered from one
+#: arbitrary frame.
+VENDORS_WITH_BESPOKE_HANDLING = frozenset({"hcaptcha", "recaptcha"})
+
 VENDOR_URL_MARKERS = [
     {"puzzle_source": "hcaptcha", "hosts": ["hcaptcha.com"]},
     {"puzzle_source": "recaptcha", "hosts": ["google.com/recaptcha", "recaptcha.net"]},
@@ -2470,9 +2482,10 @@ class PageSolver:
         # and want opposite answers. Restricted to `unknown` because neither
         # hCaptcha nor reCAPTCHA has ever served a typed challenge, so a match
         # inside one of their frames would be a false positive by definition.
-        text_mode = puzzle_source == "unknown" and self._answer_box(
-            scope, element
-        ) is not None
+        text_mode = (
+            puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING
+            and self._answer_box(scope, element) is not None
+        )
         if text_mode:
             _log("widget has a text box; solving as a distorted-text captcha")
 
@@ -2498,7 +2511,7 @@ class PageSolver:
             if self.is_captcha_solved(page):
                 _log("solved while waiting for the next round; skipping inference.")
                 return False, []
-        elif puzzle_source == "unknown":
+        elif puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING:
             # Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle
             # probe was never run for these, so an animated one — GeeTest's svg board
             # cycles its glyph set — was screenshotted mid-cycle and answered from

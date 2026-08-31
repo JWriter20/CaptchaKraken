@@ -196,6 +196,20 @@ const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: s
  *
  * Hosts measured 2026-08-24 from each vendor's demo page.
  */
+/**
+ * The two vendors with bespoke handling in this file. EVERYTHING else shares the
+ * generic path, and the two behaviours below are gated on "not one of these" —
+ * spelled as this set rather than as `=== 'unknown'`, which is what they used to
+ * say. The two were identical only while `unknown` was the sole third value, so
+ * the day anyone reports a vendor by name — to constrain which grid shapes it may
+ * be solved as, say — `=== 'unknown'` silently turns OFF typed-challenge detection
+ * for MTCaptcha, Yandex and BotDetect (all three ARE typed captchas) and the
+ * animated settle probe for GeeTest and Tencent. Neither failure throws; the text
+ * captcha just becomes unsolvable and the animated board gets answered from one
+ * arbitrary frame. Mirrors VENDORS_WITH_BESPOKE_HANDLING in page_solver.py.
+ */
+const VENDORS_WITH_BESPOKE_HANDLING: ReadonlySet<string> = new Set(['hcaptcha', 'recaptcha']);
+
 const VENDOR_URL_MARKERS: ReadonlyArray<{ puzzleSource: string; hosts: string[] }> = [
   { puzzleSource: 'hcaptcha', hosts: ['hcaptcha.com'] },
   { puzzleSource: 'recaptcha', hosts: ['google.com/recaptcha', 'recaptcha.net'] },
@@ -903,9 +917,13 @@ export class CaptchaKrakenSolver {
   }
 
   private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: string | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
-    // Vendor hint helps the CLI route to the right pipeline (hCaptcha click
-    // puzzles must never go through grid detection — find_grid false-positives
-    // on the header+footer bands).
+    // Vendor hint constrains which grid SHAPES the CLI may solve a detection as.
+    // find_grid false-positives on the header+footer bands of hCaptcha's click
+    // puzzles, and hCaptcha ships only a 3x3 — so a 16-cell lattice on one is a
+    // contradiction and is dropped back to the click path. It is not a blanket
+    // skip: hcaptcha_grid_3x3_property is a real grid and still solves as one.
+    // Anything that is not hCaptcha or reCAPTCHA reports 'unknown' and is
+    // allowed every shape (GeeTest and Prosopo both ship real 3x3 grids).
     const src = await captchaElement.getAttribute('src').catch(() => null);
     const puzzleSource = src && src.includes('hcaptcha.com')
       ? 'hcaptcha'
@@ -940,7 +958,7 @@ export class CaptchaKrakenSolver {
     // opposite answers. Restricted to `unknown` because neither hCaptcha nor
     // reCAPTCHA has ever served a typed challenge, so a match inside one of
     // their frames would be a false positive by definition.
-    const textMode = puzzleSource === 'unknown'
+    const textMode = !VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource)
       && (await this.answerBox(scope, captchaElement)) !== null;
     if (textMode) {
       console.log('Widget has a text box; solving as a distorted-text captcha.');
@@ -991,7 +1009,8 @@ export class CaptchaKrakenSolver {
         return { didInteract: false, tokenUsage: [] };
       }
       this.setState(CaptchaState.Ready);
-    } else if (puzzleSource === 'unknown' && this.config.videoSolveEnabled !== false) {
+    } else if (!VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource)
+               && this.config.videoSolveEnabled !== false) {
       // Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle probe
       // was never run for these, so an animated one — GeeTest's svg board cycles its
       // glyph set — was screenshotted mid-cycle and answered from whatever single
