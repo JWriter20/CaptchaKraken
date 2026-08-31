@@ -24,7 +24,6 @@ v1 had a SAM3-backed tool-using planner with detect/segment/drag-refine; it
 lives on the `v1-old-architecture` branch.
 """
 
-import math
 import os
 import shutil
 import sys
@@ -112,6 +111,47 @@ class DebugManager:
             return None
 
 
+#: The only cell counts a registered grid puzzle has. `find_grid` is a lattice
+#: detector, not a catalogue — it allows rectangles and any dimension from
+#: MIN_GRID_DIM up — so it will happily report 12 or 20 cells on a click puzzle's
+#: header/footer bands. Anything not in here is a false positive by construction,
+#: and it is also a board the model has never seen: the training pipeline's own
+#: `grid_overlay.detect_cells` refuses every count but these two.
+GRID_CELL_SHAPES = {9: (3, 3), 16: (4, 4)}
+
+#: Cell counts each vendor actually ships, for the vendors the driver can name.
+#: Only reCAPTCHA has a 4x4; hCaptcha's single grid puzzle is 3x3, so 16 cells on
+#: an hCaptcha board is a contradiction rather than a close call. Measured on real
+#: captures, that one line removes four of the five non-grid boards that clear
+#: both find_grid and _is_real_grid today.
+#:
+#: A vendor NOT in this table — `unknown`, or anything new — gets every shape.
+#: `unknown` is what the driver reports for GeeTest and Prosopo, both of which
+#: ship real 3x3 grids, and it is what the one-shot image API defaults to, which
+#: is the path the offline grader uses to score reCAPTCHA 4x4. Narrowing it would
+#: stop scoring a whole puzzle type while looking like a tightening.
+VENDOR_GRID_CELLS = {
+    "hcaptcha": frozenset({9}),
+    "recaptcha": frozenset({9, 16}),
+}
+
+
+def _grid_dims(n_cells, puzzle_source="unknown"):
+    """(rows, cols) if this detection could be a grid we ship, else None.
+
+    None means "do not solve this as a grid" — the caller falls through to the
+    click/drag path, which is what the board actually is. It is deliberately not
+    an exception: a false positive here is an ordinary event, not an error.
+    """
+    shape = GRID_CELL_SHAPES.get(n_cells)
+    if shape is None:
+        return None
+    allowed = VENDOR_GRID_CELLS.get(puzzle_source)
+    if allowed is not None and n_cells not in allowed:
+        return None
+    return shape
+
+
 class CaptchaSolver:
     """v2 solver: OpenCV grid detection + vLLM `captcha` LoRA."""
 
@@ -183,9 +223,22 @@ class CaptchaSolver:
 
         with timed("solver.find_grid"):
             grid_boxes = find_grid(cv_image_path)
-        if grid_boxes and self._is_real_grid(cv_image_path, grid_boxes):
+        # The SHAPE gate runs before the content gate: a lattice no vendor ships
+        # is not a grid whatever its cells look like, and saying so here keeps
+        # `_solve_grid` from ever being handed dimensions it would have to invent.
+        dims = _grid_dims(len(grid_boxes), puzzle_source) if grid_boxes else None
+        if grid_boxes and dims and self._is_real_grid(cv_image_path, grid_boxes):
             self.debug.log(f"Detected grid with {len(grid_boxes)} cells")
-            return self._solve_grid(cv_image_path, grid_boxes, retry_mode=retry_mode)
+            return self._solve_grid(cv_image_path, grid_boxes, dims[0], dims[1],
+                                    retry_mode=retry_mode)
+        elif grid_boxes and not dims:
+            # e.g. a 16-cell lattice on an hCaptcha board (it ships no 4x4), or a
+            # 12-cell one on anything. Fall through to the click path, which is
+            # what this puzzle is.
+            self.debug.log(
+                f"find_grid returned {len(grid_boxes)} cells, which is not a shape "
+                f"{puzzle_source} ships — not solving as a grid."
+            )
         elif grid_boxes:
             # find_grid latched onto e.g. an hCaptcha click-puzzle's
             # header/footer bands. Reject — only true grids are supported.
@@ -508,17 +561,18 @@ class CaptchaSolver:
         self,
         image_path: str,
         grid_boxes: List[Tuple[int, int, int, int]],
+        rows: int,
+        cols: int,
         retry_mode: Optional[str] = None,
     ) -> Union[ClickAction, DoneAction, WaitAction]:
-        n = len(grid_boxes)
-        if n == 9:
-            rows, cols = 3, 3
-        elif n == 16:
-            rows, cols = 4, 4
-        else:
-            cols = int(math.sqrt(n))
-            rows = math.ceil(n / cols)
-        self.debug.log(f"grid {rows}x{cols} ({n} cells)")
+        # The shape is PASSED IN, already cleared by `_grid_dims`. It used to be
+        # derived here, and the derivation had an `else` branch that turned any
+        # unrecognised count into `cols = int(sqrt(n)); rows = ceil(n / cols)` —
+        # so a 12-cell false positive became a 4x3 board, got stamped with twelve
+        # numbers, and was answered with cell ids. No such board can exist in the
+        # training corpus, because the generator's own detector refuses every
+        # count but 9 and 16.
+        self.debug.log(f"grid {rows}x{cols} ({len(grid_boxes)} cells)")
 
         cv_selected: List[int] = []
         cv_loading: List[int] = []

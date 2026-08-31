@@ -252,6 +252,47 @@ def test_geetest_v4_nine_bordered_panel_is_3x3(name):
     assert (y1 - y0) >= 0.6 * h, f"grid spans only {y1 - y0}px of {h}px height"
 
 
+# Regression: real captures the consistent-colour tracer alone could not read,
+# recovered by the colour comb + seal cue. Two shapes, both "the gutter is there and
+# the walk cannot follow it":
+#   * reCAPTCHA 4x4s over open SKY — the gutters are pure white (L 100.0) against sky
+#     at L 95-97, so every near-white column seeds a trace of its own and the cluster
+#     average lands off the separator (rrv7m's x=103/200/297 read back as 66/96/215);
+#   * hCaptcha 3x3s of white-background ARTWORK — the gutter and the tile background
+#     are the same white, so along the horizontal axis there is no local boundary at
+#     all and only the lattice's repetition gives it away.
+# These were 12 of the 15 misses across the whole 1423-image grid corpus.
+_LOW_CONTRAST_REGRESSIONS = [
+    ("recaptcha_grid_4x4/recaptcha_1775818840074_rrv7m.png", 16),
+    ("recaptcha_grid_4x4/recaptcha_1776682819458_5rr89.png", 16),
+    ("recaptcha_grid_4x4/recaptcha_1780052442679_wdcnb.png", 16),
+    ("recaptcha_grid_4x4/recaptcha_1776250807779_ttvu9.png", 16),
+    ("recaptcha_grid_3x3/fade_out/recaptcha_1774782032623_h023s__fade.png", 9),
+    ("hcaptcha_grid_3x3_property/reference_image/hcaptcha_images_cow4.png", 9),
+    ("hcaptcha_grid_3x3_property/reference_image/hcaptcha_images_cow12.png", 9),
+    ("hcaptcha_grid_3x3_property/reference_image/hcaptcha_1774782019474_clz0d.png", 9),
+    ("hcaptcha_grid_3x3_property/standard_text_prompt/hcaptcha_images_fruit4.png", 9),
+    ("hcaptcha_grid_3x3_property/standard_text_prompt/hcaptcha_images_icy_drink3.png", 9),
+    ("hcaptcha_grid_3x3_property/standard_text_prompt/hcaptcha_1786104013550_omnx9.png", 9),
+    ("hcaptcha_grid_3x3_property/standard_text_prompt/hcaptcha_1787659293920_ymfa0.png", 9),
+]
+
+
+@pytest.mark.parametrize("rel,expected", _LOW_CONTRAST_REGRESSIONS)
+def test_low_contrast_gutters_are_detected(rel, expected):
+    """These real captures must produce their full grid, via the default sweep."""
+    path = os.path.join(DATA_DIR, *rel.split("/"))
+    if not os.path.isfile(path):
+        pytest.skip(f"corpus sample not found: {path}")
+
+    boxes = find_grid(path)
+    assert boxes is not None and len(boxes) == expected, (
+        f"expected {expected} cells for {rel}, got "
+        f"{len(boxes) if boxes else 0} — the comb/seal cue has regressed"
+    )
+    assert _boxes_well_formed(boxes)
+
+
 if __name__ == "__main__":
     # Allow running directly: python tests/test_find_grid_corpus.py
     test_find_grid_corpus_report()

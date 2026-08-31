@@ -867,8 +867,11 @@ def main():
         "--puzzle-source",
         default="unknown",
         choices=["hcaptcha", "recaptcha", "unknown"],
-        help="Vendor hint from the Playwright wrapper. hCaptcha skips grid detection "
-        "(find_grid false-positives on the header/footer bands of click puzzles).",
+        help="Vendor hint from the Playwright wrapper. Constrains which grid "
+        "shapes a detection may be solved as: hCaptcha ships only a 3x3, so a "
+        "16-cell lattice on one is a false positive (find_grid latches onto the "
+        "header/footer bands of click puzzles). An unrecognised or absent hint "
+        "allows every shape, which is what GeeTest and Prosopo boards report.",
     )
     parser.add_argument(
         "--retry-mode",
