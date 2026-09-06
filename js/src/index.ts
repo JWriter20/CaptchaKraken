@@ -109,3 +109,57 @@ export type { Page, PlaywrightPage, PlaywrightFrame, PlaywrightElementHandle } f
  */
 export { watchPage } from './watcher';
 export type { CaptchaWatcher, WatchOptions, WatchableSolver } from './watcher';
+
+/**
+ * Humanisation: how the driver moves. `humanization: 'mouse' | 'mobile' |
+ * 'none'` picks a built-in; `humanizer` takes one of your own.
+ *
+ * `MobileHumanizer` emits real touch events with finger kinematics, through a
+ * `TouchBackend` — CDP against a Chromium-family page, or W3C pointer actions
+ * against an Appium / WebdriverIO driver on a real handset.
+ *
+ * @example Mobile emulation in the browser
+ * ```typescript
+ * import { chromium, devices } from 'playwright';
+ * import { CaptchaKrakenSolver } from 'captchakraken';
+ *
+ * const browser = await chromium.launch();
+ * const context = await browser.newContext({ ...devices['Pixel 7'], hasTouch: true });
+ * const page = await context.newPage();
+ * await page.goto('https://example.com/signup');
+ *
+ * await new CaptchaKrakenSolver({ humanization: 'mobile' }).solve(page);
+ * ```
+ *
+ * @example A real device over Appium
+ * ```typescript
+ * const solver = new CaptchaKrakenSolver({
+ *   humanization: 'mobile',
+ *   touchDriver: driver,                                  // the WebdriverIO browser
+ *   touchTransform: { scale: 3, origin: [0, 132] },       // CSS px -> screen px
+ * });
+ * await solver.solve(page);
+ * ```
+ */
+export {
+  MouseHumanizer,
+  MobileHumanizer,
+  NullHumanizer,
+  BaseHumanizer,
+  resolveHumanizer,
+  touchBackendFor,
+  CdpTouchBackend,
+  AppiumTouchBackend,
+  TouchscreenTouchBackend,
+  PAUSE_KINDS,
+  MODES as HUMANIZATION_MODES,
+} from './humanize';
+export type {
+  Humanizer,
+  HumanizationMode,
+  HumanizerOptions,
+  TouchBackend,
+  TouchSample,
+  TouchTransform,
+  PauseKind,
+} from './humanize';

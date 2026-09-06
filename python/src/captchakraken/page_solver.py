@@ -53,7 +53,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from .action_types import CaptchaAction
 from .solver import CaptchaSolver, UnsupportedCaptchaError
 from .timing import PhaseBudget, timings_enabled
-from .trajectory import generate_trajectory
+from .humanize import Humanizer, resolve as resolve_humanizer
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
@@ -163,6 +163,14 @@ class SolveResult:
     is_solved: bool
     final_mouse_position: Tuple[float, float]
     token_usage: List[Dict[str, Any]] = field(default_factory=list)
+    #: Where this solve's wall-clock went, in milliseconds per phase — the same
+    #: partition `CAPTCHA_TIMINGS=1` prints, handed to the caller instead of to
+    #: stderr. `{}` when the result was built outside a solve.
+    #:
+    #: Returned rather than only logged because "the solve took 12s" is not
+    #: actionable and "the settle monitor spent 4s of it" is, and a caller
+    #: measuring a fleet cannot scrape stderr from inside its own process.
+    phases: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -208,6 +216,48 @@ class PageSolverConfig:
     Tunables, named to match the TS `CaptchaKrakenConfig` keys (snake_cased) so a
     value tuned on one driver can be found on the other.
     """
+
+    # ── how the driver moves ───────────────────────────────────────────────
+    #: "mouse" (default), "mobile" or "none". See `humanize.py`.
+    #:
+    #: Not a realism dial — a choice of INPUT DEVICE. "mobile" dispatches touch
+    #: events with finger kinematics, and on a touch-only widget that is the
+    #: difference between the page's handlers firing and not. "none" is the
+    #: shortest legal path to the same DOM effect, for fixtures and for callers
+    #: who humanise somewhere else in their stack.
+    #:
+    #: None means unset: `CAPTCHA_HUMANIZATION`, else "mouse".
+    humanization: Optional[str] = None
+    #: Your own `humanize.Humanizer`. Overrides `humanization` entirely — the
+    #: driver then makes no decisions about pointer motion at all.
+    humanizer: Optional[Humanizer] = None
+    #: mobile only. The thing that is actually TOUCHED, when it is not the page
+    #: object — an Appium/Selenium WebDriver on a real handset. Left None, the
+    #: mode dispatches CDP touch events at the page it was given.
+    touch_driver: Optional[Any] = None
+    #: mobile only. CSS-pixel -> device-pixel transform for `touch_driver`,
+    #: e.g. `{"scale": 3.0, "origin": (0, 132)}`. See AppiumTouchBackend; the
+    #: default identity is right for browser emulation.
+    touch_transform: Optional[Dict[str, Any]] = None
+    #: Where the pointer starts. Setting it stops the first gesture of a solve
+    #: crossing the whole window from the origin.
+    starting_mouse_position: Optional[Tuple[float, float]] = None
+
+    # ── which model answers ────────────────────────────────────────────────
+    #: Force ONE expert of a routed model — "pixel", "grid", "video" or "text".
+    #:
+    #: A routed model (Abyss) is four adapters behind one endpoint, and the
+    #: router is the prompt family the request is about to send, so the default
+    #: (None) already reaches the right one with no help from the caller. This
+    #: is the override: serve one arm, drive only the puzzles it owns, which is
+    #: what a per-arm benchmark needs and what a licence holder pinning a single
+    #: expert wants.
+    #:
+    #: Refused at construction against a model that serves one adapter — every
+    #: model published so far — because a run that quietly measured the
+    #: generalist and reported it as the expert is a number nobody can catch.
+    #: None means unset: `CAPTCHA_EXPERT`, else route by family.
+    expert: Optional[str] = None
 
     # 45s, and the loop count that fits inside it rather than one that needs
     # policing by the clock. A round costs ~4-7s once the waits below are paid,
@@ -443,6 +493,18 @@ VENDOR_WIDGET_LOCATORS = [
 #
 # Hosts measured 2026-08-24 by loading each vendor's demo page and recording
 # every third-party request (see scripts/check_vendor_selectors.py --hosts).
+#: The two vendors with bespoke handling in this file. EVERYTHING else shares the
+#: generic path, and the two behaviours below are gated on "not one of these" —
+#: spelled as this set rather than as `== "unknown"`, which is what they used to
+#: say. The two were identical only while `unknown` was the sole third value, so
+#: the day anyone reports a vendor by name — to constrain which grid shapes it may
+#: be solved as, say — `== "unknown"` silently turns OFF typed-challenge detection
+#: for MTCaptcha, Yandex and BotDetect (all three ARE typed captchas) and the
+#: animated settle probe for GeeTest and Tencent. Neither failure raises; the text
+#: captcha just becomes unsolvable and the animated board gets answered from one
+#: arbitrary frame.
+VENDORS_WITH_BESPOKE_HANDLING = frozenset({"hcaptcha", "recaptcha"})
+
 VENDOR_URL_MARKERS = [
     {"puzzle_source": "hcaptcha", "hosts": ["hcaptcha.com"]},
     {"puzzle_source": "recaptcha", "hosts": ["google.com/recaptcha", "recaptcha.net"]},
@@ -587,17 +649,24 @@ class PageSolver:
         self.config = config or PageSolverConfig()
         # One CaptchaSolver for the whole driver: it owns the planner, which
         # accumulates token usage and holds the HTTP session to vLLM.
+        #
+        # `expert` reaches the solver from the config, so the knob is in the
+        # same object as every other tunable and matches the TS port's
+        # `CaptchaKrakenConfig.expert`. An explicit kwarg still wins — a caller
+        # who built the argument list themselves has said the more specific
+        # thing — and a caller who passed their OWN solver has already made
+        # this decision inside it.
+        if self.config.expert is not None:
+            solver_kwargs.setdefault("expert", self.config.expert)
         self._solver = solver or CaptchaSolver(**solver_kwargs)
-        self._last_mouse: Tuple[float, float] = (0.0, 0.0)
-        # See _seed_cursor: the (0, 0) origin wedges camoufox's humanised
-        # mouse, so the first move of each solve must step off it plainly.
-        self._cursor_seeded = False
+        #: Every gesture goes through here, and it owns the pointer position.
+        #: See humanize.py — the driver names gestures, this decides what
+        #: events they are and how long they take.
+        self._human: Humanizer = resolve_humanizer(self.config)
         self._last_submit_frame_hash: Optional[str] = None
         # Absolute deadline for the current solve, in the same clock as
         # time.monotonic() * 1000. None outside a solve.
         self._deadline_ms: Optional[float] = None
-        # Window size for clamping, resolved once per solve. See _viewport.
-        self._viewport_cache: Optional[Dict[str, float]] = None
         # Animation detection, all reset per solve by `_reset_animated_state`.
         # `_known_animated` latches: once a widget has been SEEN to animate,
         # every later round takes the keyframe path without re-probing.
@@ -613,6 +682,16 @@ class PageSolver:
         self._no_progress_rounds = 0
         # Per-solve phase accounting; see `_phase`.
         self._budget: Optional[PhaseBudget] = None
+
+    @property
+    def _last_mouse(self) -> Tuple[float, float]:
+        """Where the pointer is. Owned by the humanizer, because a mode that
+        dispatches no motion (mobile, between taps) still has to answer this."""
+        return self._human.at
+
+    @_last_mouse.setter
+    def _last_mouse(self, at: Tuple[float, float]) -> None:
+        self._human.at = (float(at[0]), float(at[1]))
 
     @contextmanager
     def _phase(self, name: str):
@@ -792,132 +871,12 @@ class PageSolver:
     # Mouse
     # ------------------------------------------------------------------
 
-    def _viewport(self, page: Any) -> Optional[Dict[str, float]]:
-        """
-        The window we must keep the cursor inside, cached per solve.
-
-        MUST NOT be skipped and MUST NOT be guessed, because a mouse move to a
-        coordinate outside the window WEDGES camoufox. Its juggler humanises
-        each move into a trajectory, guards the intermediate points against the
-        bounds, and then dispatches the requested destination unguarded
-        ("Always finish exactly on the requested destination"). An out-of-window
-        destination fires as an exit event instead of eMouseMove, so no
-        hit-renderer ack comes back; dispatch is serialised on a process-global
-        activation chain, so that one missing ack hangs every later input event
-        forever. Symptom: `page.mouse.move()` never returns, 0% CPU, solve
-        appears dead. Same failure family as camoufox #225.
-
-        `page.viewport_size` is None under camoufox (it uses the real window
-        rather than a spoofed viewport), which is why this falls back to asking
-        the page itself instead of assuming a size.
-        """
-        if self._viewport_cache is not None:
-            return self._viewport_cache
-        try:
-            vp = page.viewport_size
-            if callable(vp):  # some adapters expose it as a method
-                vp = vp()
-            if vp and vp.get("width") and vp.get("height"):
-                self._viewport_cache = {"width": float(vp["width"]), "height": float(vp["height"])}
-                return self._viewport_cache
-        except Exception:
-            pass
-        try:
-            inner = page.evaluate("() => ({width: window.innerWidth, height: window.innerHeight})")
-            if inner and inner.get("width") and inner.get("height"):
-                self._viewport_cache = {
-                    "width": float(inner["width"]),
-                    "height": float(inner["height"]),
-                }
-                return self._viewport_cache
-        except Exception:
-            pass
-        return None
-
-    def _trace_path(self, page: Any, points: Sequence[Tuple[float, float]], timings: Sequence[float]) -> None:
-        # Clamp ONLY when the viewport is actually known.
-        #
-        # camoufox reports `viewport_size is None` (it uses the real window
-        # rather than a spoofed viewport). The obvious fallback — assume
-        # 1920x1080 — is actively harmful: it clamps coordinates to the edge of
-        # a viewport that is not the real one, and a coordinate sitting EXACTLY
-        # on the boundary is the input that deadlocks camoufox's humanised-mouse
-        # juggler patch (upstream #225, "humanize edge deadlock"). The symptom is
-        # a `page.mouse.move()` that never returns: the process sits at 0% CPU
-        # with no in-flight work and the solve appears hung, which is precisely
-        # what this driver did against camoufox until this was found.
-        #
-        # A guessed clamp buys nothing anyway — the points come from a
-        # trajectory between two on-screen elements, so they are already in
-        # range. When we do clamp, we inset by a pixel so a legitimately
-        # off-screen point lands just inside the edge instead of exactly on it.
-        viewport = self._viewport(page)
-
-        start = time.monotonic() * 1000.0
-        for i, (x, y) in enumerate(points):
-            try:
-                if viewport is None:
-                    cx, cy = float(x), float(y)
-                else:
-                    cx = max(1.0, min(float(x), float(viewport["width"]) - 1.0))
-                    cy = max(1.0, min(float(y), float(viewport["height"]) - 1.0))
-                page.mouse.move(cx, cy)
-                self._last_mouse = (cx, cy)
-                if i < len(timings):
-                    target = start + timings[i]
-                    _delay(target - time.monotonic() * 1000.0)
-            except Exception as exc:
-                msg = str(exc)
-                if "Target closed" in msg or "Session closed" in msg:
-                    _log("could not move mouse; page or session closed")
-                    return
-                # Any other per-sample failure is skipped rather than fatal —
-                # losing one mousemove must not lose the solve.
-
-    def _seed_cursor(self, page: Any) -> None:
-        """Move the cursor off its (0, 0) origin once per solve, in ONE plain
-        move, before any humanised trajectory runs.
-
-        Without this, the first trajectory of a solve begins at (0, 0) — the
-        exact window corner, because that is where the pointer starts and
-        nothing has moved it. Under camoufox's `humanize` juggler a short move
-        from that origin never returns: `page.mouse.move()` blocks forever at 0%
-        CPU, and since dispatch is serialised on a process-global activation
-        chain, every later input event blocks behind it too. The solve looks
-        hung with no error anywhere and the Tier 3 fixture run times out on all
-        three attempts.
-
-        Reduced to four lines against camoufox directly:
-
-            with Camoufox(headless=True, humanize=True) as b:
-                p = b.new_page(); p.goto("about:blank")
-                p.mouse.move(1.0, 1.0)      # never returns
-
-        The same move after ANY interior move completes in ~1.1s, which is what
-        makes this the fix rather than a workaround: it is the ORIGIN that is
-        poisoned, not the destination. Same failure family as camoufox #225.
-
-        Deliberately not routed through `_smooth_move`: that would generate a
-        trajectory from (0, 0) and reintroduce exactly the move being avoided.
-        """
-        if self._cursor_seeded:
-            return
-        self._cursor_seeded = True
-        vp = self._viewport(page)
-        # Centre when the window is known, else a modest interior point — any
-        # coordinate comfortably off the corner will do.
-        cx, cy = (vp["width"] / 2, vp["height"] / 2) if vp else (200.0, 200.0)
-        try:
-            page.mouse.move(cx, cy)
-            self._last_mouse = (cx, cy)
-        except Exception:  # noqa: BLE001 — an adapter without a mouse must not fail the solve
-            pass
-
     def _smooth_move(self, page: Any, x: float, y: float) -> None:
-        self._seed_cursor(page)
-        points, timings = generate_trajectory(self._last_mouse, (x, y), 60)
+        """Travel to a point. What that MEANS is the humanizer's business — on
+        a touchscreen with no finger down it is a bookkeeping update and emits
+        nothing at all."""
         with self._phase("mouse"):
-            self._trace_path(page, points, timings)
+            self._human.move(page, (x, y))
 
     def _move_to_element(self, page: Any, element: Any, padding_percentage: float = 25.0) -> None:
         # BOUNDED. Playwright's default timeout is 30s, and this is called once
@@ -949,9 +908,8 @@ class PageSolver:
 
     def _move_and_click(self, page: Any, element: Any) -> None:
         self._move_to_element(page, element)
-        page.mouse.down()
-        _delay(random.random() * 20 + 20)
-        page.mouse.up()
+        with self._phase("mouse"):
+            self._human.click(page, self._last_mouse)
 
     def _execute_click(
         self, page: Any, action: Dict[str, Any], element_box: Dict[str, float]
@@ -976,10 +934,8 @@ class PageSolver:
             _log("click action without coordinates or bounding box; skipping")
             return
 
-        self._smooth_move(page, element_box["x"] + rel_x, element_box["y"] + rel_y)
-        page.mouse.down()
-        _delay(random.random() * 30 + 20)
-        page.mouse.up()
+        with self._phase("mouse"):
+            self._human.click(page, (element_box["x"] + rel_x, element_box["y"] + rel_y))
 
     def _execute_drag(
         self, page: Any, action: Dict[str, Any], element_box: Dict[str, float]
@@ -992,12 +948,8 @@ class PageSolver:
 
         src = center(action["source_bounding_box"])
         dst = center(action["target_bounding_box"])
-        self._smooth_move(page, *src)
-        page.mouse.down()
-        _delay(random.random() * 50 + 50)
-        self._smooth_move(page, *dst)
-        _delay(random.random() * 50 + 50)
-        page.mouse.up()
+        with self._phase("mouse"):
+            self._human.drag(page, src, dst)
 
     # ------------------------------------------------------------------
     # Typing and sliding
@@ -1077,23 +1029,11 @@ class PageSolver:
             _log("type action, but no text box in the widget; skipping")
             return False
 
-        self._move_and_click(page, field)  # travel there, then press to focus
-        # A retry round arrives with the previous attempt still in the box, and
-        # typing would APPEND to it — submitting a string the model never read.
-        try:
-            page.keyboard.press("Control+A")
-        except Exception:
-            pass
-        # Per character rather than one `type(text, delay=…)` call: a constant
-        # inter-key delay is itself a signal, and these are the vendors that
-        # score typing cadence.
-        for ch in text:
-            try:
-                page.keyboard.type(ch)
-            except Exception as exc:
-                _log(f"could not type into the captcha field: {exc}")
-                return False
-            _delay(random.random() * 90 + 45)
+        # Tapping the box is what focuses it — and on a phone it is also what
+        # raises the keyboard, so this is not decoration on either device.
+        self._move_and_click(page, field)
+        if not self._human.type_text(page, field, text):
+            return False
         _log(f"typed {len(text)} character(s) into the captcha field")
         return True
 
@@ -1109,6 +1049,17 @@ class PageSolver:
         except Exception as exc:
             _debug(f"track_piece failed: {exc}")
             return None
+
+    @staticmethod
+    def _shot_scale(shot: str, css_width: float) -> float:
+        """Device pixels per CSS pixel, read off the shot we are about to
+        measure. 1.0 when the image cannot be read — an unreadable shot is
+        already the `_track_piece` returns-None path, and guessing a ratio
+        would steer the handle by it."""
+        dims = _read_png_dimensions(shot)
+        if not dims or css_width <= 0:
+            return 1.0
+        return dims[0] / css_width
 
     def _execute_slide(
         self,
@@ -1168,12 +1119,12 @@ class PageSolver:
                  + float(action["target_bounding_box"][3])) / 2
             ) * element_box["height"]
             _log("no slider track; dragging the piece to the slot directly")
-            self._smooth_move(page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-            page.mouse.down()
-            _delay(random.random() * 50 + 50)
-            self._smooth_move(page, element_box["x"] + target_x, element_box["y"] + target_y)
-            _delay(random.random() * 50 + 50)
-            page.mouse.up()
+            with self._phase("mouse"):
+                self._human.drag(
+                    page,
+                    (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2),
+                    (element_box["x"] + target_x, element_box["y"] + target_y),
+                )
             return True
 
         hbox = handle.bounding_box()
@@ -1188,7 +1139,7 @@ class PageSolver:
         # moving thing in frame, and we would track the handle instead of the
         # piece.
         pad = max(4.0, hbox["height"] * 0.35)
-        exclude = [
+        band = [
             0.0,
             hbox["y"] - element_box["y"] - pad,
             element_box["width"],
@@ -1198,20 +1149,32 @@ class PageSolver:
         shots = [_tmp_png("slide") for _ in range(4)]
         try:
             self._move_to_element(page, handle, padding_percentage=30.0)
-            page.mouse.down()
-            _delay(random.random() * 60 + 60)
+            self._human.press(page)
+            self._human.pause("grab")
             self._screenshot(element, shots[0],
                              timeout_ms=self.config.element_screenshot_timeout_ms)
+
+            # CSS pixels out here, DEVICE pixels inside the shots. The same
+            # number on a 1x desktop and 2.625x apart on a phone, which is why
+            # this loop measured a slider correctly for a year and then missed
+            # every attempt the moment Tier 3 grew a mobile arm: the mask landed
+            # above the handle, the widths came back 2.6x too wide, and
+            # `_solve_slide_geometry` threw them out as wider than the widget.
+            # Measured from the shot rather than asked of the page, for the same
+            # reason the grid path does it (`_GridSession.scale_x`): what the CV
+            # reads is the image, whatever the window thinks its ratio is.
+            scale = self._shot_scale(shots[0], element_box["width"])
+            exclude = [v * scale for v in band]
 
             probes = self.config.slide_probe_offsets_px
             widths: List[Tuple[float, float]] = []
             last_box = None
             for offset, shot in zip(probes, shots[1:]):
                 self._smooth_move(page, start_x + offset, hold_y)
-                _delay(random.random() * 40 + 40)
+                self._human.pause("probe")
                 box = self._track_piece(element, shots[0], shot, exclude)
                 if box is not None:
-                    widths.append((float(offset), float(box[2] - box[0])))
+                    widths.append((float(offset), float(box[2] - box[0]) / scale))
                     last_box = box
 
             piece_w, ratio = self._solve_slide_geometry(widths, element_box["width"])
@@ -1232,27 +1195,28 @@ class PageSolver:
                 # asked for.
                 offset = float(widths[-1][0])
                 for _ in range(self.config.slide_max_corrections):
-                    piece_center = (last_box[2] - piece_w / 2.0)
+                    piece_center = (last_box[2] / scale - piece_w / 2.0)
                     error = target_x - piece_center
                     if abs(error) <= self.config.slide_tolerance_px:
                         break
                     offset += error / ratio
                     self._smooth_move(page, start_x + offset, hold_y)
-                    _delay(random.random() * 40 + 40)
+                    self._human.pause("probe")
                     box = self._track_piece(element, shots[0], shots[3], exclude)
                     if box is None:
                         break  # ran out of track; release where we are
                     last_box = box
-                _debug(f"slider: piece_w={piece_w:.1f} ratio={ratio:.3f} "
-                       f"final_center={last_box[2] - piece_w / 2.0:.1f} target={target_x:.1f}")
+                _debug(f"slider: piece_w={piece_w:.1f} ratio={ratio:.3f} scale={scale:.3f} "
+                       f"final_center={last_box[2] / scale - piece_w / 2.0:.1f} "
+                       f"target={target_x:.1f}")
 
             # Settle before letting go. A release in the same tick as the last
             # move reads as a machine, and some vendors sample the final
             # milliseconds of the gesture.
-            _delay(random.random() * 120 + 90)
+            self._human.pause("settle")
         finally:
             try:
-                page.mouse.up()
+                self._human.release(page)
             except Exception:
                 pass
             for shot in shots:
@@ -2179,6 +2143,10 @@ class PageSolver:
         )
 
     def _hover_cell(self, page: Any, session: _GridSession, cell: int) -> None:
+        # A hover is mimicry of a resting CURSOR, so on a device that has none
+        # it is not weaker mimicry — it is a mousemove at a touch-only widget.
+        if not self._human.hovers:
+            return
         first = session.grid_boxes[0]
         cell_w = (first[2] - first[0]) * session.scale_x
         cell_h = (first[3] - first[1]) * session.scale_y
@@ -2390,19 +2358,29 @@ class PageSolver:
             # Each round can legitimately spend ~10s waiting on fades, so eight
             # of them plus the model calls can outlast the whole solve budget.
             self._check_deadline(f"recaptcha grid round {round_index}")
-            with self._phase("grid-load"):
-                self._wait_for_grid_cells_loaded(element)
+            # Round 1 skips it: `_solve_single` has just waited for these cells,
+            # read the grid boxes off the loaded board and handed over, and
+            # nothing has touched the widget in between. Rounds 2..N still wait,
+            # because by then THIS driver has clicked and the tiles really are
+            # reloading. Measured 2148ms x2 on one solve.
+            if round_index > 1:
+                with self._phase("grid-load"):
+                    self._wait_for_grid_cells_loaded(element)
             shot = _tmp_png("recap")
             action: Optional[Dict[str, Any]] = None
             try:
-                self._screenshot(element, shot, timeout_ms=cfg.element_screenshot_timeout_ms)
+                with self._phase("screenshot"):
+                    self._screenshot(element, shot,
+                                     timeout_ms=cfg.element_screenshot_timeout_ms)
                 retry_for_round = pending_retry
                 pending_retry = None  # only round 1 carries the inbound hint
-                actions, usage = self._solve_frame_freshness_guarded(
-                    element,
-                    shot,
-                    lambda image_path: self._get_solution(image_path, "recaptcha", retry_for_round),
-                )
+                with self._phase("inference"):
+                    actions, usage = self._solve_frame_freshness_guarded(
+                        element,
+                        shot,
+                        lambda image_path: self._get_solution(
+                            image_path, "recaptcha", retry_for_round),
+                    )
                 all_usage.extend(usage)
                 action = _as_dict(actions[0]) if actions else None
             finally:
@@ -2415,8 +2393,11 @@ class PageSolver:
 
             if action.get("action") == "wait":
                 _log(f"[recaptcha-grid] round {round_index}: waiting for tiles.")
-                loading, _ = self._watch_clicked_tiles(page, element, session, clicked_order)
-                self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
+                with self._phase("fade-wait"):
+                    loading, _ = self._watch_clicked_tiles(
+                        page, element, session, clicked_order)
+                    self._wait_for_any_clicked_tile_loaded(
+                        page, element, session, loading)
                 continue
 
             if action.get("action") == "click":
@@ -2439,16 +2420,17 @@ class PageSolver:
                     if cell is not None:
                         clicked_order.append(cell)
                         clicked_this_round.append(cell)
-                    _delay(random.random() * 80 + 80)
+                    self._human.pause("between")
                 performed_action = True
                 _log(
                     f"[recaptcha-grid] round {round_index}: clicked {len(bboxes)} tile(s) "
                     f"-> cells {clicked_this_round}."
                 )
 
-                loading, chipped = self._watch_clicked_tiles(
-                    page, element, session, clicked_this_round
-                )
+                with self._phase("fade-wait"):
+                    loading, chipped = self._watch_clicked_tiles(
+                        page, element, session, clicked_this_round
+                    )
                 if chipped or not loading:
                     # Either the widget ticked our clicks and kept the photos
                     # (a board that does that is answered), or nothing faded
@@ -2460,7 +2442,9 @@ class PageSolver:
                     )
                     should_submit = True
                     break
-                self._wait_for_any_clicked_tile_loaded(page, element, session, loading)
+                with self._phase("fade-wait"):
+                    self._wait_for_any_clicked_tile_loaded(
+                        page, element, session, loading)
                 continue
 
             _log(f"[recaptcha-grid] round {round_index}: unexpected action; re-solving.")
@@ -2472,6 +2456,17 @@ class PageSolver:
                 if verify:
                     _log("[recaptcha-grid] clicking Verify to submit.")
                     self._move_and_click(page, verify)
+                    # The press IS an interaction, and saying so is load-bearing
+                    # — the same rule `_solve_single` learned on
+                    # prosopo_grid_3x3, in the other driver, on another day. A
+                    # `done` round clicks no tile, so without this the one
+                    # answer shape that submits and does nothing else reports
+                    # having done nothing: the caller then takes the
+                    # no-interaction wait instead of polling for the verdict
+                    # (~1s of dead time on every static reCAPTCHA), and raises
+                    # "performed no interactions" if the widget has not
+                    # finished tearing down — on an answer correctly sent.
+                    performed_action = True
 
         return performed_action, all_usage
 
@@ -2512,9 +2507,10 @@ class PageSolver:
         # and want opposite answers. Restricted to `unknown` because neither
         # hCaptcha nor reCAPTCHA has ever served a typed challenge, so a match
         # inside one of their frames would be a false positive by definition.
-        text_mode = puzzle_source == "unknown" and self._answer_box(
-            scope, element
-        ) is not None
+        text_mode = (
+            puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING
+            and self._answer_box(scope, element) is not None
+        )
         if text_mode:
             _log("widget has a text box; solving as a distorted-text captcha")
 
@@ -2540,7 +2536,7 @@ class PageSolver:
             if self.is_captcha_solved(page):
                 _log("solved while waiting for the next round; skipping inference.")
                 return False, []
-        elif puzzle_source == "unknown":
+        elif puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING:
             # Non-hCaptcha, non-reCAPTCHA widgets (GeeTest, Tencent, …). The settle
             # probe was never run for these, so an animated one — GeeTest's svg board
             # cycles its glyph set — was screenshotted mid-cycle and answered from
@@ -2618,8 +2614,10 @@ class PageSolver:
 
             if not is_animated:
                 if not have_shot:
-                    self._screenshot(element, shot,
-                                     timeout_ms=self.config.element_screenshot_timeout_ms)
+                    with self._phase("screenshot"):
+                        self._screenshot(
+                            element, shot,
+                            timeout_ms=self.config.element_screenshot_timeout_ms)
                 with self._phase("inference"):
                     actions, all_usage = self._solve_frame_freshness_guarded(
                         element,
@@ -2665,7 +2663,7 @@ class PageSolver:
                             if await_kf:
                                 self._wait_for_keyframe(element, await_kf, _bbox_center(bbox))
                             self._execute_click(page, {"target_bounding_box": bbox}, element_box)
-                            _delay(random.random() * 80 + 80)
+                            self._human.pause("between")
                     else:
                         self._execute_click(page, action, element_box)
                     performed_action = True
@@ -2727,11 +2725,16 @@ class PageSolver:
             # burning all ten solve loops on a puzzle they had answered on
             # the first one. The press itself is still bounded by
             # `should_submit` below, which is where the hazard belongs.
+            # RESOLVED, not travelled to. `_move_and_click` below moves to the
+            # button itself and picks its own random point inside it, so moving
+            # here first bought a second humanised trajectory that ended a few
+            # dozen pixels from where the first one stopped, plus a second
+            # bounded scroll-into-view. Two hops onto one button is slower AND
+            # is not something a hand does. A round that decides not to submit
+            # no longer walks to the control either.
             lookup = frame or (scope if not slid else None)
             if lookup is not None:
                 verify_button = self._get_verify_button(lookup)
-                if verify_button:
-                    self._move_to_element(page, verify_button)
 
             # Submit policy: press the widget's own submit control whenever we
             # have put an ANSWER into it — a selection, a placed piece, a typed
@@ -2821,8 +2824,7 @@ class PageSolver:
         cumulative_usage: List[Dict[str, Any]] = []
         self._last_submit_frame_hash = None
         self._deadline_ms = start + self.config.overall_solve_timeout_ms
-        self._viewport_cache = None
-        self._cursor_seeded = False
+        self._human.reset(page)
         self._reset_animated_state()
         self._budget = PhaseBudget()
 
@@ -2837,15 +2839,35 @@ class PageSolver:
         # would merge two separate captchas into one attempt — the opposite
         # error, and the one that under-bills.
         previous_session = os.environ.get(_SESSION_ENV)
-        os.environ[_SESSION_ENV] = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
+        os.environ[_SESSION_ENV] = session_id
+        # The verdict this driver reports back, and it starts FALSE. A solve
+        # that raises never sets it, which is the right default: the widget did
+        # not accept, and the boards that made it raise are exactly the ones
+        # worth keeping. See planner.report_outcome.
+        solved_for_report = False
         try:
-            return self._solve_impl(page, start, cumulative_usage)
+            result = self._solve_impl(page, start, cumulative_usage)
+            # Attached HERE rather than at each of the seven `return
+            # SolveResult(...)` sites, so a new early exit cannot forget it.
+            result.phases = dict(self._budget.totals)
+            result.phases["total"] = self._budget.elapsed_ms()
+            solved_for_report = bool(getattr(result, "is_solved", False))
+            return result
         finally:
             # Printed on the way out of every solve, success or failure — a
             # solve that FAILED is exactly the one whose time you want itemised.
             if timings_enabled() and self._budget is not None:
                 print(self._budget.report(), file=sys.stderr)
             self._deadline_ms = None
+            # BEFORE the env is restored, so the id reported is this solve's.
+            # Best-effort and never raised out of a `finally` — an exception
+            # here would replace the caller's real error, or their real result,
+            # with one about telemetry.
+            try:
+                self._solver.planner.report_outcome(session_id, solved_for_report)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"[outcome] could not report: {exc}")
             if previous_session is None:
                 os.environ.pop(_SESSION_ENV, None)
             else:
@@ -3043,60 +3065,74 @@ class PageSolver:
             render_waits = 0
             cumulative_usage.extend(usage)
 
-            if did_interact:
-                # Poll for the vendor's SOLVED signal before re-entering the
-                # pipeline. hCaptcha keeps the challenge visible for a couple of
-                # seconds while verifying; without this the loop re-solves that
-                # closing frame and burns ~18s. Only ever early-RETURNS on a
-                # definitive signal, so it cannot loop.
-                deadline = time.monotonic() * 1000.0 + cfg.post_solve_outcome_timeout_ms
-                solved = False
-                widget_gone = 0
-                _verdict_t0 = time.perf_counter()
-                while time.monotonic() * 1000.0 < deadline:
-                    if self.is_captcha_solved(page):
+            # ONE wait after a round, polled, whichever kind of round it was.
+            #
+            # There used to be two: this poll when the round interacted, and a
+            # flat `_delay(post_solve_delay_ms + jitter)` when it did not. The
+            # flat sleep observed NOTHING — it ran to the end and only then
+            # asked whether the widget was still there — so a round that had in
+            # fact finished the captcha paid 1200-1500ms to find that out. The
+            # poll below already asks exactly that question and answers it the
+            # moment it becomes true.
+            #
+            # The two windows keep different LENGTHS, because different things
+            # size them: `post_solve_outcome_timeout_ms` covers how late a
+            # vendor's success signal can arrive (measured — see the constant),
+            # while `post_solve_delay_ms` is the dwell a round that answered
+            # nothing takes before deciding the page has settled.
+            window_ms = (cfg.post_solve_outcome_timeout_ms if did_interact
+                         else cfg.post_solve_delay_ms + random.random() * 300)
+            # Poll for the vendor's SOLVED signal before re-entering the
+            # pipeline. hCaptcha keeps the challenge visible for a couple of
+            # seconds while verifying; without this the loop re-solves that
+            # closing frame and burns ~18s. Only ever early-RETURNS on a
+            # definitive signal, so it cannot loop.
+            deadline = time.monotonic() * 1000.0 + window_ms
+            solved = False
+            widget_gone = 0
+            _verdict_t0 = time.perf_counter()
+            while time.monotonic() * 1000.0 < deadline:
+                if self.is_captcha_solved(page):
+                    solved = True
+                    break
+                # The eight inline vendors have no response token, so
+                # `is_captcha_solved` — which reads only the hCaptcha and
+                # reCAPTCHA anchors — can never fire for them and this loop
+                # ran out its whole 2.5s budget on EVERY round, waiting for
+                # a signal that cannot arrive. Measured on geetest_v4_slide:
+                # 5.2s of a 12.3s solve, spent after the puzzle was already
+                # answered, with the widget sitting there visibly solved.
+                #
+                # "The widget is gone" is the completion signal for those
+                # vendors and is already the authority immediately after
+                # this loop, so this only reaches the same verdict sooner —
+                # confirmed over two polls so a frame caught mid-swap
+                # between rounds cannot read as a solve.
+                if self.detect_captcha(page) is None:
+                    widget_gone += 1
+                    if widget_gone >= 2:
                         solved = True
                         break
-                    # The eight inline vendors have no response token, so
-                    # `is_captcha_solved` — which reads only the hCaptcha and
-                    # reCAPTCHA anchors — can never fire for them and this loop
-                    # ran out its whole 2.5s budget on EVERY round, waiting for
-                    # a signal that cannot arrive. Measured on geetest_v4_slide:
-                    # 5.2s of a 12.3s solve, spent after the puzzle was already
-                    # answered, with the widget sitting there visibly solved.
-                    #
-                    # "The widget is gone" is the completion signal for those
-                    # vendors and is already the authority immediately after
-                    # this loop, so this only reaches the same verdict sooner —
-                    # confirmed over two polls so a frame caught mid-swap
-                    # between rounds cannot read as a solve.
-                    if self.detect_captcha(page) is None:
-                        widget_gone += 1
-                        if widget_gone >= 2:
-                            solved = True
-                            break
-                    else:
-                        widget_gone = 0
-                    if self._is_challenge_freshly_rendered(page):
-                        break  # next round is up; go solve it now
-                    _delay(cfg.post_solve_outcome_poll_ms)
-                _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0
-                if self._budget is not None:
-                    self._budget.add("await-verdict", _verdict_ms)
-                # How long a SUCCESS actually took to show itself. This is the
-                # only number that can size `post_solve_outcome_timeout_ms`: the
-                # window exists to catch a late success, so it needs to cover
-                # the slowest real one and nothing beyond it. A round that ends
-                # any other way spends the whole window by construction — there
-                # is no signal on a wrong answer — so its duration says nothing
-                # about how long the window ought to be.
-                if solved:
-                    _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
-                if solved:
-                    return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
-            else:
-                with self._phase("post-submit-delay"):
-                    _delay(cfg.post_solve_delay_ms + random.random() * 300)
+                else:
+                    widget_gone = 0
+                if self._is_challenge_freshly_rendered(page):
+                    break  # next round is up; go solve it now
+                _delay(cfg.post_solve_outcome_poll_ms)
+            _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0
+            if self._budget is not None:
+                self._budget.add(
+                    "await-verdict" if did_interact else "post-submit-delay",
+                    _verdict_ms)
+            # How long a SUCCESS actually took to show itself. This is the
+            # only number that can size `post_solve_outcome_timeout_ms`: the
+            # window exists to catch a late success, so it needs to cover
+            # the slowest real one and nothing beyond it. A round that ends
+            # any other way spends the whole window by construction — there
+            # is no signal on a wrong answer — so its duration says nothing
+            # about how long the window ought to be.
+            if solved:
+                _log(f"[verdict] success signal arrived after {_verdict_ms:.0f}ms")
+                return SolveResult(True, self._last_mouse, _aggregate(cumulative_usage))
 
             if self._has_recaptcha_underselect_error(page):
                 if already_retried_underselect:

@@ -127,6 +127,29 @@ Everything model-specific lives in `captchakraken.config` and is env-overridable
 | `CAPTCHA_LORA_ADAPTER` | Captcha adapter (HF id or path) | `CaptchaKraken/CaptchaKraken-Lora-v1.2` |
 | `CAPTCHA_LORA_NAME` | Served adapter name the client requests | `captcha-v12` |
 | `CAPTCHA_KRAKEN_AUTOSTART` | `0` disables local auto-start | `1` |
+| `CAPTCHA_HUMANIZATION` | How gestures are performed: `mouse`, `mobile` or `none` | `mouse` |
+
+**How it moves** is a choice of input device, not a realism dial. `mobile`
+dispatches real touch events with finger kinematics and never touches
+`page.mouse`; `none` goes straight to the DOM effect. Set it in code (which wins
+over the env var, because the right mode is a property of the page you are
+driving), and pass your own object to override ours entirely:
+
+```python
+from captchakraken import PageSolver
+from captchakraken.page_solver import PageSolverConfig
+
+PageSolver(config=PageSolverConfig(humanization="mobile"))
+PageSolver(config=PageSolverConfig(humanization="none"))
+PageSolver(config=PageSolverConfig(humanizer=my_own))
+
+# A real handset over Appium / Selenium — W3C touch pointer actions.
+PageSolver(config=PageSolverConfig(
+    humanization="mobile",
+    touch_driver=driver,
+    touch_transform={"scale": 3.0, "origin": (0, 132)},   # CSS px -> screen px
+))
+```
 
 ## License
 

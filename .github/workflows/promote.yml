@@ -1,0 +1,87 @@
+name: promote
+
+# `main` accepts merges from `dev`, and from nothing else.
+#
+# WHY THIS IS A WORKFLOW AND NOT A SETTING. Branch protection can require a pull
+# request, require checks, and say who may push — but it has no rule for which
+# branch may be the SOURCE of a merge. So the one property that actually
+# describes this project's release flow is the one GitHub cannot express, and a
+# required check is the only place to put it. captchakraken-cloud and
+# captchakraken-gateway have carried this file since 2026-08-22; this repo and
+# the public one did not, which meant three of the four repos on the release
+# path enforced the route and the two that ship the MODEL and the DRIVER did
+# not.
+#
+# WHAT IT BUYS HERE, specifically. `publish.yml` fires on push to `main`, so
+# anything that lands there is on npm and PyPI a few minutes later, under a
+# version number that can never be reused. There is no rollback for a publish —
+# only a higher version — which makes this the most irreversible `main` of the
+# four repos on the release path, and it was the least protected.
+#
+# The route through `dev` is not ceremony. A driver change is proved by the
+# PRIVATE repo's Tier 3 gate, dispatched from here by tier3-request.yml and
+# reported back as `tier3/driver-gate`. That gate drives the fixtures with the
+# commit's own code on both ports; sitting on `dev` first is what gives it a
+# chance to run against everything else in flight rather than only against
+# `main`.
+#
+# BREAKING GLASS. There is no bypass in here on purpose — a check with an escape
+# hatch in its own logic is a check that will be escaped. If `main` genuinely has
+# to take a commit that is not on `dev`, the honest move is to turn this check
+# off in Settings → Branches for the length of the incident and turn it back on,
+# which is deliberate, visible in the audit log, and takes two clicks. Pushing
+# the fix to `dev` and promoting it is usually faster than either.
+
+on:
+  pull_request:
+    branches: [main]
+
+# Nothing here reads code or secrets; it inspects the event.
+permissions:
+  contents: read
+
+jobs:
+  source-branch:
+    name: source branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: main accepts merges from dev only
+        env:
+          # Through the environment, never interpolated into the script body:
+          # a branch name is attacker-controlled on a fork PR, and `${{ }}`
+          # inside `run:` is a shell injection.
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::This pull request comes from $HEAD_REPO, not $BASE_REPO."
+            echo "main is promoted from this repository's own 'dev' branch."
+            exit 1
+          fi
+
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::main accepts merges from 'dev' only; this one is from '$HEAD_REF'."
+            cat <<'EOF'
+
+          The release path is:
+
+              your branch  ──PR──>  dev  ──PR──>  main
+                                                     │
+                                                     └─ publishes captchakraken
+                                                        to npm and PyPI, and
+                                                        captchakraken-mcp to npm
+
+          Retarget this pull request at 'dev'. Once it is merged there, open a
+          second pull request from 'dev' to 'main' — that one runs the hermetic
+          gates plus tier3/driver-gate before anything is published.
+
+          EOF
+            exit 1
+          fi
+
+          echo "Source branch is 'dev'. This is a promotion."

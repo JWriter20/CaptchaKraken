@@ -124,6 +124,14 @@ _CLIENT_ENV = "CAPTCHA_KRAKEN_CLIENT"
 _SESSION_HEADER = "X-CK-Session"
 _SESSION_ENV = "CAPTCHA_KRAKEN_SESSION"
 
+# Report whether the widget accepted, once per solve. "0" turns it off.
+#
+# ON by default because the report is what makes a failed solve improvable, and
+# because it is the only way a hosted account's failures can be found at all.
+# Opting out here stops the CLIENT sending it; `captureOptOut` on the account is
+# the server-side half, and either one alone is enough to keep nothing.
+_REPORT_OUTCOME_ENV = "CAPTCHA_REPORT_OUTCOME"
+
 # Arbitrary extra headers, as "Name: value" pairs separated by newlines or
 # commas. Empty and absent by default.
 #
@@ -284,6 +292,7 @@ class ActionPlanner:
         debug_callback: Optional[Any] = None,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        expert: Optional[str] = None,
         **_: Any,
     ):
         self.debug_callback = debug_callback
@@ -309,9 +318,102 @@ class ActionPlanner:
         # the same key: an adapter reads a puzzle at the pixel band it trained
         # under. Resolved once per planner — see the note above.
         self.pixel_budget = prompts.pixel_budget(_prompt_key)
+        # WHICH ADAPTER answers each prompt family. Empty for every model that
+        # is not routed, which is every model published so far — `_model_for`
+        # then returns `self.model` for every request and the wire is unchanged.
+        #
+        # Resolved once, like the two above, and for a stronger reason: the pin
+        # is validated here, so `--expert grid` against a single-adapter model
+        # fails when the solver is BUILT rather than on the first grid it meets.
+        self.expert = (expert if expert is not None
+                       else prompts.expert_pin())
+        self.experts = prompts.experts(_prompt_key)
+        if self.expert:
+            # Raises on an unknown family, and on a pin against an unrouted
+            # model. Both are configuration errors, and a benchmark that
+            # quietly measured the generalist while reporting an expert is the
+            # exact class of silent mispairing models.json exists to prevent.
+            prompts.route(_prompt_key, None, pin=self.expert)
         # Auto-start a local vLLM server on the first request if one isn't up
         # (no-op for a healthy or remote endpoint). Guarded so we only try once.
         self._server_ensured = False
+        # ONE connection, reused for every round of every solve this planner
+        # serves. `requests.post` opens a fresh TCP connection each call — and
+        # to a hosted endpoint a TLS handshake with it. Measured against the
+        # gate's own endpoint: 258ms per request connectionless vs 144ms
+        # pooled, so every inference was paying ~110ms to re-dial a server it
+        # had just finished talking to. A multi-round grid pays it per round.
+        #
+        # The planner is per-PageSolver and a PageSolver is reusable across
+        # solves, so a caller who keeps one keeps the connection warm too.
+        self._http = requests.Session()
+        # Latched off by the first 404 — see `report_outcome`.
+        self._outcome_supported = True
+
+    def _model_for(self, family: Optional[str]) -> str:
+        """The `model` string for a request in `family`.
+
+        `self.model` whenever the model is not routed, so a caller may pass a
+        family unconditionally. A routed model with no expert for this family
+        degrades to the generalist — never to another expert, never to an
+        error (docs/MOE_LORA_DESIGN.md §11).
+        """
+        if not self.experts:
+            return self.model
+        return prompts.route(self.model, family, pin=self.expert) or self.model
+
+    # ── the solve's own verdict, sent back ─────────────────────────────────
+    #
+    # THE ONE THING THE SERVER CANNOT SEE. A wrong answer reaches the gateway as
+    # a 200 with well-formed JSON in it; only this driver watched the widget.
+    # Without this report the hosted API cannot tell a solved captcha from a
+    # failed one, and the failures — the exact boards the model is worst at, on
+    # real sites — are the one dataset that cannot be collected any other way.
+    #
+    # BEST-EFFORT, ALWAYS. It runs after the solve is over and its result is
+    # already decided, so nothing it does can change the answer the caller gets.
+    # Every failure is swallowed: a self-hosted vLLM has no such route, a
+    # network blip is not the caller's problem, and an exception here would turn
+    # a successful solve into a raised one.
+    #
+    # ONE 404 IS ENOUGH. A self-hosted endpoint answers 404 forever, so the
+    # first one latches this off for the life of the planner rather than paying
+    # a round trip per solve to be told the same thing again.
+    _OUTCOME_PATH = "/solve-outcome"
+    _OUTCOME_TIMEOUT_S = 3.0
+
+    def report_outcome(self, session_id: Optional[str], solved: bool) -> bool:
+        """Tell the API whether the widget accepted. True if it was delivered.
+
+        Never raises. The return value is for tests and for `--debug`; no caller
+        should branch on it.
+        """
+        if not session_id or not self._outcome_supported:
+            return False
+        if os.getenv(_REPORT_OUTCOME_ENV, "1") == "0":
+            return False
+        url = f"{self.base_url}{self._OUTCOME_PATH}"
+        try:
+            resp = self._http.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"session": session_id, "solved": bool(solved)},
+                timeout=self._OUTCOME_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 — see the note above
+            self._log(f"outcome report failed: {exc}")
+            return False
+        if resp.status_code == 404:
+            # Not an error: this endpoint does not serve the route. Stop asking.
+            self._outcome_supported = False
+            self._log("outcome reporting: endpoint has no /solve-outcome; disabled")
+            return False
+        ok = 200 <= resp.status_code < 300
+        self._log(f"outcome report {session_id} solved={solved} -> {resp.status_code}")
+        return ok
 
     def _log(self, message: str) -> None:
         if DEBUG:
@@ -319,11 +421,14 @@ class ActionPlanner:
         if self.debug_callback:
             self.debug_callback(f"[Planner] {message}")
 
-    def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512) -> str:
-        return self._chat_with_images(prompt, [image_path], max_tokens=max_tokens)
+    def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512,
+                         family: Optional[str] = None) -> str:
+        return self._chat_with_images(prompt, [image_path], max_tokens=max_tokens,
+                                      family=family)
 
     def _chat_with_images(
-        self, prompt: str, image_paths: List[str], max_tokens: int = 512
+        self, prompt: str, image_paths: List[str], max_tokens: int = 512,
+        family: Optional[str] = None,
     ) -> str:
         """One request carrying N images followed by the prompt.
 
@@ -355,8 +460,9 @@ class ActionPlanner:
             },
         ]
 
+        model = self._model_for(family)
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "temperature": 0,
             "max_tokens": max_tokens,
@@ -387,11 +493,11 @@ class ActionPlanner:
             self._server_ensured = True
 
         url = f"{self.base_url}/chat/completions"
-        self._log(f"POST {url} model={self.model} max_tokens={max_tokens} "
+        self._log(f"POST {url} model={model} max_tokens={max_tokens} "
                   f"images={len(parts)}")
 
         with timed("planner.chat"):
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            resp = self._http.post(url, headers=headers, json=payload, timeout=120)
 
         # Surface auth / billing / server errors as something the reader can act
         # on, instead of letting resp.json() blow up with a cryptic "Expecting
@@ -531,7 +637,8 @@ class ActionPlanner:
                   "Return the complete list of cell numbers that match the description, "
                   "including any matches you may have overlooked."
             )
-        raw = self._chat_with_image(prompt, image_path, max_tokens=128)
+        raw = self._chat_with_image(prompt, image_path, max_tokens=128,
+                                    family="grid")
         out = self._normalize_grid(self._parse_json(raw), total)
         self._log(f"grid selection -> {out}")
         return out
@@ -592,7 +699,8 @@ class ActionPlanner:
         into ClickAction / DragAction / TypeAction.
         """
         prompt = self.prompts.text_prompt() if text_mode else self.prompts.action_prompt
-        raw = self._chat_with_image(prompt, image_path, max_tokens=512)
+        raw = self._chat_with_image(prompt, image_path, max_tokens=512,
+                                    family="text" if text_mode else "pixel")
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         self._log(f"pixel actions -> {actions}")
@@ -618,7 +726,8 @@ class ActionPlanner:
         # so this raises a clear error there instead of sending a v1 model a
         # keyframe request it was never trained to read.
         prompt = self.prompts.video_prompt(len(keyframe_paths))
-        raw = self._chat_with_images(prompt, list(keyframe_paths), max_tokens=512)
+        raw = self._chat_with_images(prompt, list(keyframe_paths), max_tokens=512,
+                                     family="video")
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         frame = self._normalize_frame(data, len(keyframe_paths))

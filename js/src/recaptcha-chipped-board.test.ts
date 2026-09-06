@@ -160,3 +160,86 @@ test('a chip on a tile we did not click is not a verdict', async () => {
 
   assert.equal(seen.chipped, false);
 });
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Two things the grid driver was paying for twice, or not at all.
+ *
+ * Both were found in the phase budget of a solve that SUCCEEDED, which is why
+ * neither had ever shown up as a failure:
+ *
+ *     [BUDGET] solve 5.9s — 0.7s useful (11%), 5.3s waiting
+ *     [BUDGET]   grid-load                1.50s  x2      <- paid twice
+ *     [BUDGET]   post-submit-delay        1.48s  x1      <- should not exist
+ *
+ * 1. The Verify press is an INTERACTION, and this driver never said so. It sets
+ *    `performedAction` when it clicks a TILE; a round that answers `done`
+ *    clicks nothing, presses Verify and returns false. The caller reads that as
+ *    "this round did nothing", sleeps `postSolveDelayMs` flat instead of
+ *    polling for the verdict (~1s of dead time), and throws "performed no
+ *    interactions" if the widget has not finished tearing down — on an answer
+ *    that was correctly sent. Same bug `empty-answer-submits.test.ts` pins in
+ *    the OTHER driver; that one was fixed and this one was not.
+ *
+ * 2. The grid-load wait was paid twice, back to back. `solveSingle` waits for
+ *    the cells, reads the grid boxes off the loaded board, sees a 3x3 and hands
+ *    over here — whose round 1 opened by waiting for the same board again.
+ *    Rounds 2..N still wait, because by then this driver has clicked and the
+ *    tiles really are reloading.
+ *
+ * The Python half is `python/tests/test_grid_round_pays_once.py`.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** `driver`, plus a count of how many times the grid-load wait was paid. */
+function countingDriver(states: any, answers: any[]) {
+  const { solver, log } = driver(states, answers);
+  const counted = log as Log & { gridLoads: number };
+  counted.gridLoads = 0;
+  solver.waitForGridCellsLoaded = async () => { counted.gridLoads += 1; return true; };
+  return { solver, log: counted };
+}
+
+const CHIPPED = { empty: [], changing: [5], loaded: [1, 2, 3, 4, 6, 7, 8, 9], selected: [5] };
+const SWAPPING = { empty: [5], changing: [], loaded: [1, 2, 3, 4, 6, 7, 8, 9], selected: [] };
+
+test('a round that only presses Verify still reports an interaction', async () => {
+  const { solver, log } = countingDriver(CHIPPED, [DONE]);
+  const result = await solve(solver);
+
+  assert.deepEqual(log.clicked, [], 'the model said `done`; nothing should be clicked');
+  assert.equal(log.submits, 1, 'a `done` answer is submitted by pressing Verify');
+  assert.equal(result.didInteract, true,
+    'the driver pressed Verify and reported that it did nothing. The caller then '
+    + 'sleeps postSolveDelayMs instead of polling for the verdict, and throws '
+    + "'performed no interactions' if the widget has not vanished yet — on an "
+    + 'answer that was correctly sent.');
+});
+
+test('a round-cap exit still reports no interaction', async () => {
+  // The guard against "just return true". A board that keeps answering `wait`
+  // never submits and never clicks, so it genuinely did nothing — and the
+  // caller's infinite-loop guard is the only thing that ends it.
+  const { solver, log } = countingDriver(SWAPPING, [{ action: 'wait' }]);
+  const result = await solve(solver);
+
+  assert.equal(log.submits, 0, 'nothing was answered, so nothing may be submitted');
+  assert.equal(result.didInteract, false);
+});
+
+test('round one inherits the caller`s grid-load wait', async () => {
+  const { solver, log } = countingDriver(CHIPPED, [DONE]);
+  await solve(solver);
+
+  assert.equal(log.gridLoads, 0,
+    'round 1 waited for the grid to load; solveSingle has just done exactly '
+    + 'that and nothing has touched the board in between');
+});
+
+test('later rounds still wait for the board they changed', async () => {
+  const { solver, log } = countingDriver(SWAPPING, [CLICK_5, DONE]);
+  await solve(solver);
+
+  assert.equal(log.rounds, 2, 'a replaced tile has to be read once it lands');
+  assert.equal(log.gridLoads, 1,
+    'round 2 opens on a board this driver has just clicked, so it must wait for '
+    + 'the replacement to paint before the model reads it');
+});

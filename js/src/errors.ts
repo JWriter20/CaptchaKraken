@@ -26,6 +26,14 @@ export type CaptchaKrakenErrorCode =
   | 'invalid_request'
   | 'request_too_large'
   | 'upstream_unavailable'
+  // The two LICENSED-MODEL refusals. A caller branches on them differently
+  // from every code above: `model_not_licensed` is a licence to obtain,
+  // `model_not_serving` is a fleet that has not started yet and nothing for
+  // them to do. The sentences are the Python client's (`errors.py::_sentence`)
+  // and reach here verbatim through `parseApiError`, so this union is the
+  // TypeScript half of one wording, not a second copy of it.
+  | 'model_not_licensed'
+  | 'model_not_serving'
   // Not a closed set on purpose — a code added to the gateway after this was
   // written must still arrive intact rather than being coerced to a fallback.
   | (string & {});

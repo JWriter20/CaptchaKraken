@@ -12,6 +12,10 @@
  *   - a small overshoot-and-correct on longer moves, which is the single most
  *     recognisable human tell and the one a linear interpolation never produces
  *
+ * `generate_swipe` is the SAME contract for a FINGER, and it is a different
+ * model rather than the mouse model with different constants — see its
+ * docstring.
+ *
  * Camoufox's own `humanize` is a DIFFERENT, browser-level mechanism that
  * re-humanises every `mouse.move()` it is handed. Running both composes them —
  * measured 82.1s vs 13.4s on one geetest_v4_slide solve, because each of the 60
@@ -176,6 +180,125 @@ export function generate_trajectory(
 
   // Land exactly on the requested pixel. Everything above is texture; the final
   // sample must be the point the caller asked for or clicks drift off-target.
+  points[points.length - 1] = end;
+  return [points, timings];
+}
+
+// ── Touch ───────────────────────────────────────────────────────────────────
+//
+// Fitts's law holds for direct touch too, but with a slower intercept and a much
+// wider effective target: a fingertip contact patch is ~9mm across, which is the
+// 44pt / 48dp minimum both platform guidelines are built around. So the same
+// distance takes longer AND is aimed less precisely than with a mouse.
+const TOUCH_FITTS_A_MS = 160.0;
+const TOUCH_FITTS_B_MS = 135.0;
+const TOUCH_WIDTH_PX = 44.0;
+
+// How flick-like the launch is. 0 would be the mouse's symmetric bell; 1 would
+// be an instantaneous jump at t=0. See `easeTouch`.
+const TOUCH_LAUNCH = 0.7;
+
+// A finger drags across glass on a short wrist/thumb pivot, so it bows far less
+// than a hand moving a mouse across a desk.
+const TOUCH_BOW_CAP_PX = 40.0;
+
+// The reported contact point wanders, because it is the CENTROID of a soft patch
+// rolling under pressure rather than a rigid sensor. `TOUCH_WOBBLE_DECAY` is the
+// AR(1) coefficient that makes that wander low-frequency: white per-sample noise
+// would show up in a spectrum as nothing a finger produces.
+const TOUCH_WOBBLE_PX = 0.55;
+const TOUCH_WOBBLE_DECAY = 0.82;
+
+/**
+ * Asymmetric ease: a finger leaves fast and brakes late.
+ *
+ * A mouse hand is symmetric (`easeInOut` — accelerate, decelerate, equally). A
+ * finger is not: the launch is a flick off the contact point and the arrival is
+ * a brake. Blending the two rather than using a pure ease-out is what keeps the
+ * launch from being an instantaneous jump at t=0, which no digitizer would ever
+ * report.
+ */
+function easeTouch(t: number): number {
+  return (1.0 - TOUCH_LAUNCH) * easeInOut(t) + TOUCH_LAUNCH * (1.0 - Math.pow(1.0 - t, 2.4));
+}
+
+/**
+ * A FINGER travelling from `target_start` to `target_end`, same contract as
+ * `generate_trajectory`: `[points, timings]`, timings cumulative from 0, last
+ * point exactly `target_end`.
+ *
+ * A separate model rather than `generate_trajectory` with other constants,
+ * because the three things that make the mouse output human are each WRONG
+ * here:
+ *
+ *   - **No overshoot-and-correct.** That tell is a hand arriving past a target
+ *     it cannot see under the cursor. A finger occludes its own target and
+ *     commits; the correction, when there is one, is a second gesture.
+ *   - **A different velocity profile.** `easeTouch`, not `easeInOut` — above.
+ *   - **Different jitter.** The mouse model adds white noise scaled by speed (a
+ *     hand tracking a path imprecisely). A digitizer instead reports a wandering
+ *     centroid, which is low-frequency and roughly speed INDEPENDENT, so this is
+ *     a smoothed random walk.
+ *
+ * `frequency` defaults to 90: digitizers sample at 120Hz+, but touchmove is
+ * coalesced to the compositor, so more samples than this buys nothing and costs
+ * a dispatch round-trip each.
+ */
+export function generate_swipe(
+  target_start: readonly number[],
+  target_end: readonly number[],
+  frequency: number = 90,
+  frequencyRandomizer: number = 0.1,
+): [Point[], number[]] {
+  const start: Point = [Number(target_start[0]), Number(target_start[1])];
+  const end: Point = [Number(target_end[0]), Number(target_end[1])];
+
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const distance = Math.hypot(dx, dy);
+
+  if (distance < 1e-6) return [[end], [0.0]];
+
+  let durationMs =
+    TOUCH_FITTS_A_MS + TOUCH_FITTS_B_MS * Math.log2(distance / TOUCH_WIDTH_PX + 1.0);
+  durationMs *= uniform(0.85, 1.2);
+
+  const steps = Math.max(2, Math.round((durationMs / 1000.0) * Math.max(1, frequency)));
+
+  let c1: Point;
+  let c2: Point;
+  if (distance < SHORT_MOVE_PX) {
+    c1 = start;
+    c2 = end;
+  } else {
+    [c1, c2] = controlPoints(start, end, distance);
+    // Pull the mouse model's bow in: `controlPoints` is shared, and its arc is
+    // sized for a hand crossing a desk.
+    const shrink = Math.min(1.0, TOUCH_BOW_CAP_PX / Math.max(TOUCH_BOW_CAP_PX, distance * 0.16));
+    c1 = [start[0] + (c1[0] - start[0]) * shrink, start[1] + (c1[1] - start[1]) * shrink];
+    c2 = [start[0] + (c2[0] - start[0]) * shrink, start[1] + (c2[1] - start[1]) * shrink];
+  }
+
+  const points: Point[] = [];
+  const timings: number[] = [];
+  let elapsed = 0.0;
+  const perStep = durationMs / steps;
+  let wobX = 0.0;
+  let wobY = 0.0;
+
+  for (let i = 0; i <= steps; i++) {
+    const t = easeTouch(i / steps);
+    const [px, py] = cubicBezier(start, c1, c2, end, t);
+
+    wobX = wobX * TOUCH_WOBBLE_DECAY + gauss(0.0, TOUCH_WOBBLE_PX);
+    wobY = wobY * TOUCH_WOBBLE_DECAY + gauss(0.0, TOUCH_WOBBLE_PX);
+
+    points.push([px + wobX, py + wobY]);
+    timings.push(elapsed);
+    elapsed += perStep * uniform(1.0 - frequencyRandomizer, 1.0 + frequencyRandomizer);
+  }
+
+  // Land exactly where the caller asked, same reason as the mouse model.
   points[points.length - 1] = end;
   return [points, timings];
 }

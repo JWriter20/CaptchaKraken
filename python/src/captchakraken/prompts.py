@@ -247,6 +247,80 @@ def canonical_model_id(model: Optional[str]) -> Optional[str]:
     return alias if isinstance(alias, str) else None
 
 
+# ── availability: can these weights be obtained at all? ─────────────────────
+#
+# Same registry, same reason as prompt_version and pixel_budget: it is a fact
+# about the MODEL, and the one place that already decides what an unpinned
+# client downloads. See models.json's header comment.
+
+PUBLIC = "public"
+PRIVATE = "private"
+LICENSED = "licensed"
+#: Anything outside this set is a typo, and a typo must not read as "public".
+#: The whole class of bug this file exists to prevent is a field that fails
+#: open — `check_prompt_parity.py` rejects an unknown value at release time,
+#: and `is_licensed` below treats one as licensed rather than guessing.
+#:
+#: Spelled out as literals rather than `(PUBLIC, PRIVATE, LICENSED)`: the
+#: release gate reads this file by AST so it can run in a training venv with no
+#: client installed, and `ast.literal_eval` cannot follow a name. A tuple of
+#: names reads as "unset" to the gate, which is the check silently not running.
+#: `tests/test_prompt_registry.py` pins that all four constants agree.
+AVAILABILITIES = ("public", "private", "licensed")
+
+
+def availability(model: Optional[str]) -> str:
+    """`"public"`, `"private"` or `"licensed"` for `model`. Absent means public.
+
+    The three answer ONE question — can these weights be obtained, and by whom:
+
+      public     on the Hub, by anyone.
+      private    on the Hub in a PRIVATE repo. The bytes exist and `fetch`
+                 pulls them, but only for a token this account has authorised.
+                 Everyone else gets 401/404 from the Hub, which is the right
+                 answer and not something to pre-empt with a refusal.
+      licensed   no Hub repo at all. Hosted API or a licence we issue.
+
+    `private` is the newest and it is NOT a softer `licensed`. They differ in
+    what an authorised holder can do, which is the whole reason the field is
+    not a boolean: a licensed model has nothing to download however good your
+    credentials are, so refusing early is a KINDNESS — it replaces a
+    `RepositoryNotFoundError` that reads as "you are not logged in" with the
+    truth. Doing the same to a private model would be a lie, and would make our
+    own admin token unable to pull weights it is entitled to.
+
+    An unregistered model is public too: it is not ours, and refusing to
+    download a stranger's adapter because we have never heard of it would break
+    every self-hoster who trained their own.
+    """
+    entry = registered_models().get(canonical_model_id(model) or "") or {}
+    value = entry.get("availability")
+    return value if isinstance(value, str) and value else PUBLIC
+
+
+def is_licensed(model: Optional[str]) -> bool:
+    """True if these weights are NOT OBTAINABLE AT ALL — hosted API or licence.
+
+    Fails CLOSED on an unrecognised value. A registry that says `"licenced"`
+    must not hand out a proprietary model because of a spelling.
+
+    False for `private`: those weights are downloadable, by the holder of a
+    token we authorised. Proprietary and unobtainable are different facts, and
+    this function answers the second one — `requires_auth` answers the first.
+    """
+    return availability(model) not in (PUBLIC, PRIVATE)
+
+
+def requires_auth(model: Optional[str]) -> bool:
+    """True if pulling these weights needs a token we authorised.
+
+    Separate from `is_licensed` because the two diverge exactly where it
+    matters: a `private` model needs a token AND can be fetched with one, a
+    `licensed` model needs no token because there is nothing to fetch.
+    """
+    return availability(model) == PRIVATE
+
+
 # ── prompt sets ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -477,6 +551,114 @@ def pixel_budget(model: Optional[str]) -> PixelBudget:
             maximum=int(budget["max"]) if budget.get("max") else None,
             source=f"registry:{repo_id}")
     return DEFAULT_PIXEL_BUDGET
+
+
+# ─── expert routing: WHICH ADAPTER answers this prompt family ───────────────
+#
+# Same registry, same reason again, one more axis. A routed model is not one
+# adapter: `Abyss` is four LoRAs behind one endpoint, and the thing that picks
+# between them is the prompt family the request is about to send — grid, pixel,
+# video, text. See docs/MOE_LORA_DESIGN.md §11 ("the router is the prompt
+# family, and it already exists").
+#
+# It lives HERE rather than in the solver for the reason prompt_version does:
+# which experts exist is a fact about the MODEL. A client that hardcoded four
+# names would send them to v1.2, which serves one adapter under one name, and
+# every request would 404 on a model the endpoint has never heard of.
+#
+# ABSENT MEANS NOT ROUTED, and that is the whole backwards-compatibility story:
+# every published model today declares no `experts`, so `experts()` returns {},
+# `route()` returns the name the caller already had, and the bytes on the wire
+# are identical.
+
+EXPERT_ENV = "CAPTCHA_EXPERT"
+
+#: The prompt families, which are also the only keys an `experts` map may
+#: carry. `pixel` is the click/drag family — `PromptSet.action_prompt` — and is
+#: spelled that way rather than `action_pixel` because it is what ckgate's
+#: PROMPT_MARKERS already calls it, and two spellings of one router is how a
+#: family ends up unrouted on one side.
+PROMPT_FAMILIES = ("pixel", "grid", "video", "text")
+
+
+def experts(model: Optional[str]) -> Dict[str, str]:
+    """Prompt family -> served adapter name, for a ROUTED model.
+
+    `{}` for anything that is not routed, which is every model published so
+    far. Callers apply it unconditionally; an empty map is a no-op.
+
+    Unknown family keys are DROPPED rather than passed through. A typo in the
+    registry would otherwise be a name nothing ever selects — invisible,
+    because the fallback below is a working solve at a slightly worse score,
+    which is the exact failure mode this whole module exists to prevent.
+    """
+    repo_id = canonical_model_id(model)
+    entry = (registered_models().get(repo_id) or {}) if repo_id else {}
+    mapping = entry.get("experts")
+    if not isinstance(mapping, dict):
+        return {}
+    out = {}
+    for family in PROMPT_FAMILIES:
+        name = mapping.get(family)
+        if isinstance(name, str) and name:
+            out[family] = name
+    for key in mapping:
+        if key not in PROMPT_FAMILIES and not str(key).startswith("_"):
+            _warn(f"model {repo_id!r} declares an expert for unknown prompt "
+                  f"family {key!r}; have {', '.join(PROMPT_FAMILIES)}. It will "
+                  "never be selected.")
+    return out
+
+
+def route(model: Optional[str], family: Optional[str], *,
+          pin: Optional[str] = None) -> str:
+    """The `model` string to put on the wire for one request.
+
+    `model` is what the caller would have sent — a served name or a repo id —
+    and is returned unchanged whenever the model is not routed, which is what
+    keeps every existing deployment byte-identical.
+
+    `pin` forces one family for every request, whatever `family` says. That is
+    what a gate wants: serve one arm, grade the types it owns, serve the next.
+    An unknown `pin` RAISES, because a benchmark that silently measured the
+    generalist and reported it as the expert is a number nobody can catch.
+
+    An unrecognised or unmapped `family` degrades to `model` — the generalist —
+    never to another expert and never to an error. A caller prompting in their
+    own words is the expected case for a shipped model, and the day the
+    generation-2 `text` family reached ckgate without a marker, refusing it cost
+    every distorted-text solve in production for a day.
+    """
+    if pin is not None:
+        pin = pin.strip()
+    if pin:
+        if pin not in PROMPT_FAMILIES:
+            raise ValueError(
+                f"unknown expert {pin!r}; have {', '.join(PROMPT_FAMILIES)}")
+        family = pin
+    mapping = experts(model)
+    if not mapping:
+        if pin:
+            raise ValueError(
+                f"expert {pin!r} was requested but model {model!r} declares no "
+                "experts — it serves one adapter under one name. Drop the "
+                "expert, or point the client at a routed model.")
+        return model or ""
+    return mapping.get(family or "") or model or ""
+
+
+def _env_str(name: str) -> Optional[str]:
+    """Like `_env_int`, and read through the same indirection for the same
+    second reason: `test_public_contract.py` finds environment variables by
+    grepping for `os.environ.get(<NAME>)`, so naming the CONSTANT there records
+    `EXPERT_ENV` in the published env list as though it were a variable anyone
+    could set. The literal is picked up from the assignment above instead."""
+    return (os.environ.get(name) or "").strip() or None
+
+
+def expert_pin() -> Optional[str]:
+    """`CAPTCHA_EXPERT`, or None. Empty and unset are the same thing."""
+    return _env_str(EXPERT_ENV)
 
 
 def clear_cache() -> None:
