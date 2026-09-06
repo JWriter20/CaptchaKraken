@@ -88,6 +88,12 @@ def _refuse_licensed(repo_id: str) -> None:
     one place a licensed model's name can plausibly be typed by accident:
     CAPTCHA_LORA_ADAPTER takes any string and `fetch` hands it straight to the
     Hub.
+
+    A `private` model is NOT refused here, and that asymmetry is the point.
+    Its repo exists; the 401 an unauthorised puller gets is the true answer,
+    and pre-empting it with a refusal would stop the holder of an authorised
+    token from fetching weights they are entitled to. `_auth_hint` covers the
+    part that IS worth saying in advance.
     """
     from . import prompts
 
@@ -102,6 +108,18 @@ def _refuse_licensed(repo_id: str) -> None:
         "  To fetch a downloadable model instead, unset CAPTCHA_LORA_ADAPTER "
         "or point it at a published one."
     )
+
+
+def _needs_auth(*repo_ids: "str | None") -> "list[str]":
+    """Which of these repos are registered `availability: private`.
+
+    Reported by `plan()` so `--dry-run` says "this one needs a token" BEFORE
+    the download, rather than leaving a 401 to be read as a typo. Same reason
+    the licensed refusal lives in `plan()` and not at the download call.
+    """
+    from . import prompts
+
+    return [r for r in repo_ids if r and prompts.requires_auth(r)]
 
 
 def plan(
@@ -137,6 +155,7 @@ def plan(
         "lora_adapter": lora_adapter,
         "hf_org": "https://huggingface.co/CaptchaKraken",
         "downloads": [_download_cmd(r) for r in repos],
+        "needs_auth": _needs_auth(*repos),
         "engine_upgrade": _pip_upgrade_cmd() if engine else None,
         "server": {"base_url": base_url, "local": _is_local(base_url)},
     }
@@ -178,6 +197,9 @@ def fetch(
 
     if weights:
         _log(f"Pulling latest weights from {p['hf_org']} (+ base) …")
+        for repo in p["needs_auth"]:
+            _log(f"{repo} is a PRIVATE repo — this needs a HuggingFace token "
+                 "authorised on it (`hf auth login`, or HF_TOKEN).")
         for cmd in p["downloads"]:
             _run(cmd)
 

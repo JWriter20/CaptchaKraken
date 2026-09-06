@@ -254,22 +254,40 @@ def canonical_model_id(model: Optional[str]) -> Optional[str]:
 # client downloads. See models.json's header comment.
 
 PUBLIC = "public"
+PRIVATE = "private"
 LICENSED = "licensed"
 #: Anything outside this set is a typo, and a typo must not read as "public".
 #: The whole class of bug this file exists to prevent is a field that fails
 #: open — `check_prompt_parity.py` rejects an unknown value at release time,
 #: and `is_licensed` below treats one as licensed rather than guessing.
 #:
-#: Spelled out as literals rather than `(PUBLIC, LICENSED)`: the release gate
-#: reads this file by AST so it can run in a training venv with no client
-#: installed, and `ast.literal_eval` cannot follow a name. A tuple of names
-#: reads as "unset" to the gate, which is the check silently not running.
-#: `tests/test_prompt_registry.py` pins that all three constants agree.
-AVAILABILITIES = ("public", "licensed")
+#: Spelled out as literals rather than `(PUBLIC, PRIVATE, LICENSED)`: the
+#: release gate reads this file by AST so it can run in a training venv with no
+#: client installed, and `ast.literal_eval` cannot follow a name. A tuple of
+#: names reads as "unset" to the gate, which is the check silently not running.
+#: `tests/test_prompt_registry.py` pins that all four constants agree.
+AVAILABILITIES = ("public", "private", "licensed")
 
 
 def availability(model: Optional[str]) -> str:
-    """`"public"` or `"licensed"` for `model`. Absent field means public.
+    """`"public"`, `"private"` or `"licensed"` for `model`. Absent means public.
+
+    The three answer ONE question — can these weights be obtained, and by whom:
+
+      public     on the Hub, by anyone.
+      private    on the Hub in a PRIVATE repo. The bytes exist and `fetch`
+                 pulls them, but only for a token this account has authorised.
+                 Everyone else gets 401/404 from the Hub, which is the right
+                 answer and not something to pre-empt with a refusal.
+      licensed   no Hub repo at all. Hosted API or a licence we issue.
+
+    `private` is the newest and it is NOT a softer `licensed`. They differ in
+    what an authorised holder can do, which is the whole reason the field is
+    not a boolean: a licensed model has nothing to download however good your
+    credentials are, so refusing early is a KINDNESS — it replaces a
+    `RepositoryNotFoundError` that reads as "you are not logged in" with the
+    truth. Doing the same to a private model would be a lie, and would make our
+    own admin token unable to pull weights it is entitled to.
 
     An unregistered model is public too: it is not ours, and refusing to
     download a stranger's adapter because we have never heard of it would break
@@ -281,12 +299,26 @@ def availability(model: Optional[str]) -> str:
 
 
 def is_licensed(model: Optional[str]) -> bool:
-    """True if these weights are not obtainable — hosted API or licence only.
+    """True if these weights are NOT OBTAINABLE AT ALL — hosted API or licence.
 
     Fails CLOSED on an unrecognised value. A registry that says `"licenced"`
     must not hand out a proprietary model because of a spelling.
+
+    False for `private`: those weights are downloadable, by the holder of a
+    token we authorised. Proprietary and unobtainable are different facts, and
+    this function answers the second one — `requires_auth` answers the first.
     """
-    return availability(model) != PUBLIC
+    return availability(model) not in (PUBLIC, PRIVATE)
+
+
+def requires_auth(model: Optional[str]) -> bool:
+    """True if pulling these weights needs a token we authorised.
+
+    Separate from `is_licensed` because the two diverge exactly where it
+    matters: a `private` model needs a token AND can be fetched with one, a
+    `licensed` model needs no token because there is nothing to fetch.
+    """
+    return availability(model) == PRIVATE
 
 
 # ── prompt sets ─────────────────────────────────────────────────────────────

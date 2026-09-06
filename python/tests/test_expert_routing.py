@@ -133,25 +133,41 @@ def test_only_the_declared_routed_models_are_routed():
 def test_abyss_routes_all_four_families_to_distinct_experts():
     """Four families, four names, and every one of them resolvable — that last
     part is what `check_prompt_parity.py` gates and what keeps a routed solve
-    from resolving its prompts by guessing."""
+    from resolving its prompts by guessing.
+
+    Resolvable is NOT "resolves to the router". The arms started as four
+    aliases onto `CaptchaKraken/Abyss` because none of them had weights; an arm
+    that has trained and been uploaded has a repo id of its own, and aliasing a
+    real, separately fetchable adapter onto another model's entry would be the
+    mispairing this registry exists to prevent. What has to hold — and what the
+    parity gate enforces — is that every arm lands on a REGISTERED entry
+    declaring the router's prompt generation and pixel band.
+    """
     prompts.clear_cache()
     mapping = prompts.experts("abyss")
     assert set(mapping) == set(prompts.PROMPT_FAMILIES)
     assert len(set(mapping.values())) == 4
     for name in mapping.values():
-        assert prompts.canonical_model_id(name) == "CaptchaKraken/Abyss"
+        assert prompts.canonical_model_id(name) in prompts.registered_models()
         assert prompts.resolve(name).version == "2"
         assert prompts.pixel_budget(name).minimum == 518400
 
 
-def test_abyss_is_still_licensed_now_that_it_is_a_9b():
-    """The base model moved from the 27B to Qwen3.5-9B, which is what every
-    PUBLISHED model is built on. `availability` is what refuses the weights,
-    and it must not have travelled with the base."""
+def test_no_expert_arm_is_public():
+    """An arm is one expert of a proprietary mixture, and it is a 9B like every
+    PUBLISHED model — so nothing about the weights themselves tells them apart.
+    `availability` is the only thing that does, and it must be non-public for
+    every arm however each one is registered.
+
+    `private` and `licensed` are both acceptable here and mean different
+    things: `private` says the bytes are in a private Hub repo an authorised
+    token opens, `licensed` says there is no repo at all. What is refused is
+    `public`, which is the one value that cannot be taken back.
+    """
     prompts.clear_cache()
-    assert prompts.is_licensed("abyss")
+    assert prompts.is_licensed("abyss"), "the router itself must not be public"
     for name in prompts.experts("abyss").values():
-        assert prompts.is_licensed(name), f"{name} is downloadable"
+        assert prompts.availability(name) != prompts.PUBLIC, f"{name} is PUBLIC"
 
 
 def test_an_unrouted_model_returns_the_name_it_was_given():

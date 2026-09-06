@@ -1,6 +1,6 @@
 {
   "python": {
-    "version": "2.7.0",
+    "version": "2.8.0",
     "exports": [
       "ActionPlanner",
       "AppiumTouchBackend",
@@ -295,6 +295,9 @@
     "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
     "registered_models": [
       "CaptchaKraken/Abyss",
+      "CaptchaKraken/Abyss-27B",
+      "CaptchaKraken/Abyss-grid",
+      "CaptchaKraken/Abyss-text",
       "CaptchaKraken/CaptchaKraken-Lora-v1.2",
       "CaptchaKraken/CaptchaKrakenV1_Lora",
       "CaptchaKraken/CaptchaKraken_v1.1",
