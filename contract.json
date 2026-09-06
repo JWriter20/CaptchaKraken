@@ -28,7 +28,7 @@
     ],
     "signatures": {
       "solve_captcha": "(media_path, instruction='', *, puzzle_source='unknown', retry_mode=None, text_mode=False, **kwargs)",
-      "CaptchaSolver.__init__": "(self, model=None, provider='captchaKrakenApi', api_key=None)",
+      "CaptchaSolver.__init__": "(self, model=None, provider='captchaKrakenApi', api_key=None, expert=None)",
       "CaptchaSolver.solve": "(self, media_path, instruction='', puzzle_source='unknown', retry_mode=None, text_mode=False)",
       "CaptchaSolver.solve_keyframes": "(self, keyframe_paths)",
       "PageSolver.__init__": "(self, config=None, solver=None, **solver_kwargs)",
@@ -43,6 +43,7 @@
       "animated_challenge_after_ms",
       "animated_probe_enabled",
       "element_screenshot_timeout_ms",
+      "expert",
       "grid_load_poll_interval_ms",
       "grid_load_timeout_ms",
       "hcaptcha_images_timeout_ms",
@@ -111,6 +112,8 @@
       "insufficient_credits",
       "invalid_api_key",
       "missing_api_key",
+      "model_not_licensed",
+      "model_not_serving",
       "rate_limited",
       "request_too_large",
       "solve_abandoned",
@@ -140,6 +143,7 @@
       "is-cell-selected",
       "is-empty-cell",
       "match-region",
+      "report-outcome",
       "serve",
       "server",
       "solve-animated",
@@ -148,6 +152,7 @@
       "wait-for-cell-loaded"
     ],
     "solve_parser": [
+      "--expert",
       "--puzzle-source",
       "--retry-mode",
       "--text-mode",
@@ -179,6 +184,9 @@
       "python/src/captchakraken/planner.py",
       "python/src/captchakraken/server_manager.py",
       "python/src/captchakraken/solver.py"
+    ],
+    "CAPTCHA_EXPERT": [
+      "python/src/captchakraken/prompts.py"
     ],
     "CAPTCHA_HUMANIZATION": [
       "js/src/humanize.ts",
@@ -242,6 +250,10 @@
     ],
     "CAPTCHA_PROMPTS_NO_FETCH": [
       "python/src/captchakraken/prompts.py"
+    ],
+    "CAPTCHA_REPORT_OUTCOME": [
+      "js/src/solver.ts",
+      "python/src/captchakraken/planner.py"
     ],
     "CAPTCHA_REQUEST_PRIORITY": [
       "python/src/captchakraken/planner.py"
@@ -387,6 +399,7 @@
       "animatedChallengeAfterMs",
       "apiKey",
       "elementScreenshotTimeoutMs",
+      "expert",
       "gridLoadPollIntervalMs",
       "gridLoadTimeoutMs",
       "hcaptchaImagesTimeoutMs",
@@ -442,6 +455,8 @@
       "invalid_api_key",
       "invalid_request",
       "missing_api_key",
+      "model_not_licensed",
+      "model_not_serving",
       "rate_limited",
       "request_too_large",
       "solve_abandoned",

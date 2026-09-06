@@ -160,13 +160,15 @@ class CaptchaSolver:
         model: Optional[str] = None,
         provider: str = "captchaKrakenApi",
         api_key: Optional[str] = None,
+        expert: Optional[str] = None,
     ):
         self.debug = DebugManager(DEBUG)
         # `provider` kept for argv compatibility with the v1 CLI signature.
         if provider not in {"captchaKrakenApi"}:
             self.debug.log(f"Provider {provider!r} ignored; v2 only supports captchaKrakenApi.")
         self.planner = ActionPlanner(
-            model=model, api_key=api_key, debug_callback=self.debug.log
+            model=model, api_key=api_key, debug_callback=self.debug.log,
+            expert=expert,
         )
         self.image_processor = ImageProcessor(None, self.planner, self.debug)
         self._image_size: Optional[Tuple[int, int]] = None

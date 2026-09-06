@@ -470,11 +470,16 @@ export class CaptchaKrakenSolver {
   async solve(page: Page): Promise<SolveResult | void> {
     this.solveSessionId = randomUUID();
     this.budget = new PhaseBudget();
+    // FALSE unless the solve returns a solved result. A solve that throws never
+    // sets it, which is the right default: the widget did not accept, and the
+    // boards that made it throw are exactly the ones worth keeping.
+    let solvedForReport = false;
     try {
       const result = await this.solveImpl(page);
       // Attached HERE rather than at each of the four `isSolved:` sites, so a
       // new early exit cannot forget it.
       if (result) result.phases = this.budget.toObject();
+      solvedForReport = result?.isSolved === true;
       return result;
     } finally {
       // Printed on the way out of every solve, success or failure — a solve
@@ -489,9 +494,53 @@ export class CaptchaKrakenSolver {
       // failure, or timeout) so we never leak a python process between solves.
       this.teardownCvWorker();
       this.cvWorkerReady = null;
+      // BEFORE the id is cleared, so the report names this solve.
+      this.reportOutcome(this.solveSessionId, solvedForReport);
       // Clear last: a stale id leaking into the NEXT solve would merge two
       // separate captchas into one billable attempt.
       this.solveSessionId = null;
+    }
+  }
+
+  /**
+   * Tell the hosted API whether the widget accepted — the one fact the server
+   * cannot see for itself, since a wrong answer reaches it as a 200 with
+   * well-formed JSON in it.
+   *
+   * THROUGH THE PYTHON CLI, not a `fetch` here. The endpoint, the credential,
+   * the extra-header handling and the "one 404 and stop asking" rule all live
+   * in `planner.report_outcome`; a second copy in TypeScript would agree with
+   * it until one of them was edited. That is the drift `model-name.ts` exists
+   * to prevent, on the same seam, and this port already crosses that subprocess
+   * boundary for every model call.
+   *
+   * NOT AWAITED, and detached. The solve is over and its result is decided, so
+   * nothing here may add latency to what the caller gets back or keep the
+   * process alive past it. `unref()` is what makes the second true.
+   */
+  private reportOutcome(sessionId: string | null, solved: boolean): void {
+    if (!sessionId) return;
+    // CHECKED HERE, NOT ONLY IN PYTHON. The Python side honours the same
+    // variable, but this port spawns a PROCESS to ask it — and against an
+    // endpoint with no such route (a local vLLM, every fixture run) that
+    // process exists only to be told 404. Python's "one 404 and stop asking"
+    // latch cannot help here either, because each solve is a fresh process.
+    // Tier 3 sets this, and drives ~100 solves per run on one box.
+    if (process.env.CAPTCHA_REPORT_OUTCOME === '0') return;
+    try {
+      const { cliRoot, py } = this.resolveCli();
+      const child = spawn(
+        py,
+        ['-m', 'captchakraken.cli', 'report-outcome', sessionId, solved ? 'solved' : 'failed'],
+        { cwd: cliRoot, env: cliEnv(cliRoot), detached: true, stdio: 'ignore' },
+      );
+      // A report that cannot be sent is not the caller's problem, and an
+      // unhandled 'error' event on a spawn is an uncaught exception in Node.
+      child.on('error', () => {});
+      child.unref();
+    } catch {
+      // resolveCli throws when the bundled engine is missing, which is already
+      // a loud failure everywhere it matters. Not here.
     }
   }
 
@@ -3155,6 +3204,10 @@ export class CaptchaKrakenSolver {
       // distorted-text prompt and skip grid detection. The picture alone cannot
       // decide this — see the textMode note in solveSingle.
       textMode,
+      // Undefined unless the caller pinned one, which is the normal case: a
+      // routed model picks its own expert from the prompt family the CLI is
+      // about to send.
+      expert: this.config.expert,
     });
 
     console.log(
