@@ -193,11 +193,37 @@ def api_key() -> str:
 # CaptchaKraken_v1.1, so nothing moves until a newer model is registered — at
 # which point that IS the intent.
 def _registry_default(field: str) -> Optional[str]:
-    """`field` from the registry's `latest` model entry, or None."""
+    """`field` from the entry of the model this process will actually serve.
+
+    THE PIN DECIDES THE ENTRY, not just the adapter. This read `latest`
+    unconditionally, so `CAPTCHA_LORA_ADAPTER` moved the adapter and nothing
+    else: the base weights to load it onto, the served `lora_name` to put in
+    the request, and the revision all still came from whichever model happened
+    to be `latest`.
+
+    That was survivable while every registered model was a 9B on one base
+    answering to one served name. It stopped being survivable the day the
+    registry gained `CaptchaKraken/Abyss-27B` — a Qwen3.8-**27B** — because
+    pinning it downloaded a 9B base, tried to load a 27B adapter onto it, and
+    sent `captcha-v12` as the model name. Nothing in the client errors on that;
+    it errors deep inside vLLM as a shape mismatch, or not at all if the
+    endpoint happens to serve something by that name. Same shape for every
+    expert arm, whose whole point is a `lora_name` of its own.
+
+    An UNREGISTERED pin still falls back to `latest`. A self-hoster's own
+    adapter is not in our registry and never will be; changing what they
+    resolve to would be a break with no benefit.
+    """
     try:
         from . import prompts  # local: prompts imports nothing from config
 
-        entry = prompts.registered_models().get(prompts.latest_model() or "")
+        models = prompts.registered_models()
+        entry = None
+        pin = os.getenv("CAPTCHA_LORA_ADAPTER") or os.getenv("CAPTCHA_LORA_NAME")
+        if pin:
+            entry = models.get(prompts.canonical_model_id(pin) or "")
+        if entry is None:
+            entry = models.get(prompts.latest_model() or "")
         value = (entry or {}).get(field)
         return value if isinstance(value, str) else None
     except Exception:  # noqa: BLE001 — a broken registry falls back, never raises
