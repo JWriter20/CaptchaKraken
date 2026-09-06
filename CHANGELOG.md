@@ -3,7 +3,68 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [Unreleased]
+## [2.8.0] - 2026-09-06
+
+A model can now be a MIXTURE rather than a single adapter, and a model can now
+say its weights are not yours to download. Both are facts about the model that
+used to live in the caller's head.
+
+### Added
+
+- **Expert routing — `experts` in `models.json`.** A routed model is several
+  LoRAs behind one endpoint, and the thing that picks between them is the
+  **prompt family the request is about to send** (`grid`, `pixel`, `video`,
+  `text`). That router already existed, so a request names its own expert with
+  no DOM access, no image classifier and no cooperation from the caller. The
+  family is a per-REQUEST argument, never solver state: a real solve changes
+  family mid-solve, e.g. a board that reads as a grid and then a click round
+  after the grid is rejected.
+
+  **ABSENT MEANS NOT ROUTED, and that is the whole compatibility story.** Every
+  model published to date declares no `experts`, so the client sends the single
+  `lora_name` on every request exactly as it did before this field existed, and
+  the bytes on the wire are identical.
+
+- **Pin one arm — `expert=` on `CaptchaSolver` / `PageSolverConfig.expert` /
+  `CaptchaKrakenConfig.expert`, `--expert`, `CAPTCHA_EXPERT`.** What a per-arm
+  benchmark wants. Pinning against a single-adapter model **raises at
+  construction** rather than being ignored: a run that quietly measured the
+  generalist and reported it as the expert is a number nobody can catch.
+
+- **`availability: "private"` — a third value, because the weights now exist.**
+  `public` / `private` / `licensed` answer one question: can these weights be
+  obtained, and by whom. `private` means the bytes are on the Hub and a token
+  this account authorised opens them; `licensed` means there is no repo at all.
+  So `fetch` refuses `licensed` and does **not** refuse `private` — an early
+  refusal is a kindness for a model you could never download and a lie for one
+  you can. `plan()` reports `needs_auth`, so `--dry-run` says "this needs a
+  token" before the 401 rather than after it. An unrecognised value reads as
+  `licensed`: both halves fail closed.
+
+### Fixed
+
+- **Grid detection estimates the pitch over gaps that could be a cell**, and
+  refuses a shape no vendor ships. The previous pass needed every interior
+  divider to be visible, so a board whose middle cells happened to be flat was
+  read as no grid at all — the solver then saw nothing to click. Measured over
+  the reCAPTCHA 3x3 corpus, this also lowers phantom selections on fresh boards
+  (15 -> 12 over 1062 tiles); each phantom was a tile the solver would refuse
+  to click.
+- **Keyframe stills caught between two boards are dropped.** A frame sampled
+  during the vendor's transition holds half of each board and is answerable as
+  neither.
+
+### Changed
+
+- **The hosted `captcha` alias means the model we actually serve.** It had gone
+  on naming the v1.1 weights that share the name as a local vLLM alias, so a
+  hosted caller resolved prompts for a model the endpoint had stopped serving.
+- **An unmapped or unrecognised prompt family degrades to the generalist,
+  never a 400.** A caller prompting in their own words is the expected case for
+  a shipped model; refusing one cost every distorted-text solve in production
+  for a day.
+
+## [2.7.0] - 2026-08-29
 
 Humanisation stops being something the driver *is* and becomes something it
 *has*. It used to be wired straight into the solver: every gesture was a
