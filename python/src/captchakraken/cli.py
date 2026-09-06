@@ -505,6 +505,8 @@ def _handle_solve_animated() -> bool:
                              "rate the training data was collected at).")
     parser.add_argument("--model", default=None)
     parser.add_argument("--api-key", default=None)
+    parser.add_argument("--expert", default=None,
+                        choices=["pixel", "grid", "video", "text"])
     args = parser.parse_args(sys.argv[2:])
 
     frames = _frames_in(args.frames_dir)
@@ -527,7 +529,8 @@ def _handle_solve_animated() -> bool:
             paths = [str(os.path.abspath(p))
                      for p in write_keyframes(kfset, kf_dir, stem="challenge")]
 
-            solver = CaptchaSolver(model=args.model, api_key=args.api_key)
+            solver = CaptchaSolver(model=args.model, api_key=args.api_key,
+                                   expert=args.expert)
             result = solver.solve_keyframes(paths)
 
         action_data = [a.model_dump() for a in result]
@@ -627,6 +630,44 @@ def _handle_match_region() -> bool:
     tol = float(sys.argv[6]) if len(sys.argv) > 6 else None
     print(json.dumps(_match_region(sys.argv[2], sys.argv[3],
                                    float(sys.argv[4]), float(sys.argv[5]), tol)))
+    return True
+
+
+def _handle_report_outcome() -> bool:
+    """`captchakraken report-outcome <session-id> solved|failed`
+
+    Tell the hosted API whether the widget accepted this solve. The one fact the
+    server cannot see for itself: a wrong answer arrives there as a 200 with
+    well-formed JSON in it, and only the driver watched the widget.
+
+    THIS EXISTS FOR THE TypeScript PORT. The Python driver calls
+    `planner.report_outcome` in-process at the end of `PageSolver.solve`; the TS
+    driver spawns the CLI, which is the same subprocess boundary every other
+    model call already crosses. One implementation of the endpoint, the
+    credential and the extra headers, rather than a second copy in TypeScript
+    that agrees with this one until one of them is edited — the drift
+    `model-name.ts` already exists to prevent, on the same seam.
+
+    ALWAYS EXITS 0. The caller is a `finally` block in a driver whose solve has
+    already finished, so there is no outcome here worth failing over, and a
+    non-zero exit would make a self-hosted user's logs report an error on every
+    solve. What happened is on stdout for anyone who wants it.
+    """
+    if len(sys.argv) <= 1 or sys.argv[1] != "report-outcome":
+        return False
+    if len(sys.argv) < 4 or sys.argv[3] not in ("solved", "failed"):
+        print(json.dumps({
+            "error": "Usage: captchakraken report-outcome <session-id> solved|failed"
+        }), file=sys.stderr)
+        sys.exit(1)
+    delivered = False
+    try:
+        from .planner import ActionPlanner
+        delivered = ActionPlanner().report_outcome(sys.argv[2], sys.argv[3] == "solved")
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        print(json.dumps({"reported": False, "error": str(exc)}))
+        return True
+    print(json.dumps({"reported": bool(delivered)}))
     return True
 
 
@@ -841,6 +882,8 @@ def main():
         return
     if _handle_track_piece():
         return
+    if _handle_report_outcome():
+        return
 
     parser = argparse.ArgumentParser(description="CaptchaKraken v2 (vLLM)")
     parser.add_argument("image_path", help="Path to the captcha image or video")
@@ -867,8 +910,11 @@ def main():
         "--puzzle-source",
         default="unknown",
         choices=["hcaptcha", "recaptcha", "unknown"],
-        help="Vendor hint from the Playwright wrapper. hCaptcha skips grid detection "
-        "(find_grid false-positives on the header/footer bands of click puzzles).",
+        help="Vendor hint from the Playwright wrapper. Constrains which grid "
+        "shapes a detection may be solved as: hCaptcha ships only a 3x3, so a "
+        "16-cell lattice on one is a false positive (find_grid latches onto the "
+        "header/footer bands of click puzzles). An unrecognised or absent hint "
+        "allows every shape, which is what GeeTest and Prosopo boards report.",
     )
     parser.add_argument(
         "--retry-mode",
@@ -878,6 +924,17 @@ def main():
         "with an under-selection error (e.g. reCAPTCHA's 'Please select all matching "
         "images'). Switches the grid prompt to a more aggressive variant that "
         "instructs the LoRA to look at the full grid for tiles it missed.",
+    )
+    parser.add_argument(
+        "--expert",
+        default=None,
+        choices=["pixel", "grid", "video", "text"],
+        help="Force one expert of a ROUTED model (Abyss) instead of letting the "
+        "prompt family choose. Routing is automatic and this is the override a "
+        "benchmark needs: serve one arm, grade the types it owns, serve the "
+        "next. Refused against a model that serves a single adapter, because "
+        "quietly measuring the generalist and reporting it as the expert is a "
+        "number nobody can catch. Also settable as CAPTCHA_EXPERT.",
     )
     parser.add_argument(
         "--text-mode",
@@ -897,7 +954,8 @@ def main():
 
     try:
         with timed("cli.total"):
-            solver = CaptchaSolver(model=args.model, api_key=args.api_key)
+            solver = CaptchaSolver(model=args.model, api_key=args.api_key,
+                                   expert=args.expert)
             result = solver.solve(
                 args.image_path,
                 puzzle_source=args.puzzle_source,

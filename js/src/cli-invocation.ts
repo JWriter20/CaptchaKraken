@@ -31,6 +31,8 @@ export interface SolveInvocation {
   puzzleSource: string;
   retryMode?: string | null;
   textMode?: boolean;
+  /** One expert of a routed model, or undefined to route by prompt family. */
+  expert?: string | null;
 }
 
 /**
@@ -38,7 +40,8 @@ export interface SolveInvocation {
  * supplied by `solveEnv` instead.
  */
 export function buildSolveArgs(invocation: SolveInvocation): string[] {
-  const { imagePath, model, puzzleSource, retryMode, textMode } = invocation;
+  const { imagePath, model, puzzleSource, retryMode, textMode, expert } =
+    invocation;
   const args = [
     '-m',
     'captchakraken.cli',
@@ -49,6 +52,9 @@ export function buildSolveArgs(invocation: SolveInvocation): string[] {
   ];
   if (retryMode) args.push(`--retry-mode=${retryMode}`);
   if (textMode) args.push('--text-mode');
+  // Only when set. An absent flag is what lets the Python side route by prompt
+  // family, and passing `--expert=` would be an empty choice rather than none.
+  if (expert) args.push(`--expert=${expert}`);
   return args;
 }
 

@@ -45,9 +45,10 @@
 ## Watch it work
 
 Thirteen puzzle types, each driven on the vendor's own **public demo page**
-through the hosted API, with every attempt scored. These are the same clips that
-run on [captchakraken.com](https://captchakraken.com) — recorded 2026-08-19
-against **captcha-v12**.
+through the hosted API. Twelve of the thirteen had every attempt scored; the one
+that did not is marked. These are the same clips that run on
+[captchakraken.com](https://captchakraken.com) — recorded 2026-08-19 against
+**captcha-v12**, the adapter the hosted API serves today.
 
 Three things worth knowing before you read the numbers:
 
@@ -65,6 +66,11 @@ Three things worth knowing before you read the numbers:
 A round the vendor waved through without a puzzle is not in these counts, and
 neither is one we could not classify — only rounds where a challenge was on
 screen and had to be solved.
+
+One row is marked **not scored**. hCaptcha deals its drag puzzle too rarely for
+us to have collected a scored run of it, so that clip is a demonstration and
+carries no count or median at all. It is labelled where it appears rather than
+given numbers that would look exactly like the measured ones.
 
 <details open>
 <summary><b>hCaptcha</b> — 4 puzzle types</summary>
@@ -85,9 +91,11 @@ One picture instead of tiles: click or drag the pieces the prompt names. hCaptch
   <a href="https://captchakraken.com/#demos">Watch the hCaptcha canvas puzzle solve</a>
 </video>
 
-**Drag puzzle** — 9/10 solved · 9.0s median
+**Drag puzzle** — ⚠️ *not scored — see above*
 
-Pick a character up and carry it to its match hidden behind the lines. hCaptcha deals this one rarely.
+Pick a character up and carry it to its match hidden behind the lines. hCaptcha
+deals this one so rarely we have not been able to record a scored run of it. The
+clip is real; there is no count or median to publish beside it yet.
 
 <video src="https://captchakraken.com/art/demo/hcaptcha_truedrag.webm" width="520" controls muted loop playsinline preload="none">
   <a href="https://captchakraken.com/#demos">Watch the hCaptcha drag puzzle solve</a>
@@ -311,6 +319,21 @@ Check your setup any time with `captchakraken server status`. Every browser
 framework (Playwright, Patchright, camoufox, Puppeteer) and the background
 watcher are in **[docs/usage.md](./docs/usage.md)**.
 
+**On a phone?** How the solver *performs* the answer is a choice of input
+device, not a realism dial:
+
+```typescript
+new CaptchaKrakenSolver({ humanization: 'mobile' })   // touch events, finger kinematics
+new CaptchaKrakenSolver({ humanization: 'none' })     // straight to the DOM effect
+new CaptchaKrakenSolver({ humanizer: myOwn })         // yours
+```
+
+`mobile` never touches `page.mouse` — a mousemove at a touch-only widget is the
+wrong event, not a weaker one. It drives a Chromium page with `hasTouch: true`,
+or a real handset over **Appium / WebdriverIO / Selenium** via `touchDriver`.
+Full details in
+[docs/usage.md § How it moves](./docs/usage.md#how-it-moves--mouse-mobile-none-or-yours).
+
 **Stay current** — pull the latest model + engine in one step, no reinstall:
 
 ```bash
@@ -347,16 +370,26 @@ set, so they are the likeliest to move.
 
 ### Accuracy, measured
 
-> 🔬 **Being re-measured.** The figures previously published here were taken on
-> 2026-07-27 under an eval split that let some hand-labeled captures reach
-> training, so they measured memorisation as well as skill. That split was
-> replaced — **every** real capture is now held out and nothing hand-labeled
-> trains — and the numbers are being re-taken against the new held-out set on
-> the next full training run. Rather than restate figures we no longer stand
-> behind, this section is blank until that lands.
+**The numbers we publish are the clips at the top of this page.** Each one is
+that puzzle driven on the vendor's own public demo page through the hosted API,
+with every attempt scored — counts, not percentages, and a median solve time
+computed from the run rather than from the footage. Recorded 2026-08-19 against
+`captcha-v12`, the adapter the hosted API serves today.
 
-What the measurement will be, so you can hold us to it: exact set match — every
-correct tile and no incorrect ones, no partial credit, because a
+That is deliberately the *end-to-end* number: detect, read, click, verify, and
+the vendor accepting. It is the one you can hold us to, because it is the one
+you experience.
+
+An earlier revision of this section carried per-type **model** accuracy taken on
+2026-07-27. Those figures were withdrawn — the eval split of the day let some
+hand-labeled captures reach training, so they measured memorisation alongside
+skill. The split was replaced (**every** real capture is held out; nothing
+hand-labeled trains) and the model has been re-measured against it since, but we
+are not restating a bare model-accuracy percentage here: on its own it tells you
+very little about whether a captcha clears. The clips do.
+
+The method behind them, so you can reproduce the shape of it: exact set match —
+every correct tile and no incorrect ones, no partial credit, because a
 partially-correct grid answer is a rejected captcha — taken over the full
 customer path (HTTPS → gateway → vLLM) rather than a local checkpoint, against
 captures the adapter has never trained on.
@@ -546,7 +579,7 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 |---|---|
 | ☁️ [Hosted API](./docs/hosted-api.md) | Sign in, keys, pricing, per-session billing, error codes |
 | 📦 [Self-hosting](./docs/self-hosting.md) | `setup.sh`, model sizes, server management, config, **updating** |
-| 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, the Python CLI, migrating from v1 |
+| 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, **mouse / mobile / no humanization**, the Python CLI, migrating from v1 |
 | ⚙️ [How it works](./docs/how-it-works.md) | The solve pipeline, `find_grid`, the freshness guard, dedup |
 | 📊 [Performance](./docs/performance.md) | Accuracy, speed-by-device tables, IP-reputation & rate limits |
 | 🗺️ [Roadmap](./docs/roadmap.md) | What shipped, what's in progress, and what's planned |
@@ -563,7 +596,11 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
   animated challenges, typed text — as a LoRA and as **Sunlight** / **Twilight**
   merges, all public on [HuggingFace](https://huggingface.co/CaptchaKraken).
 - 🟡 **In progress** — **Abyss**, the next hosted-only model.
-- ⚪ **Planned** — 🧩 more non-grid hCaptcha puzzles (drag, path, tetris-fit).
+- ⚪ **Planned** — 🎯 higher accuracy on the **freehand hCaptcha puzzles**
+  (connect-the-path and the numbered-line / missing-piece drags), which are the
+  families the model is least reliable on. Every hCaptcha family we ship is
+  already routed and driven — this is about how often they land, not whether
+  they are attempted.
 
 The visual, always-current version is in **[docs/roadmap.md](./docs/roadmap.md)**.
 📣 **[Watch the repo](https://github.com/JWriter20/CaptchaKraken)** to hear about

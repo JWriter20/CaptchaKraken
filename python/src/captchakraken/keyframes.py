@@ -511,6 +511,96 @@ def _detect_cycle(
     return state_reps, per_frame
 
 
+def _drop_smeared(
+    frames: Sequence[np.ndarray], indices: Sequence[int], params: KeyframeParams
+) -> List[int]:
+    """Drop an index caught BETWEEN two holds, when both of them are already
+    represented in the cut.
+
+    These clips hold a picture, swap, hold the next. An evenly spaced sample can
+    land on the instant of the swap — a board part-way between two states, which
+    is a picture the puzzle never actually shows. If the model already has the
+    board before the swap AND the board after it, that frame adds nothing but a
+    smear; if either endpoint is missing, it is the only thing standing in for a
+    state and must stay.
+
+    THE MACHINERY ALREADY EXISTED AND THIS PATH NEVER ASKED IT. `_anchor_runs`
+    plus `min_hold_frames` is how `_detect_cycle` separates holds from
+    transitions (it labels the latter -1 in `frame_states`), and
+    `min_hold_frames` had exactly one reader — inside `_detect_cycle`. On the
+    `even` path the parameter was declared, serialised into every manifest, and
+    inert.
+
+    WHY THE TEST IS "BOTH NEIGHBOURING HOLDS ARE KEPT" AND NOT A PIXEL DIFF.
+    Two earlier versions were measured against both trees and both were wrong:
+
+      * *Snap to the nearest held frame* turned `[0, 16, 39]` into `[0, 16]` on
+        six eval clips, dropping a SCREEN. A page that never reaches the model is
+        unanswerable whenever the target lived on it.
+      * *Drop when some other still is within `distinct_ratio`* cut
+        `hcaptcha_tile_flip_video` from 6 stills to 3, because two boards of that
+        puzzle differ by ONE TILE — well inside `distinct_ratio` — so a diff
+        threshold cannot tell "the same picture again" from "the next board".
+        EXPECTED_SLICING says it directly: fewer than 6 "means dedup merged two
+        boards that differ only by the tile mid-flip, and that tile is frequently
+        the answer".
+
+    Anchoring on the HOLDS either side asks the question that actually matters —
+    does the model already see both ends of this swap — and needs no threshold of
+    its own.
+
+    A clip with no holds at all (a rotation, a continuous fade, anything in
+    permanent motion) has no transitions to speak of and is returned untouched.
+    """
+    runs = _anchor_runs(frames, params.steady_ratio)
+    holds = [(s, e) for (s, e) in runs if (e - s + 1) >= params.min_hold_frames]
+    if not holds:
+        return list(indices)               # nothing holds; nothing is a smear
+
+    # Holds showing the same picture are ONE state — the same merge
+    # `_detect_cycle` does, at the same threshold. It matters here because a
+    # cycle revisits: on a real `icon_2x2` clip the hold at 53..74 is the
+    # opening board coming back, so the still at index 0 already covers it.
+    # Counting holds instead of states kept a smear whose neighbouring picture
+    # was on screen the whole time.
+    state_of_hold: List[int] = []
+    reps: List[int] = []
+    for start, end in holds:
+        rep = _medoid(frames, list(range(start, end + 1)))
+        for k, existing in enumerate(reps):
+            if frame_diff_ratio(frames[rep], frames[existing]) <= params.steady_ratio:
+                state_of_hold.append(k)
+                break
+        else:
+            reps.append(rep)
+            state_of_hold.append(len(reps) - 1)
+
+    def hold_of(i: int) -> Optional[int]:
+        for k, (s, e) in enumerate(holds):
+            if s <= i <= e:
+                return k
+        return None
+
+    covered = {state_of_hold[h] for h in (hold_of(i) for i in indices)
+               if h is not None}
+    kept: List[int] = []
+    for i in indices:
+        if hold_of(i) is not None:
+            kept.append(i)
+            continue
+        before = max((k for k, (s, e) in enumerate(holds) if e < i), default=None)
+        after = min((k for k, (s, e) in enumerate(holds) if s > i), default=None)
+        # Only a swap BETWEEN two kept holds is redundant. A transition at the
+        # very start or end of a clip has an endpoint that was never recorded,
+        # so it is evidence of a state and stays.
+        if before is not None and after is not None \
+                and state_of_hold[before] in covered \
+                and state_of_hold[after] in covered:
+            continue
+        kept.append(i)
+    return kept
+
+
 def extract_keyframes(
     frames: Sequence[np.ndarray],
     *,
@@ -548,12 +638,21 @@ def extract_keyframes(
         )
 
     indices = _even_indices(n, p.max_keyframes)
+    # BEFORE dedup, so a smear does not spend budget a real state could use...
+    indices = _drop_smeared(frames, indices, p)
     if p.dedupe:
         # Applied to `even` only. `cycle` states are distinct by construction (the
         # merge in `_detect_cycle` uses this same threshold) and `static` is one
         # frame, so there is nothing to remove; and dropping a cycle keyframe here
         # would desynchronise `frame_states`, which indexes keyframes by position.
         indices = _distinct_indices(frames, indices, p)
+        # ...AND AFTER, because `_distinct_indices` BACKFILLS. Dedup frees
+        # budget and the backfill walks the clip for anything not already
+        # represented — which is exactly what a smeared frame is, so it gets
+        # picked straight back up. Measured on a 3-hold fixture: filtering only
+        # before dedup returned [0, 10, 12, 21, 25] with 10 and 21 the two
+        # smears the first pass had just removed.
+        indices = _drop_smeared(frames, indices, p)
     return KeyframeSet(
         mode="even",
         keyframes=[

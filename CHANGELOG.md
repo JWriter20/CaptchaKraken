@@ -3,6 +3,204 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [2.8.0] - 2026-09-06
+
+A model can now be a MIXTURE rather than a single adapter, and a model can now
+say its weights are not yours to download. Both are facts about the model that
+used to live in the caller's head.
+
+### Added
+
+- **Expert routing — `experts` in `models.json`.** A routed model is several
+  LoRAs behind one endpoint, and the thing that picks between them is the
+  **prompt family the request is about to send** (`grid`, `pixel`, `video`,
+  `text`). That router already existed, so a request names its own expert with
+  no DOM access, no image classifier and no cooperation from the caller. The
+  family is a per-REQUEST argument, never solver state: a real solve changes
+  family mid-solve, e.g. a board that reads as a grid and then a click round
+  after the grid is rejected.
+
+  **ABSENT MEANS NOT ROUTED, and that is the whole compatibility story.** Every
+  model published to date declares no `experts`, so the client sends the single
+  `lora_name` on every request exactly as it did before this field existed, and
+  the bytes on the wire are identical.
+
+- **Pin one arm — `expert=` on `CaptchaSolver` / `PageSolverConfig.expert` /
+  `CaptchaKrakenConfig.expert`, `--expert`, `CAPTCHA_EXPERT`.** What a per-arm
+  benchmark wants. Pinning against a single-adapter model **raises at
+  construction** rather than being ignored: a run that quietly measured the
+  generalist and reported it as the expert is a number nobody can catch.
+
+- **`availability: "private"` — a third value, because the weights now exist.**
+  `public` / `private` / `licensed` answer one question: can these weights be
+  obtained, and by whom. `private` means the bytes are on the Hub and a token
+  this account authorised opens them; `licensed` means there is no repo at all.
+  So `fetch` refuses `licensed` and does **not** refuse `private` — an early
+  refusal is a kindness for a model you could never download and a lie for one
+  you can. `plan()` reports `needs_auth`, so `--dry-run` says "this needs a
+  token" before the 401 rather than after it. An unrecognised value reads as
+  `licensed`: both halves fail closed.
+
+### Fixed
+
+- **Grid detection estimates the pitch over gaps that could be a cell**, and
+  refuses a shape no vendor ships. The previous pass needed every interior
+  divider to be visible, so a board whose middle cells happened to be flat was
+  read as no grid at all — the solver then saw nothing to click. Measured over
+  the reCAPTCHA 3x3 corpus, this also lowers phantom selections on fresh boards
+  (15 -> 12 over 1062 tiles); each phantom was a tile the solver would refuse
+  to click.
+- **Keyframe stills caught between two boards are dropped.** A frame sampled
+  during the vendor's transition holds half of each board and is answerable as
+  neither.
+
+### Changed
+
+- **The hosted `captcha` alias means the model we actually serve.** It had gone
+  on naming the v1.1 weights that share the name as a local vLLM alias, so a
+  hosted caller resolved prompts for a model the endpoint had stopped serving.
+- **An unmapped or unrecognised prompt family degrades to the generalist,
+  never a 400.** A caller prompting in their own words is the expected case for
+  a shipped model; refusing one cost every distorted-text solve in production
+  for a day.
+
+## [2.7.0] - 2026-08-29
+
+Humanisation stops being something the driver *is* and becomes something it
+*has*. It used to be wired straight into the solver: every gesture was a
+`page.mouse.*` call with a Bezier trajectory in front of it and a random sleep
+behind it, and there was no way to ask for anything else — which meant no way to
+drive a phone, and no way to turn it off when your stack already did it.
+
+### Added
+
+- **`humanization: 'mouse' | 'mobile' | 'none'`** (`humanization=` in Python),
+  and **`humanizer`** for one of your own. Unset reads `CAPTCHA_HUMANIZATION`,
+  then defaults to `mouse` — which is byte-for-byte what the driver did before,
+  so nothing moves for an existing caller. The env var deliberately loses to
+  anything set in code: which mode is right is a property of the page you are
+  driving, not a deployment decision.
+
+- **`'mobile'` — real touch events with finger kinematics.** It never touches
+  `page.mouse`. A mousemove at a touch-only widget is the *wrong event*, not a
+  weaker one: the page's touch handlers never fire and the solve fails for a
+  reason nothing reports. What it does instead:
+  - **no hover.** A move with nothing on the glass dispatches nothing at all,
+    and the reCAPTCHA tile-hover and the idle drift during inference switch
+    themselves off rather than emitting a cursor that does not exist.
+  - **taps wobble.** A finger held for 90 ms does not report one unchanging
+    coordinate — the contact centroid rolls a pixel or two under pressure. A tap
+    with zero movement between `touchstart` and `touchend` is a synthetic tap.
+  - **`generate_swipe`**, a separate motion model rather than the mouse one
+    retuned. A finger leaves fast and brakes late (where a mouse hand is
+    symmetric), bows far less, wanders low-frequency instead of jittering with
+    speed, and **never overshoots** — that tell is a hand arriving past a target
+    it cannot see under the cursor, and a finger occludes its own target.
+  - Fitts's law with touch constants: a wider effective target (a fingertip is
+    the 44 pt / 48 dp both platform guidelines are built around) and a slower
+    intercept, so every gesture takes longer than its mouse equivalent.
+
+- **Appium / WebdriverIO / Selenium support**, via `touchDriver`
+  (`touch_driver=`). Gestures go out as **W3C pointer actions** with
+  `pointerType: "touch"`, and a whole swipe is **one action chain with
+  per-sample durations** — the kinematics are reproduced by the device rather
+  than by a loop round-tripping over the wire, over which a 90 Hz path is not
+  90 Hz at all. Press and release stay separate calls, because W3C input state
+  persists per session and that is what lets the puzzle-slider driver press,
+  screenshot, steer, screenshot and only then let go. Nothing imports Selenium:
+  the payload is the raw protocol one.
+  `touchTransform` / `touch_transform` maps CSS pixels onto screen pixels
+  (`{scale, origin}`) — upstream is whatever `boundingBox()` returned, a handset
+  wants device coordinates, and the difference is `devicePixelRatio` plus the
+  chrome above the webview. Neither is guessable from inside the solver, so it
+  is a parameter and not a heuristic.
+
+- **`'none'`** — one move, one press, one release, and text in a single `fill()`.
+  Roughly an order of magnitude faster on a slider, and detectable by anything
+  scoring pointer telemetry. That is the trade, stated plainly: it is for your
+  own fixtures, and for stacks that humanise elsewhere. Camoufox is the concrete
+  case — its `humanize` juggler re-humanises every `mouse.move()` it is handed,
+  and composing the two measured **82.1 s against 13.4 s** on one geetest slide.
+
+- **`startingMousePosition` is now honoured on the first gesture too.** The
+  camoufox origin-seeding step used to overwrite it with the window centre.
+
+- **`SolveResult.phases`** — where a solve's wall clock went, in milliseconds
+  per phase (`detect`, `settle`, `inference`, `mouse`, `await-verdict`, …), on
+  both ports. The same partition `CAPTCHA_TIMINGS=1` prints to stderr, handed
+  back to you instead: "the solve took 12s" is not actionable and "the settle
+  monitor spent 4s of it" is. Phases nest, so one inside a differently-named one
+  counts under both — the cursor drifting over the widget *while* the model
+  generates is genuinely mouse time and inference time — and the totals can
+  therefore exceed the elapsed time.
+
+- **`stepScreenshotTimeoutMs`** (default 2000) — how long an `onStep`
+  observer's snapshot may take. Separate from `elementScreenshotTimeoutMs`,
+  which is sized for the picture the model reads. Ignored entirely when no
+  `onStep` is set.
+### Fixed
+
+- **`captchakraken.__version__` said `2.6.0` while 2.6.1 was on PyPI and npm.**
+  Nothing compared it against the manifest pip actually reads, so every caller
+  branching on it — and every bug report quoting it — named a release that was
+  not the one running. Now checked by a test.
+
+- **The MCP server told every client it was `0.1.0`** while npm published
+  `0.1.2`. `serverInfo.version` is what an MCP client logs and what a user
+  quotes in a bug report, so the drift pointed every report at the wrong
+  release. The CI handshake smoke now compares the advertised version against
+  `package.json` and fails the build on a mismatch — the literal had nothing
+  comparing it to anything, which is why it drifted twice without notice.
+
+- **`CaptchaKrakenAPIError` is exported from the Python package root**, as it
+  already was from the TypeScript one. `docs/hosted-api.md` tells every caller
+  to branch on its `.code`, and that recipe did not work in one of the two
+  languages the docs claim parity for: the type existed only at
+  `captchakraken.errors`. Purely additive — the old import path still works, and
+  `errors` imports nothing but `typing`, so this adds no dependency floor.
+
+### Changed
+
+- **The pointer position moved out of the solver** and into the humanizer, in
+  both ports — a mode that dispatches no motion still has to answer where the
+  next gesture starts. `SolveResult.finalMousePosition` /
+  `final_mouse_position` are unchanged.
+
+- **Every inter-gesture wait is named** (`tap`, `between`, `grab`, `drop`,
+  `probe`, `settle`, `key`) and comes from the mode's own table, rather than
+  from a literal at each call site. A finger dwells on a tap about four times as
+  long as a mouse button is held, and neither number means anything to a caller
+  who turned humanisation off. An unknown name yields no wait rather than
+  raising, so a new pause site cannot break a humanizer written against an older
+  release.
+
+- **Solves are markedly faster, without moving any humanisation.** Nine waits
+  came out of the driver, all of them found by asking `SolveResult.phases`
+  where the time was going on solves that already *worked*. Across the full
+  fixture suite, both ports: median solve 6.8s -> 5.7s, p95 33.6s -> 21.6s.
+  No pause table, trajectory constant or gesture changed.
+
+  - the reCAPTCHA grid driver now reports the Verify press as an interaction,
+    so the caller polls for the vendor's verdict instead of taking the
+    no-interaction wait — and can no longer abort a correctly submitted answer
+    with "performed no interactions";
+  - its round 1 no longer re-waits for a grid the caller has just waited for;
+  - there is ONE wait after a round and it is polled, not slept: a round that
+    finished the captcha now ends when the widget goes, not 1200ms later;
+  - the widget's submit control is travelled to once, not twice;
+  - the planner keeps ONE pooled connection instead of re-dialling the endpoint
+    per inference (measured 258ms fresh vs 144ms pooled);
+  - `ensure_server` decides an endpoint is remote before asking it for /health.
+
+  Node-only, and the reason that port measured seconds slower per solve:
+  `scrollIntoViewIfNeeded` and the `onStep` observer's snapshot are both now
+  bounded (they inherited Playwright's 30s and the model's 8s budget, and both
+  wait for the widget to stop animating — 8.0s of one measured 12.0s solve);
+  the cursor drift during inference is interruptible; the interpreter and the
+  adapter name are resolved once per solver rather than per inference; and the
+  widget disappearing now ends the post-submit window for the eight vendors
+  that ship no response token, as it already did in Python.
+
 ## [2.6.0] - 2026-08-19
 
 A solve-timing release. Nothing here changes what the model answers; it changes
@@ -52,6 +250,35 @@ that had no way to succeed.
   itemised.
 
 ### Fixed
+
+- **A missing Appium `touchTransform` scale is now refused instead of
+  dispatched.** The transform is the one part of the touch path that fails
+  silently: hand it a wrong (or absent) `scale` and nothing raises anywhere —
+  the W3C chain is valid, the device performs it, the finger lands somewhere
+  else, and the solve fails looking exactly like a model that cannot read the
+  puzzle. Same shape as the slider bug below, one seam over. A `touchDriver`
+  with no `scale` on a page reporting `devicePixelRatio != 1` now raises on the
+  first gesture and names the value to pass. An explicit `scale: 1` is taken as
+  the caller's word that the coordinates are already mapped — unset and an
+  explicit 1 are different facts, and only the first is checked. An unreadable
+  ratio falls through to the identity: absent evidence is not evidence of a
+  mismatch. `origin` cannot be measured from inside the page, so it is named in
+  the refusal rather than guessed at.
+
+- **The slider missed every attempt on a phone.** `executeSlide` closes a loop
+  between two pixel spaces — it steers the handle in CSS pixels (`boundingBox`,
+  the probe offsets, the slot the model named) and MEASURES the piece in the
+  screenshot's pixels, where the CV masks the handle and reports what moved.
+  Those are the same number on a 1x desktop, so the loop was right for a year
+  and the two spaces were never told apart. At a device-pixel ratio of 2.625 the
+  mask landed on a strip of empty card ABOVE the handle, leaving the handle the
+  largest moving thing in frame; the widths came back 2.6x too wide;
+  `solveSlideGeometry` threw them out as wider than the widget; and the drive
+  fell back to open-loop guessing. Measured on the geetest_v3_slide fixture:
+  0/2 ports on a Pixel 7 against 2/2 on the same three boards under a mouse,
+  and 2/2 after. The scale is read off the shot rather than asked of the page —
+  what the CV measures is the image, whatever the window thinks its ratio is.
+  Both ports, same commit.
 
 - **GeeTest's OK button was never pressed.** It ships as
   `<div class="geetest_submit geetest_disable">OK</div>` — invisible to both

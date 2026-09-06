@@ -1,3 +1,5 @@
+import type { Humanizer, HumanizationMode, TouchTransform } from './humanize.js';
+
 /**
  * Lifecycle event emitted by {@link CaptchaKrakenConfig.onStep}. One is fired
  * before any interaction (`stage: 'initial'`) and one after every executed
@@ -48,6 +50,69 @@ export interface SolveStepEvent {
 
 export interface CaptchaKrakenConfig {
   /**
+   * How the driver MOVES — a choice of input DEVICE, not a realism dial.
+   *
+   *  - `'mouse'`  (default) Bezier arcs, Fitts's-law durations, overshoot.
+   *  - `'mobile'` touch events with finger kinematics. On a touch-only widget
+   *               this is the difference between the page's handlers firing and
+   *               not; a mousemove there is the wrong event, not a weaker one.
+   *               Needs a Chromium-family page launched with `hasTouch: true`,
+   *               or an Appium/WebdriverIO driver in {@link touchDriver}.
+   *  - `'none'`   the shortest legal path to the same DOM effect. Much faster,
+   *               and detectable by anything scoring pointer telemetry — for
+   *               fixtures, self-hosted targets, and stacks that humanise
+   *               elsewhere.
+   *
+   * Unset falls back to `CAPTCHA_HUMANIZATION`, then `'mouse'`. Set
+   * {@link humanizer} instead to supply your own implementation.
+   *
+   * @example
+   * ```typescript
+   * const context = await browser.newContext({ ...devices['Pixel 7'], hasTouch: true });
+   * const solver = new CaptchaKrakenSolver({ humanization: 'mobile' });
+   * await solver.solve(await context.newPage());
+   * ```
+   */
+  humanization?: HumanizationMode;
+
+  /**
+   * Your own {@link Humanizer}. Overrides {@link humanization} entirely — the
+   * driver then makes no decisions about pointer motion at all.
+   *
+   * Use it when you already model your users' input (a hardware pointer, a
+   * device farm, a recorded trace), or when the browser humanises for you:
+   * camoufox's `humanize` juggler re-humanises every `mouse.move()` it is
+   * handed, and composing both measured 82.1s against 13.4s on one solve.
+   *
+   * @example
+   * ```typescript
+   * import { NullHumanizer, type Humanizer } from 'captchakraken';
+   *
+   * class MyPointer extends NullHumanizer implements Humanizer {
+   *   async move(page, to) { await myHardwareMouse.glideTo(to[0], to[1]); this.at = to; }
+   * }
+   * new CaptchaKrakenSolver({ humanizer: new MyPointer() });
+   * ```
+   */
+  humanizer?: Humanizer;
+
+  /**
+   * `humanization: 'mobile'` only. The thing that is actually TOUCHED, when it
+   * is not the page object — an Appium / WebdriverIO / Selenium driver on a real
+   * handset. Left unset, the mode dispatches CDP touch events at the page it
+   * was given, which is what browser mobile emulation wants.
+   */
+  touchDriver?: any;
+
+  /**
+   * `humanization: 'mobile'` only. CSS-pixel → device-pixel transform for
+   * {@link touchDriver}. `scale` is usually `window.devicePixelRatio`; `origin`
+   * is the top-left of the webview in screen coordinates. The default identity
+   * is right for emulation and for callers who map coordinates themselves.
+   */
+  touchTransform?: TouchTransform;
+
+  /**
    * Optional observer fired at each intermediate solve stage. Receives a
    * baseline screenshot before any action and one after every executed action.
    * Use it to capture intermediate-stage screenshots, count steps, and time
@@ -80,6 +145,23 @@ export interface CaptchaKrakenConfig {
    * with the vLLM server; see model-name.ts.
    */
   model?: string;
+  /**
+   * Force ONE expert of a ROUTED model — 'pixel' | 'grid' | 'video' | 'text'.
+   *
+   * A routed model (Abyss) is four LoRA adapters behind one endpoint, and the
+   * router is the prompt family each request is about to send — so leaving this
+   * unset already reaches the right expert. This is the override: serve one
+   * arm, drive only the puzzles it owns, which is what a per-arm benchmark
+   * needs and what a licence holder pinning a single expert wants.
+   *
+   * Refused against a model that serves a single adapter — every model
+   * published so far — rather than ignored, because a run that quietly measured
+   * the generalist while reporting an expert is a number nobody can catch.
+   *
+   * Mirrors the Python `PageSolverConfig.expert`; also settable as
+   * CAPTCHA_EXPERT, which this forwards to the CLI ahead of.
+   */
+  expert?: string;
   /**
    * Bearer token for the vLLM server (also picked up from VLLM_API_KEY env).
    */
@@ -422,6 +504,19 @@ export interface CaptchaKrakenConfig {
   elementScreenshotTimeoutMs?: number;
 
   /**
+   * How long an `onStep` observer's screenshot may take, ms (default 2000).
+   *
+   * Deliberately separate from `elementScreenshotTimeoutMs`, which is sized for
+   * the picture the MODEL reads. This one is a trace snapshot: it is taken with
+   * `animations: 'disabled'`, which makes Playwright wait for the element to
+   * stop moving first, and on a still-animating widget that ran to the full 8s
+   * on every step — 8.0s of a measured 12.0s solve. An observer must never cost
+   * more than the action it observes, and a missed frame in a trace costs
+   * nothing. Ignored entirely when no `onStep` is set.
+   */
+  stepScreenshotTimeoutMs?: number;
+
+  /**
    * After a submit, hCaptcha may replace the challenge iframe for the next
    * round, detaching the handle we just detected ("element is not visible").
    * This is a transition, not a dead puzzle: how many times to back off,
@@ -552,4 +647,14 @@ export interface SolveResult {
     cachedInputTokens: number;
     estimatedCost: number;
   };
+  /**
+   * Where this solve's wall-clock went, in milliseconds per phase — the same
+   * partition `CAPTCHA_TIMINGS=1` prints, handed to the caller instead of to
+   * stderr. Mirrors `SolveResult.phases` on the Python port.
+   *
+   * Returned rather than only logged because "the solve took 12s" is not
+   * actionable and "the settle monitor spent 4s of it" is, and a caller
+   * measuring a fleet cannot scrape another process's stderr.
+   */
+  phases?: Record<string, number>;
 }

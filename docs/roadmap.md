@@ -10,29 +10,23 @@ Where CaptchaKraken is headed. Legend: 🟢 shipped · 🟡 in progress · ⚪ p
 | ⬇️ **Unified `fetch` command** | 🟢 shipped | `captchakraken fetch` pulls the latest weights from HF **and** upgrades vLLM in one step. See [Self-hosting → Updating](./self-hosting.md#updating). |
 | ♻️ **Per-solve solution dedup** | 🟢 shipped | Byte-identical frames are never re-sent to vLLM. |
 | ☁️ **Hosted cloud API** | 🟢 shipped | `api.captchakraken.com`. Self-serve signup with GitHub, free credits on the account, metered per inference round. Answers with **Twilight v1.2**. |
-| 🧩 **hCaptcha click / drag puzzles** | 🟢 shipped | Full-puzzle model → pixel-space click/drag actions. |
-
-## 🏷️ Known data issues
-
-| Item | Status | Notes |
-|---|---|---|
-| **4×4 eval labels** | 🔴 known bad | All 288 real 4×4 records in `test_solutions.json` carry a 3×3 instruction, and their `rows`/`cols` disagree with `puzzle_type`. `grade.py` works around it via `canonical_instruction()`; the file itself still needs fixing. |
-| **Train/infer prompt parity** | 🟡 in progress | `canonical_instruction()` and the shipped `SELECT_GRID_PROMPT` differ for reCAPTCHA 3×3 (the already-cleared-tiles paragraph). Measured p = 0.55 on a static corpus, but it is the live-dynamic case the paragraph exists for. |
+| 🧩 **hCaptcha click / drag puzzles** | 🟢 shipped | Full-puzzle model → pixel-space click/drag actions. Click, drag, path/connect and tetris-fit all route and are driven. |
+| 🪶 **Sunlight / Twilight merges** | 🟢 shipped | The adapter merged into the base at 4-bit (11 GB) and 8-bit (13 GB), so self-hosting is one download instead of two. Published for both v1.1 and v1.2, all public on [HuggingFace](https://huggingface.co/CaptchaKraken). |
+| 🎥 **Video challenge support** | 🟢 shipped | **Both halves are out.** A challenge that never settles is recorded (4 s @ 10 fps), cut into keyframes, and sent to the model as one multi-image prompt; the answer names which keyframe it acted on, and the driver waits for the widget to return to that frame before clicking. The model half shipped with **v1.2** — trained on the keyframe format, installed by `setup.sh`, and what the hosted API answers with. |
+| 📱 **Mobile / touch input** | 🟢 shipped | `humanization: 'mobile'` dispatches real touch events with finger kinematics, in a Chromium page with `hasTouch` or at a real handset over Appium / WebdriverIO / Selenium. See [Usage → How it moves](./usage.md#how-it-moves--mouse-mobile-none-or-yours). |
 
 ## 🟡 In progress
 
 | Item | Status | Notes |
 |---|---|---|
-| ⬛ **Abyss** | 🟡 in progress | The next hosted-only model, trained against the open weights' measured failures. **Not serving yet** — the endpoint answers with Twilight v1.2 until it lands. |
-| 🪶 **Sunlight / Twilight merges** | 🟢 shipped | The adapter merged into the base at 4-bit (~9 GB) and 8-bit (~14 GB), so self-hosting is one download instead of two. Published for both v1.1 and v1.2, all public on [HuggingFace](https://huggingface.co/CaptchaKraken). |
+| ⬛ **Abyss** | 🟡 in progress | The next hosted-only model, on a larger base, trained against the open weights' measured failures. **Not serving yet** — the endpoint answers with Twilight v1.2 until it lands. |
 | 📈 **More real labeled data** | 🟡 in progress | Broader coverage for under-represented prompts. |
-| 🎥 **Video challenge support** | 🟢 shipped | **Both halves are out.** A challenge that never settles is recorded (4 s @ 10 fps), cut into keyframes, and sent to the model as one multi-image prompt; the answer names which keyframe it acted on, and the driver waits for the widget to return to that frame before clicking. The model half shipped with **v1.2** — trained on the keyframe format, installed by `setup.sh`, and what the hosted API answers with. |
 
 ## ⚪ Planned
 
 | Item | Status | Notes |
 |---|---|---|
-| 🧩 **More captcha types** | ⚪ planned | The non-grid hCaptcha puzzles still unhandled: tetris-fit and "choose the card". Click, drag and path/connect have shipped (above). |
+| 🎯 **Freehand hCaptcha accuracy** | ⚪ planned | Connect-the-path and the numbered-line / missing-piece drags are the families the model is least reliable on. They are routed and driven today; this is about how often they land. |
 
 ---
 
