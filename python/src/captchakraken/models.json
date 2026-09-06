@@ -63,7 +63,49 @@
     "costs the most. The finetune repo's publisher reads this field and REFUSES",
     "to upload a licensed model to the Hub; check_prompt_parity.py refuses to let",
     "`latest` be one, because an unpinned self-hoster would resolve to weights",
-    "they cannot obtain."
+    "they cannot obtain.",
+    "",
+    "`experts` is the fourth axis, and the newest. A ROUTED model is not one",
+    "adapter: Abyss is four LoRAs behind one endpoint, and the thing that picks",
+    "between them is the PROMPT FAMILY the request is about to send — grid,",
+    "pixel, video, text. See docs/MOE_LORA_DESIGN.md §11: the router is the",
+    "prompt family and it already exists, so no DOM access, no image classifier",
+    "and no cooperation from the caller is needed to reach the right expert.",
+    "",
+    "It lives here for the same reason prompt_version does. WHICH EXPERTS EXIST",
+    "IS A FACT ABOUT THE MODEL. A client that hardcoded four names would send",
+    "them to v1.2 — which serves one adapter under one name — and every request",
+    "would 404 on a model the endpoint has never heard of. ABSENT MEANS NOT",
+    "ROUTED, and that is the whole backwards-compatibility story: every model",
+    "published so far declares no `experts`, so the client sends the single",
+    "`lora_name` on every request exactly as it did before this field existed.",
+    "",
+    "An unmapped or unrecognised family degrades to the model's own",
+    "`lora_name` — the GENERALIST — never to another expert and never to an",
+    "error. The day the generation-2 `text` family reached ckgate without a",
+    "marker, refusing it cost every distorted-text solve in production for a",
+    "day; a caller prompting in their own words is the expected case for a",
+    "shipped model, not a 400.",
+    "",
+    "Each expert name must resolve — through `served_aliases` or as a repo id —",
+    "to a REGISTERED entry declaring the same `prompt_version` and the same",
+    "`pixel_budget` as the model that routes to it. check_prompt_parity.py",
+    "enforces that. It is what makes aliasing four arms onto one entry safe",
+    "rather than convenient: the four share a base, a schema and a band today",
+    "(measured, not assumed — runs 20260906-0142xx all carry prompt generation",
+    "2 and a flat 518400 band), and the day one of them trains at a different",
+    "generation or a different band the gate refuses the alias and that arm has",
+    "to graduate to an entry of its own. A divergence that resolved silently",
+    "through a shared entry would be the 2026-07-18 regression with four models",
+    "in it instead of one.",
+    "",
+    "The four arms are on the wire training as this is written (runs",
+    "20260906-0142xx) and none of them is published yet, so the `experts` map",
+    "below names weights that do not exist. That is the same deliberate",
+    "arming as `Abyss` itself — registered before it existed so the licence",
+    "gates were armed rather than retrofitted — and it costs nothing, because",
+    "an expert name only ever reaches the wire for a caller who asked for a",
+    "routed model in the first place."
   ],
   "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
   "models": {
@@ -131,9 +173,19 @@
       "availability": "licensed",
       "prompt_version": "2",
       "kind": "lora",
-      "base_model": "Qwen/Qwen3.8-27B",
-      "lora_name": "abyss",
-      "note": "IN DEVELOPMENT. Never published, never downloadable — see `availability`. Registered before it exists so the licence gates are armed rather than retrofitted after the first artifact is sitting on a disk: the publisher, the parity gate and `captchakraken fetch` all read this entry, and a rule added the day it is first needed is a rule that was absent on the day it was first needed. prompt_version is 2 because that is what the training data is built at today; CONFIRM IT from the training run's record when it trains, because a licence holder DOES name this model — it has a served_aliases entry (`abyss`), which is what makes their prompts resolve from this entry rather than through the `latest` fallback. Being nameable is not being downloadable: `availability` above is what refuses the weights, and the two are independent on purpose."
+      "base_model": "Qwen/Qwen3.5-9B",
+      "lora_name": "abyss-general",
+      "pixel_budget": {
+        "min": 518400,
+        "max": 518400
+      },
+      "experts": {
+        "grid": "abyss-grid",
+        "pixel": "abyss-general",
+        "video": "abyss-video",
+        "text": "abyss-text"
+      },
+      "note": "IN DEVELOPMENT. Never published, never downloadable — see `availability`. Registered before it exists so the licence gates are armed rather than retrofitted after the first artifact is sitting on a disk: the publisher, the parity gate and `captchakraken fetch` all read this entry, and a rule added the day it is first needed is a rule that was absent on the day it was first needed. Being nameable is not being downloadable: `availability` is what refuses the weights, and the two are independent on purpose — a licence holder DOES name this model, which is why it and each of its experts has a served_aliases entry. ABYSS IS THE ROUTED 9B, NOT THE 27B. It was going to be a single Qwen3.8-27B adapter; that model was trained (run 20260903-235101) and did not earn its cost, so the product became the four-expert mixture on Qwen3.5-9B that docs/MOE_LORA_DESIGN.md §7 and §10 specify. A routed 27B may be a later generation of this same name; it would be a new entry when it exists, because the base model is what a self-hoster loads. `lora_name` is `abyss-general` rather than a fifth name: the generalist IS the fallback for any family `experts` does not map, so pointing the two at one adapter is what makes §11\u2019s \u201cdegrade to the generalist, never 400\u201d true with one fewer resident LoRA slot — and slots are the binding constraint (§10, five names against `--max-loras`). prompt_version 2 and the flat 518400 band are what all four arms are training at TODAY (verified against training_runs/20260906-0142xx/run.json, min_pixels == max_pixels == 518400); CONFIRM BOTH from the run records at publish time and re-record here in the publishing commit, and if any arm has diverged give that arm its own entry — check_prompt_parity.py refuses the shared alias rather than resolving it silently."
     }
   },
   "served_aliases": {
@@ -141,6 +193,11 @@
     "captcha": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
     "captcha-v12": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
     "_comment_abyss": "`abyss` is here for the OPPOSITE reason to the two above, and it is not a contradiction of `availability: licensed`. An alias says which model a served NAME means; availability says whether its weights can be downloaded. A licence holder does name this model — the hosted API accepts it from a licensed key and lists it to them on /v1/models so their SDK can — and without this line `canonical_model_id('abyss')` is None, so their prompts resolve through the `latest` fallback: the exact model/generation mispairing this file exists to prevent, silent, and only accidentally right while `latest` happens to share the generation. It does NOT make the weights fetchable; `captchakraken fetch` reads availability and refuses this name, which is also the clear error a self-hoster who typed it deserves.",
-    "abyss": "CaptchaKraken/Abyss"
+    "abyss": "CaptchaKraken/Abyss",
+    "_comment_abyss_experts": "The four expert arms. These are the names that go ON THE WIRE — a routed request for a grid names `abyss-grid`, never `abyss` — so without these lines `canonical_model_id` returns None for the string the client actually sent, and prompt resolution falls through to the `latest` fallback on every routed solve. That is the mispairing `abyss` itself is here to prevent, one level down and four times over. Aliasing four arms onto one entry rather than giving each its own is deliberate and CHECKED: they share a base, a prompt generation and a pixel band today, and check_prompt_parity.py requires every expert name to resolve to a registered entry declaring the SAME prompt_version and pixel_budget as the router — so the day an arm trains at another generation or another band, the gate refuses the alias and that arm has to graduate to an entry of its own.",
+    "abyss-grid": "CaptchaKraken/Abyss",
+    "abyss-general": "CaptchaKraken/Abyss",
+    "abyss-video": "CaptchaKraken/Abyss",
+    "abyss-text": "CaptchaKraken/Abyss"
   }
 }

@@ -146,6 +146,23 @@ export interface CaptchaKrakenConfig {
    */
   model?: string;
   /**
+   * Force ONE expert of a ROUTED model — 'pixel' | 'grid' | 'video' | 'text'.
+   *
+   * A routed model (Abyss) is four LoRA adapters behind one endpoint, and the
+   * router is the prompt family each request is about to send — so leaving this
+   * unset already reaches the right expert. This is the override: serve one
+   * arm, drive only the puzzles it owns, which is what a per-arm benchmark
+   * needs and what a licence holder pinning a single expert wants.
+   *
+   * Refused against a model that serves a single adapter — every model
+   * published so far — rather than ignored, because a run that quietly measured
+   * the generalist while reporting an expert is a number nobody can catch.
+   *
+   * Mirrors the Python `PageSolverConfig.expert`; also settable as
+   * CAPTCHA_EXPERT, which this forwards to the CLI ahead of.
+   */
+  expert?: string;
+  /**
    * Bearer token for the vLLM server (also picked up from VLLM_API_KEY env).
    */
   apiKey?: string;

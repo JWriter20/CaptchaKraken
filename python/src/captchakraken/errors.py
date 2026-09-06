@@ -149,6 +149,30 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             "our side, not yours — retry shortly."
         )
 
+    # The two LICENSED-MODEL refusals. Both are 'you named a model', and they
+    # are separate codes because the fix is completely different: one is a
+    # licence to obtain, the other is a fleet that has not started serving yet
+    # and nothing for the caller to do. Generic prose collapses them into "the
+    # solve failed", which is the reading that sends someone to buy a licence
+    # they already hold.
+    if code == "model_not_licensed":
+        return (
+            "CaptchaKraken: the model this request named is licensed, and this "
+            "account is not licensed for it. The request was refused rather than "
+            "answered by a different model — a silent substitution would be a "
+            "score you could not explain. Unset CAPTCHA_LORA_NAME (or the "
+            f"client's `model`) to use the standard hosted model. {message} "
+            f"Licensing: {url or _SUPPORT}."
+        )
+
+    if code == "model_not_serving":
+        return (
+            "CaptchaKraken: this account IS licensed for the model it named, but "
+            "the fleet is not serving it yet. Nothing is wrong with your account "
+            "and there is nothing to buy. Unset CAPTCHA_LORA_NAME (or the "
+            f"client's `model`) to use the standard hosted model meanwhile. {message}"
+        )
+
     # `unrecognized_prompt`, `invalid_request`, and anything added after this was
     # written. The server's own message is the best thing available, so it is
     # carried through verbatim rather than replaced with a guess.

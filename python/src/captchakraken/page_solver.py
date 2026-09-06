@@ -243,6 +243,22 @@ class PageSolverConfig:
     #: crossing the whole window from the origin.
     starting_mouse_position: Optional[Tuple[float, float]] = None
 
+    # ── which model answers ────────────────────────────────────────────────
+    #: Force ONE expert of a routed model — "pixel", "grid", "video" or "text".
+    #:
+    #: A routed model (Abyss) is four adapters behind one endpoint, and the
+    #: router is the prompt family the request is about to send, so the default
+    #: (None) already reaches the right one with no help from the caller. This
+    #: is the override: serve one arm, drive only the puzzles it owns, which is
+    #: what a per-arm benchmark needs and what a licence holder pinning a single
+    #: expert wants.
+    #:
+    #: Refused at construction against a model that serves one adapter — every
+    #: model published so far — because a run that quietly measured the
+    #: generalist and reported it as the expert is a number nobody can catch.
+    #: None means unset: `CAPTCHA_EXPERT`, else route by family.
+    expert: Optional[str] = None
+
     # 45s, and the loop count that fits inside it rather than one that needs
     # policing by the clock. A round costs ~4-7s once the waits below are paid,
     # so six rounds is the budget; ten never fitted and only ever expressed
@@ -633,6 +649,15 @@ class PageSolver:
         self.config = config or PageSolverConfig()
         # One CaptchaSolver for the whole driver: it owns the planner, which
         # accumulates token usage and holds the HTTP session to vLLM.
+        #
+        # `expert` reaches the solver from the config, so the knob is in the
+        # same object as every other tunable and matches the TS port's
+        # `CaptchaKrakenConfig.expert`. An explicit kwarg still wins — a caller
+        # who built the argument list themselves has said the more specific
+        # thing — and a caller who passed their OWN solver has already made
+        # this decision inside it.
+        if self.config.expert is not None:
+            solver_kwargs.setdefault("expert", self.config.expert)
         self._solver = solver or CaptchaSolver(**solver_kwargs)
         #: Every gesture goes through here, and it owns the pointer position.
         #: See humanize.py — the driver names gestures, this decides what
@@ -2814,13 +2839,20 @@ class PageSolver:
         # would merge two separate captchas into one attempt — the opposite
         # error, and the one that under-bills.
         previous_session = os.environ.get(_SESSION_ENV)
-        os.environ[_SESSION_ENV] = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
+        os.environ[_SESSION_ENV] = session_id
+        # The verdict this driver reports back, and it starts FALSE. A solve
+        # that raises never sets it, which is the right default: the widget did
+        # not accept, and the boards that made it raise are exactly the ones
+        # worth keeping. See planner.report_outcome.
+        solved_for_report = False
         try:
             result = self._solve_impl(page, start, cumulative_usage)
             # Attached HERE rather than at each of the seven `return
             # SolveResult(...)` sites, so a new early exit cannot forget it.
             result.phases = dict(self._budget.totals)
             result.phases["total"] = self._budget.elapsed_ms()
+            solved_for_report = bool(getattr(result, "is_solved", False))
             return result
         finally:
             # Printed on the way out of every solve, success or failure — a
@@ -2828,6 +2860,14 @@ class PageSolver:
             if timings_enabled() and self._budget is not None:
                 print(self._budget.report(), file=sys.stderr)
             self._deadline_ms = None
+            # BEFORE the env is restored, so the id reported is this solve's.
+            # Best-effort and never raised out of a `finally` — an exception
+            # here would replace the caller's real error, or their real result,
+            # with one about telemetry.
+            try:
+                self._solver.planner.report_outcome(session_id, solved_for_report)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"[outcome] could not report: {exc}")
             if previous_session is None:
                 os.environ.pop(_SESSION_ENV, None)
             else:
