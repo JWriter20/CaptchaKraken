@@ -13,6 +13,8 @@ Three properties, and the third is the one that matters most:
    shipped registry rather than a fixture.
 """
 import json
+from pathlib import Path
+
 import pytest
 
 from captchakraken import prompts
@@ -177,13 +179,32 @@ def test_an_unrouted_model_returns_the_name_it_was_given():
             assert prompts.route(name, family) == name
 
 
+#: The release gate lives in the PRIVATE finetune repo, which this one is a
+#: submodule of. Present when the two are checked out together, absent in every
+#: standalone clone — including this repo's own CI, which is a standalone clone
+#: by definition and can never be anything else.
+#:
+#: So this skips there rather than failing there. It went in without the guard
+#: and turned `Regression gate (Python)` red on both interpreters at once, with
+#: a FileNotFoundError naming a path outside the checkout — a test asserting
+#: something true about a file CI is not allowed to have. Same shape and same
+#: fix as `_CORPUS` in test_hcaptcha_badge_detection.py.
+#:
+#: It keeps its teeth where the two copies can actually drift: in the monorepo,
+#: which is where the gate is edited and where a release is cut.
+_GATE = (
+    Path(__file__).resolve().parents[3] / "scripts" / "check_prompt_parity.py"
+)
+
+
+@pytest.mark.skipif(not _GATE.is_file(),
+                    reason=f"release gate not present at {_GATE} "
+                           f"(standalone clone of the public repo)")
 def test_prompt_families_match_the_release_gate():
     """Two copies, because the gate reads the client by AST and cannot import
     it. Same reason AVAILABILITIES is spelled out twice."""
     import ast
-    import pathlib
-    gate = pathlib.Path(__file__).resolve().parents[3] / "scripts" / "check_prompt_parity.py"
-    tree = ast.parse(gate.read_text(encoding="utf-8"))
+    tree = ast.parse(_GATE.read_text(encoding="utf-8"))
     found = None
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(
