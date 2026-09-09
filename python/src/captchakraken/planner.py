@@ -29,13 +29,13 @@ DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 # The pixel floor the adapters are TRAINED at, and therefore the floor an image
 # has to clear before it is worth sending.
 #
-# Training exports `MIN_PIXELS=200704` (448², in the finetune repo's
-# scripts/train_unified.sh), so anything smaller is enlarged before the vision
+# Training exports `MIN_PIXELS=200704` (448², in the training repo's
+# the training pipeline), so anything smaller is enlarged before the vision
 # encoder sees it. Serving did none of that: vLLM runs with no
 # `--mm-processor-kwargs` and this client used to re-encode the file unchanged,
 # so a small captcha arrived at a geometry the model was never tuned on. It
 # fails as plausible-but-wrong coordinates, never as an error — measured on real
-# geetest_v3_slide captures (277x285), predictions landed 80-105 px from the
+# a GeeTest v3 slider captures (277x285), predictions landed 80-105 px from the
 # hand label at native size and 1-4 px away once upscaled.
 #
 # A FLOOR, NOT A RESIZE. Images already above it are passed through byte-for-byte;
@@ -92,9 +92,9 @@ def _encode_image(path: str,
     im.save(buf, "PNG")
     return "image/png", base64.b64encode(buf.getvalue()).decode()
 
-# Header the fleet's haproxy front (on the reverse-proxy EC2) routes on. When a
+# Header the fleet's the gateway front (on the reverse-proxy EC2) routes on. When a
 # caller sets CAPTCHA_REQUEST_PRIORITY to a positive int, every request carries
-# `X-JH-Priority: <n>`; haproxy sends anything above its threshold (5) straight
+# `X-JH-Priority: <n>`; the gateway sends anything above its threshold (5) straight
 # to the backup GPUs so it never competes with production traffic on the main
 # 5090. The tier-2 CI gate sets this — its traffic is throwaway and must stay
 # off the primary.
@@ -274,13 +274,54 @@ def video_action_prompt(n_keyframes: int) -> str:
 
     The count is in the text because the model has no other way to know how many
     images arrived — frame identities live in the prompt, not in the image payload.
-    Mirrors `instructions.video_instruction` in the finetune repo exactly.
+    Mirrors `instructions.video_instruction` in the training repo exactly.
     """
     n = int(n_keyframes)
     if n < 1:
         raise ValueError(f"a keyframe request needs at least one frame, got {n_keyframes}")
     listing = ", ".join(f"frame {i}" for i in range(1, n + 1))
     return VIDEO_ACTION_PROMPT_TEMPLATE.format(n=n, listing=listing)
+
+
+#: Sampling temperature per RE-ASK of a board the vendor refused, first entry
+#: first. THE ONE COPY: `PageSolverConfig.resample_temperatures` defaults to it
+#: and the JS port reaches it through `CAPTCHA_RESAMPLE_LEVEL` rather than
+#: carrying its own numbers, because a schedule written down twice is a schedule
+#: the two ports can disagree about — and Tier 3 drives both and averages them.
+RESAMPLE_TEMPERATURES = (0.0, 0.35, 0.7)
+
+
+def sampling_for_level(level: int) -> Dict[str, Any]:
+    """Decode overrides for the `level`-th re-ask of one board.
+
+    Level 0 is greedy and returns {}, so a first look is byte-identical to what
+    this client has always sent. Past that it carries a temperature AND a seed:
+    the temperature is what makes a second sample possible at all, and the seed
+    is what makes two re-asks at one temperature two samples rather than one
+    sample twice.
+    """
+    temps = RESAMPLE_TEMPERATURES or (0.0,)
+    temp = temps[min(max(level, 0), len(temps) - 1)]
+    if not temp:
+        return {}
+    return {"temperature": temp, "seed": 1000 + level}
+
+
+def _sampling_from_env() -> Dict[str, Any]:
+    """The JS port's re-ask level, which arrives as an env var.
+
+    That port drives its own round loop and spawns this CLI once per round, so
+    a fresh process has no memory of how many times the board has already been
+    read. Passing the LEVEL rather than the temperature keeps the schedule in
+    one place — see `RESAMPLE_TEMPERATURES`.
+    """
+    raw = os.environ.get("CAPTCHA_RESAMPLE_LEVEL", "").strip()
+    if not raw:
+        return {}
+    try:
+        return sampling_for_level(int(raw))
+    except ValueError:
+        return {}
 
 
 class ActionPlanner:
@@ -303,6 +344,15 @@ class ActionPlanner:
         self.model = model or config.lora_name()
         self.base_url = base_url or config.base_url()
         self.api_key = api_key or config.api_key()
+        #: Decode overrides merged into every request payload, or empty.
+        #:
+        #: The page driver sets this while RE-ASKING a board the vendor already
+        #: refused, so that the second look is a second SAMPLE rather than the
+        #: same arithmetic run twice — see
+        #: `PageSolverConfig.resample_temperatures`. Empty by default and
+        #: cleared the moment a fresh board arrives, because greedy is the best
+        #: single guess and every solve that works today works on it.
+        self.sampling: Dict[str, Any] = {}
         # Prompts follow the MODEL, not this client's release. Resolve by the
         # served name first (a hosted endpoint serves `captcha`, not a repo id,
         # and models.json maps the alias back), falling back to the adapter repo
@@ -461,6 +511,10 @@ class ActionPlanner:
         ]
 
         model = self._model_for(family)
+        # `sampling` is set by the page driver when it is RE-ASKING a board the
+        # vendor already refused — see `PageSolverConfig.resample_temperatures`.
+        # Absent (the normal case, and every first look) it is greedy exactly as
+        # before, so nothing about a solve that works today changes.
         payload = {
             "model": model,
             "messages": messages,
@@ -471,13 +525,19 @@ class ActionPlanner:
             # level is the documented way.
             "chat_template_kwargs": {"enable_thinking": False},
         }
+        # In-process the driver sets `sampling` directly; the JS port drives
+        # its own loop and spawns this as a CLI, so its level arrives in the
+        # environment. Explicit beats inherited when both are present.
+        sampling = self.sampling or _sampling_from_env()
+        if sampling:
+            payload.update(sampling)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             # Fleet routing: absent unless CAPTCHA_REQUEST_PRIORITY is set (see
             # routing_headers). Low-priority batch traffic is steered to the
-            # backup GPUs by the haproxy front on this header.
+            # backup GPUs by the the gateway front on this header.
             **routing_headers(),
         }
 

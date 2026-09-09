@@ -1,8 +1,8 @@
 """Reduce a recorded captcha clip to the few frames the model is shown.
 
 VERBATIM PORT. Everything below the docstring is byte-identical to
-`src/video/keyframes.py` in the CaptchaKrakenFinetune repo, and
-`scripts/check_prompt_parity.py` there fails the build if the two ever diverge.
+`src/video/keyframes.py` in the the training repo repo, and
+`scripts/the parity gate` there fails the build if the two ever diverge.
 
 That is not tidiness, it is a correctness requirement. The model is trained on
 keyframes cut by that code and answers with a frame NUMBER indexing into them. If
@@ -41,7 +41,7 @@ DEFAULT_MAX_KEYFRAMES = 6
 # picture". A false "same" merges two distinct states, which loses an answer, so
 # this is the most consequential number in the file.
 #
-# MEASURED, not guessed. Over all 20 real clips in cleanSamples/test/raw, the
+# MEASURED, not guessed. Over all 20 real clips in the sample corpus, the
 # consecutive-frame differences fall into two clusters with a 64x gap:
 #
 #   same picture (compression + antialiasing)  <= 0.000067   (0.067 per mille)
@@ -607,7 +607,7 @@ def _drop_smeared(
         six eval clips, dropping a SCREEN. A page that never reaches the model is
         unanswerable whenever the target lived on it.
       * *Drop when some other still is within `distinct_ratio`* cut
-        `hcaptcha_tile_flip_video` from 6 stills to 3, because two boards of that
+        an hCaptcha tile-flip animation from 6 stills to 3, because two boards of that
         puzzle differ by ONE TILE — well inside `distinct_ratio` — so a diff
         threshold cannot tell "the same picture again" from "the next board".
         EXPECTED_SLICING says it directly: fewer than 6 "means dedup merged two
@@ -752,7 +752,7 @@ def extract_keyframes_from_video(
 #   <media_dir>/keyframes/<stem>/keyframes.json
 #
 # Derived, regenerable, and ADDITIVE — the clip stays canonical next to it. That
-# matters most under `cleanSamples/test/`, which is irreplaceable hand-labeled
+# matters most under the held-out sample corpus, which is irreplaceable hand-labeled
 # data we never rewrite (CLAUDE.md § Data trees): extraction only ever creates a
 # new sibling directory there.
 

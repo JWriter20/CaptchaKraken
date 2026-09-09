@@ -535,6 +535,8 @@ export class CaptchaKrakenSolver {
   // have re-executed it.
   private lastAnswerSig: string | null = null;
   private noProgressRounds = 0;
+  /** How far up planner.RESAMPLE_TEMPERATURES this BOARD has escalated. */
+  private resampleLevel = 0;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
   // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
   private state: CaptchaState = CaptchaState.Detecting;
@@ -980,7 +982,13 @@ export class CaptchaKrakenSolver {
           }
           // A fresh next round has rendered → stop waiting, go solve it now
           // (keeps multi-round solves fast instead of burning the full window).
-          if (await this.isChallengeFreshlyRendered(page)) break;
+          if (await this.isChallengeFreshlyRendered(page)) {
+            // A DIFFERENT puzzle, so the greedy answer has not been tested
+            // against it and the escalation must not carry over.
+            if (this.resampleLevel) console.log('[resample] fresh board — back to greedy');
+            this.resampleLevel = 0;
+            break;
+          }
           await delay(this.config.postSolveOutcomePollMs ?? 75);
         }
         this.budget?.add(didInteract ? 'await-verdict' : 'post-submit-delay',
@@ -3121,6 +3129,9 @@ export class CaptchaKrakenSolver {
     const order: string[] = [];        // distinct screens, in first-seen order
     let captured = 0;
     let lastDigest: string | null = null;
+    // Frame index of the most recent NEW screen. A board that has shown
+    // nothing new for a whole floor-length window has SETTLED.
+    let lastNewAt = 0;
     let cycleClosed = false;
     let stopped = false;
     let runToEnd = false;              // set by finish(): keep going past the floor
@@ -3151,7 +3162,10 @@ export class CaptchaKrakenSolver {
               // A screen already recorded, coming back after another one: the
               // loop has closed and every screen is now in the clip.
               if (order.includes(d) && order.length >= 2) cycleClosed = true;
-              else if (!order.includes(d)) order.push(d);
+              else if (!order.includes(d)) {
+                order.push(d);
+                lastNewAt = captured;
+              }
               lastDigest = d;
             }
           } catch { /* a digest we could not take just means no early stop */ }
@@ -3160,6 +3174,18 @@ export class CaptchaKrakenSolver {
         }
         // Past the floor and the cycle has closed — anything more is the same
         // screens again, paid for in wall-clock the solve budget needs.
+        // A board that never closes a cycle used to have no exit at all: the
+        // loop ran to `total`, so every escalation onto a non-cycling widget
+        // filmed the whole videoBurstMaxMs. Mirrors `_record_keyframes` in the
+        // python port, which carries the measurement — including why "one
+        // screen" is not enough: a board that transitions ONCE and then holds
+        // shows two screens, repeats neither, and ran the full ceiling.
+        if (runToEnd && i + 1 >= floorFrames && captured - lastNewAt >= floorFrames) {
+          console.log(
+            `[animated] no new screen for ${(floorFrames * intervalMs / 1000).toFixed(1)}s `
+            + `(${order.length} seen) — the board has settled; stopping the burst`);
+          break;
+        }
         if (runToEnd && cycleClosed && i + 1 >= floorFrames) {
           console.log(
             `[animated] cycle closed after ${((i + 1) * intervalMs / 1000).toFixed(1)}s `
@@ -3259,6 +3285,7 @@ export class CaptchaKrakenSolver {
         env: solveEnv(
           cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
           apiKey,
+          this.resampleLevel,
         ),
         maxBuffer: 10 * 1024 * 1024,
       });
@@ -3428,6 +3455,7 @@ export class CaptchaKrakenSolver {
     this.solveDeadlineAt = 0;
     this.lastAnswerSig = null;
     this.noProgressRounds = 0;
+    this.resampleLevel = 0;
     // Per SOLVE, not per process: a grant leaking into the next captcha would
     // silently hand a still puzzle 18s it was never meant to have.
     this.videoBudgetMs = 0;
@@ -3479,9 +3507,14 @@ export class CaptchaKrakenSolver {
         + `(${this.noProgressRounds}/${this.config.maxNoProgressRounds ?? 2}) — `
         + `the previous one already ran and changed nothing`,
       );
-      // A board that reads the same every round is the signature of a CYCLING
-      // challenge answered as a still. Let the recording path have a go before
-      // giving up on the solve entirely.
+      // THE SAME ANSWER IS NOT NEWS — IT IS ARITHMETIC. The CLI sends
+      // `temperature: 0`, so re-reading an unchanged board returns the
+      // identical answer by construction, and counting that to a limit
+      // measures the limit. Ask for a different SAMPLE instead.
+      this.resampleLevel++;
+      // A board that reads the same every round is ALSO the signature of a
+      // CYCLING challenge answered as a still. Let the recording path have a go
+      // before giving up on the solve entirely.
       this.repeatedAnswerSeen = true;
     } else {
       this.noProgressRounds = 0;
@@ -3546,7 +3579,13 @@ export class CaptchaKrakenSolver {
    */
   private shouldSpeculate(puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown', textMode: boolean): boolean {
     if (this.config.videoSolveEnabled === false) return false;
-    if (this.config.speculativeBurstEnabled === false) return false;
+    // OPT-IN — `!== true`, so UNSET means off. Mirrors
+    // `PageSolverConfig.speculative_burst_enabled`, which carries the
+    // measurement: the burst calls a board "moving" on an exact frame hash, so
+    // render noise reads as a second screen, the cycle never closes, and a
+    // STILL board films to the ceiling while real animations stop at the floor.
+    // Both ports flip together or the driver gate measures two drivers.
+    if (this.config.speculativeBurstEnabled !== true) return false;
     if (puzzleSource === 'recaptcha') return false;
     if (textMode) return false;
     return true;
@@ -3631,6 +3670,7 @@ export class CaptchaKrakenSolver {
         env: solveEnv(
           cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
           apiKey,
+          this.resampleLevel,
         ),
         maxBuffer: 10 * 1024 * 1024 // Increase buffer for large outputs if needed
       });

@@ -1,15 +1,6 @@
 /**
- * Regression: the bearer token must never reach argv or stdout.
- *
- * Seen in a real driver run — the key in the process table AND echoed to the
- * console:
- *
- *   Executing CaptchaKraken CLI: python -m captchakraken.cli "shot.png" \
- *     captcha-v12 captchaKrakenApi DEADBEEF01232...  --puzzle-source=hcaptcha
- *
- * On Linux `/proc/<pid>/cmdline` is world-readable, so any local user could
- * read the key for as long as the solve ran, and the same string went into
- * stdout, CI logs and scrollback.
+ * The bearer token must reach the CLI through the environment, and must never
+ * appear in argv or in anything the client prints.
  */
 
 import { test } from 'node:test';
@@ -17,12 +8,15 @@ import assert from 'node:assert/strict';
 
 import {
   API_KEY_ENV,
+  RESAMPLE_LEVEL_ENV,
   buildSolveArgs,
   redactCommand,
   solveEnv,
 } from './cli-invocation';
 
-const KEY = 'REDACTED-ROTATED-KEY';
+// A synthetic token. Every assertion here is about where the string
+// travels, so the fixture is generated rather than read from anywhere.
+const KEY = `deadbeef${'0123456789abcdef'.repeat(3)}deadbeef`;
 
 const invocation = {
   imagePath: '/tmp/captcha_123.png',
@@ -59,8 +53,8 @@ test('a logged command is redacted even if a key reaches it', () => {
 });
 
 test('args are an array for execFile, not a shell string', () => {
-  // A joined string went through `exec`, i.e. through /bin/sh. A screenshot
-  // path containing a space or a quote could then reshape the command.
+  // A joined string would go through /bin/sh, where a screenshot path
+  // containing a space or a quote could reshape the command.
   const args = buildSolveArgs({ ...invocation, imagePath: "/tmp/a b'c.png" });
   assert.ok(Array.isArray(args));
   assert.ok(
@@ -79,4 +73,22 @@ test('vendor hint, retry mode and text mode still reach the CLI', () => {
   assert.ok(args.includes('--retry-mode=fresh'));
   assert.ok(args.includes('--text-mode'));
   assert.ok(args.includes('captcha-v12'));
+});
+
+test('a re-ask carries its level to the CLI, and a first look does not', () => {
+  // The CLI is a fresh process per round, so a level it is not told is a level
+  // it does not have: the request would be the same greedy decode over the
+  // same pixels, and would return the same answer.
+  const first = solveEnv({}, 'k');
+  assert.equal(first[RESAMPLE_LEVEL_ENV], undefined,
+    'a first look must stay deterministic');
+  const reask = solveEnv({}, 'k', 2);
+  assert.equal(reask[RESAMPLE_LEVEL_ENV], '2');
+  // The LEVEL travels, never the temperature: the schedule lives once, in
+  // planner.RESAMPLE_TEMPERATURES, so the two ports cannot drift.
+  assert.equal(reask['CAPTCHA_RESAMPLE_TEMPERATURE'], undefined);
+});
+
+test('level 0 is not sent at all', () => {
+  assert.equal(solveEnv({}, 'k', 0)[RESAMPLE_LEVEL_ENV], undefined);
 });

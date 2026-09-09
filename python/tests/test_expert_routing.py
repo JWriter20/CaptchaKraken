@@ -13,6 +13,7 @@ Three properties, and the third is the one that matters most:
    shipped registry rather than a fixture.
 """
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -180,26 +181,15 @@ def test_an_unrouted_model_returns_the_name_it_was_given():
 
 
 #: The release gate lives in the PRIVATE finetune repo, which this one is a
-#: submodule of. Present when the two are checked out together, absent in every
-#: standalone clone — including this repo's own CI, which is a standalone clone
-#: by definition and can never be anything else.
-#:
-#: So this skips there rather than failing there. It went in without the guard
-#: and turned `Regression gate (Python)` red on both interpreters at once, with
-#: a FileNotFoundError naming a path outside the checkout — a test asserting
-#: something true about a file CI is not allowed to have. Same shape and same
-#: fix as `_CORPUS` in test_hcaptcha_badge_detection.py.
-#:
-#: It keeps its teeth where the two copies can actually drift: in the monorepo,
-#: which is where the gate is edited and where a release is cut.
-_GATE = (
-    Path(__file__).resolve().parents[3] / "scripts" / "check_prompt_parity.py"
-)
+#: The release-side parity gate holds its own copy of PROMPT_FAMILIES, and the
+#: two can drift. Point CAPTCHA_PARITY_GATE at that file to check them against
+#: each other; without it this skips, because a clone of this repo alone has
+#: no second copy to disagree with.
+_GATE = Path(os.environ.get("CAPTCHA_PARITY_GATE") or "/nonexistent")
 
 
 @pytest.mark.skipif(not _GATE.is_file(),
-                    reason=f"release gate not present at {_GATE} "
-                           f"(standalone clone of the public repo)")
+                    reason="set CAPTCHA_PARITY_GATE to check the release gate's copy")
 def test_prompt_families_match_the_release_gate():
     """Two copies, because the gate reads the client by AST and cannot import
     it. Same reason AVAILABILITIES is spelled out twice."""

@@ -50,6 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from . import planner
 from .action_types import CaptchaAction
 from .solver import CaptchaSolver, UnsupportedCaptchaError
 from .timing import PhaseBudget, timings_enabled
@@ -307,7 +308,7 @@ class PageSolverConfig:
     #: is EXECUTED, so the previous one already ran and moved nothing. Repeating
     #: it cannot do better; it just spends a round.
     #:
-    #: Measured on recaptcha_grid_4x4 (fixture seed 20260730): the model answers
+    #: Measured on a reCAPTCHA 4x4 grid (the fixture): the model answers
     #: `[2,6,7,9,10]` on round 1 and then `[2,6,7,10]` on rounds 2 THROUGH 10 —
     #: nine identical click sets, each one clicked, each one rejected, ending in
     #: "still detected after 10 solve loops" at 66.1s. Of that, 39.0s was pure
@@ -317,6 +318,7 @@ class PageSolverConfig:
     #: the one recovery worth trying (a cycling board reads as a still and
     #: answers the same way every round). One more round buys that chance.
     max_no_progress_rounds: int = 2
+
     post_solve_delay_ms: int = 1_200
     # How long to keep watching for a SUCCESS after submitting.
     #
@@ -337,7 +339,7 @@ class PageSolverConfig:
     # 1000ms is therefore the measured worst case (528ms, ~264ms once the poll
     # below is halved) plus deliberate headroom for a vendor round-trip nobody
     # has measured yet. Down from 2500ms, which was spent in full on every
-    # unsuccessful round — 25.5s of one 66.1s recaptcha_grid_4x4 solve.
+    # unsuccessful round — 25.5s of one 66.1s a reCAPTCHA 4x4 grid solve.
     #
     # To replace the headroom with a number: drive the real vendor pages via
     # `tests/live-solve/src/demo-targets.ts` and re-read this distribution.
@@ -387,7 +389,7 @@ class PageSolverConfig:
     # still than spend `video_burst_duration_ms` finding out.
     animated_probe_enabled: bool = True
     # Burst geometry. Deliberately identical to the collector's
-    # (`_collect_common.BURST_DURATION_MS` / `BURST_FPS` in the finetune repo), so a
+    # (`_collect_common.BURST_DURATION_MS` / `BURST_FPS` in the training repo), so a
     # challenge recorded here is the same shape of artifact the model trained on —
     # same clip length, same frame rate, therefore the same keyframe slicing.
     video_burst_duration_ms: int = 4_000
@@ -398,7 +400,32 @@ class PageSolverConfig:
     #: Record while the still screenshot is being read, so a cycling board is
     #: known before its answer is acted on. Must match `speculativeBurstEnabled`
     #: in the JS port.
-    speculative_burst_enabled: bool = True
+    #:
+    #: OFF since 2026-09-09, because it cost the most on exactly the boards it
+    #: had nothing to say about. `_speculate` calls a board MOVING when two
+    #: frames hash differently — an exact SHA-1 of the PNG bytes — so one pixel
+    #: of render noise reads as a second screen, `cycle_closed` never fires
+    #: (noise does not repeat), and the burst runs to `video_burst_max_ms`.
+    #:
+    #: Measured over the 6 Sep full Tier 3 (260 attempts), and the numbers are
+    #: the wrong way round: the genuinely ANIMATED families closed their cycle
+    #: at the 4s floor — tile_flip 3.96s, odd_animal 3.98s, highest_jumper
+    #: 3.95s — while STILL boards ran to the 12s ceiling. tower_stack 12.03s,
+    #: click_blocked_by_lines 11.93s, missing_piece 11.89s, silhouette_match
+    #: 11.76s, tetris_fit 9.96s, connect_path 9.94s. Those are click and drag
+    #: archetypes with no animation in them, and three of them scored 0%: they
+    #: were not answered wrongly, they ran out of budget being filmed.
+    #:
+    #: Worse than the wall clock, `len(order) >= 2` also DISCARDS the still
+    #: answer and escalates to the keyframe path, so a correct reading of a
+    #: static board was being thrown away because the render jittered.
+    #:
+    #: An animated board is still solved: `animated_probe_enabled` escalates on
+    #: the repeated-answer signal and `_record_keyframes` films a bounded 4s.
+    #: That costs a genuinely animated board one extra round and saves every
+    #: still board 4-12s. Turn this back on only with the digest replaced by a
+    #: comparison that has a noise floor.
+    speculative_burst_enabled: bool = False
     video_burst_fps: int = 10
     # How long to wait for the widget to return to the keyframe the model chose,
     # before clicking anyway. Bounded because the alternative is worse: these
@@ -424,9 +451,9 @@ class PageSolverConfig:
     #: reported a TIMEOUT — which reads as a slow model rather than as a budget
     #: with no room for the thing the solver had just decided to do.
     #:
-    #: Measured 2026-08-22, Tier 3 run 32596340560: EVERY python-port failure on
-    #: hcaptcha_fish_swim_different, hcaptcha_number_with_highest_value_video and
-    #: hcaptcha_tile_flip_video was "exceeded overall_solve_timeout_ms during
+    #: Measured 2026-08-22, a full driver-gate run: EVERY python-port failure on
+    #: an hCaptcha odd-one-out animation, an hCaptcha highest-value animation and
+    #: an hCaptcha tile-flip animation was "exceeded overall_solve_timeout_ms during
     #: recording the animated challenge", at 45.7-52.7s elapsed. The same three
     #: fixtures solve in 11-20s on the rounds where the still path happens to
     #: answer them, so it is the escalation that does not fit, not the puzzle.
@@ -739,6 +766,9 @@ class PageSolver:
         # Repeat detection; see `max_no_progress_rounds`.
         self._last_answer_sig: Optional[str] = None
         self._no_progress_rounds = 0
+        #: How many times THIS board has been re-asked. Indexes
+        #: `planner.RESAMPLE_TEMPERATURES`; reset by `_fresh_board`.
+        self._resample_level = 0
         # Per-solve phase accounting; see `_phase`.
         self._budget: Optional[PhaseBudget] = None
 
@@ -802,13 +832,56 @@ class PageSolver:
             _log(f"[no-progress] the model returned the same answer again "
                  f"({self._no_progress_rounds}/{self.config.max_no_progress_rounds}) — "
                  f"the previous one already ran and changed nothing")
-            # A board that reads the same every round is the signature of a
+            # THE SAME ANSWER IS NOT NEWS — IT IS ARITHMETIC. `planner` sends
+            # `temperature: 0`, so re-reading an unchanged board returns the
+            # identical answer by construction, and counting that to a limit
+            # measures nothing but the limit. Ask for a different SAMPLE before
+            # spending the next round on a reply already known.
+            self._resample_level += 1
+            self._apply_sampling()
+            # …and make sure there is something to re-ask. On the animated path
+            # the answer is cached for the life of the board, so without this
+            # the new sampling never reaches a request and the identical
+            # coordinates go back up the wire.
+            self._invalidate_animated_answer()
+            # A board that reads the same every round is ALSO the signature of a
             # CYCLING challenge answered as a still. Give the recording path a
             # chance before giving up on the solve entirely.
             self._arm_animated_probe()
         else:
             self._no_progress_rounds = 0
             self._last_answer_sig = sig
+
+    def _apply_sampling(self) -> None:
+        """Point the planner at this board's re-ask level.
+
+        Level 0 is greedy and is what every first look gets, so this is a no-op
+        on the path that already works. Past that it hands the model a
+        temperature and a fresh seed, because a board the vendor refused is one
+        where the greedy answer has been TESTED and rejected — re-running it is
+        the one thing guaranteed not to help.
+        """
+        target = getattr(self._solver, "planner", None)
+        if target is None:
+            return
+        # `planner.sampling_for_level` is the ONE copy of the schedule, and the
+        # JS port reaches the same function through CAPTCHA_RESAMPLE_LEVEL.
+        # Deliberately NOT a `PageSolverConfig` field: the contract pins the two
+        # ports to the same solver options, and a knob on one side only is the
+        # parity gap CLAUDE.md says may only shrink. It is a tuning constant,
+        # not something a caller has any way to choose well.
+        sampling = planner.sampling_for_level(self._resample_level)
+        target.sampling = sampling
+        if sampling:
+            _log(f"[resample] re-asking this board at temperature "
+                 f"{sampling['temperature']}, seed {sampling['seed']}")
+
+    def _fresh_board(self) -> None:
+        """A different puzzle is up: go back to the greedy read."""
+        if self._resample_level:
+            _log("[resample] fresh board — back to greedy")
+        self._resample_level = 0
+        self._apply_sampling()
 
     def _reset_animated_state(self) -> None:
         self._known_animated = False
@@ -820,6 +893,8 @@ class PageSolver:
         self._keyframe_steady_screens = 0
         self._last_answer_sig: Optional[str] = None
         self._no_progress_rounds = 0
+        self._resample_level = 0
+        self._apply_sampling()
 
     def _check_deadline(self, where: str) -> None:
         """
@@ -2020,6 +2095,28 @@ class PageSolver:
             pool.shutdown(wait=True)
             _unlink(probe)
 
+    def _invalidate_animated_answer(self) -> None:
+        """The recording is still good; the ANSWER it produced is not.
+
+        `_animated_plan` caches "one burst, one inference, for as long as this
+        board is up". For a cycling board whose answer merely landed on the
+        wrong screen that is right — the frames do not change, so re-recording
+        buys nothing. It is WRONG the moment the widget has refused the answer:
+        re-submitting the identical coordinates cannot succeed, and the driver
+        did exactly that until it ran out of rounds. Measured 2026-09-09 on
+        `an hCaptcha line-pieces board`, where every round logged "reusing the recorded
+        answer" and then "the model returned the same answer again" — the model
+        was never asked a second time.
+
+        Drops the ANSWER and keeps the FRAMES, so the retry costs one inference
+        rather than another `video_burst_max_ms` of filming.
+        """
+        plan = self._animated_plan
+        if plan is None or plan[2] is None:
+            return
+        keyframes, keyframe_dir, _actions, _usage = plan
+        self._animated_plan = (keyframes, keyframe_dir, None, None)
+
     def _discard_animated_plan(self) -> None:
         """Forget the recorded answer, and delete the frames it was holding."""
         plan = self._animated_plan
@@ -2112,6 +2209,10 @@ class PageSolver:
         order: List[str] = []          # distinct screens, in first-seen order
         last_digest: Optional[str] = None
         cycle_closed = False
+        #: Frame index at which the most recent NEW screen appeared. A board
+        #: that has shown nothing new for a whole floor-length window has
+        #: settled — see the exit below.
+        last_new_at = 0
 
         remaining = max(0, total - len(frames))
         shot = _tmp_png("burst")
@@ -2155,12 +2256,49 @@ class PageSolver:
                                 cycle_closed = True
                             elif d not in order:
                                 order.append(d)
+                                last_new_at = len(frames)
                             last_digest = d
                 # Past the floor with the cycle closed — more frames are the
                 # same screens again, paid for in budget the solve needs.
                 if cycle_closed and len(frames) >= floor_frames:
                     _log(f"[animated] cycle closed after {len(frames) * interval:.1f}s "
                          f"({len(order)} screens); stopping the burst")
+                    break
+                # NOTHING NEW FOR A WHOLE FLOOR-LENGTH WINDOW: the board has
+                # SETTLED, and a settled board can never close a cycle —
+                # `cycle_closed` needs a digest to come back AFTER a different
+                # one. Without this exit the only way out is `remaining`, so
+                # every escalation onto a widget that is not cycling filmed the
+                # full `video_burst_max_ms`.
+                #
+                # `_speculate` has always had this half (`not moved and
+                # fut.done()`); it could, because it has an inference to wait
+                # on. This path had nothing equivalent and so could not stop
+                # early at all.
+                #
+                # "Settled", not "one screen", because there are THREE shapes
+                # and only one of them is a cycle. Measured on the real fixtures
+                # through camoufox, one element screenshotted 25x at 10fps:
+                #
+                #   click_blocked_by_lines  1 distinct sha1  MAD  0.00  never moves
+                #   connect_path            1 distinct sha1  MAD  0.00  never moves
+                #   tower_stack             2 distinct sha1  MAD 32.51  moves ONCE
+                #   geetest_v4_svg          3 distinct sha1  MAD  8.29  really cycles
+                #
+                # `tower_stack` is why a one-screen test is not enough: it
+                # transitions once and then holds, so it has two screens, never
+                # repeats either, and ran the full 12s under a one-screen rule.
+                #
+                # The window is the burst FLOOR (4s), which is safely longer
+                # than the worst dwell a cycling board holds a screen for —
+                # measured p50 1.5s / p75 2.0s / max 2.7s on the geetest svg
+                # board — so a real cycle always produces a new screen inside
+                # the window and is never cut short here.
+                if (len(frames) >= floor_frames
+                        and len(frames) - last_new_at >= floor_frames):
+                    _log(f"[animated] no new screen for {floor_frames * interval:.1f}s "
+                         f"({len(order)} seen) — the board has settled; "
+                         f"stopping the burst")
                     break
                 # Drift-corrected: a slow screenshot must not stretch the clip, or
                 # the recording covers more wall-clock than the model trained on and
@@ -2213,12 +2351,12 @@ class PageSolver:
         cheap failure: the gate polls the full `keyframe_wait_timeout_ms` (6s)
         PER CLICK before giving up and clicking anyway.
         And `even` is not the rare case. All 116 real clips under
-        `cleanSamples/test/raw/**/keyframes/` are `even`; `cycle` has never once
+        `the sample corpus/**/keyframes/` are `even`; `cycle` has never once
         fired on real footage, which keyframes.py itself records ("real state
         separations top out around 0.007, well under this"). So on real traffic
         this gate was 6s of dead time on every animated click, always followed by
         the same click it would have made immediately. Measured on
-        `hcaptcha_rotating_obj_video`: 6.0s of a 28.8s solve, closest region diff
+        `an hCaptcha rotating-object animation`: 6.0s of a 28.8s solve, closest region diff
         0.0721 against a 0.05 tolerance, then it clicked and solved.
 
         The gate stays for `cycle`/`static`, where a state genuinely does recur
@@ -2324,7 +2462,7 @@ class PageSolver:
         `return !!(example && ...)`, which is false when there is no example
         image — so a challenge with no tile grid, no canvas and no example
         polled until the timeout and then carried on regardless. Measured on
-        `hcaptcha_number_with_highest_value_video`: 24.0s of a 45.2s solve, the
+        `an hCaptcha highest-value animation`: 24.0s of a 45.2s solve, the
         full 8s three times over, more than half the budget spent asking a
         question about elements that were not on the page. A readiness gate can
         only report on what it can see; with nothing to check it has no opinion,
@@ -2843,7 +2981,7 @@ class PageSolver:
                     self._move_and_click(page, verify)
                     # The press IS an interaction, and saying so is load-bearing
                     # — the same rule `_solve_single` learned on
-                    # prosopo_grid_3x3, in the other driver, on another day. A
+                    # a Prosopo 3x3 grid, in the other driver, on another day. A
                     # `done` round clicks no tile, so without this the one
                     # answer shape that submits and does nothing else reports
                     # having done nothing: the caller then takes the
@@ -2968,11 +3106,17 @@ class PageSolver:
                 # number in the answer is the real guard: it names the state to act
                 # in, and `_execute_click` waits for it.
                 if self._animated_plan is not None:
-                    # ONE burst, ONE inference, for as long as this board is up.
+                    # ONE burst for as long as this board is up — and, until
+                    # 2026-09-09, one INFERENCE too, which is what made a
+                    # refused answer immortal. `actions` is None once the
+                    # widget has rejected them (`_invalidate_animated_answer`),
+                    # so the frames are reused and the QUESTION is asked again.
                     keyframes, keyframe_dir, actions, all_usage = self._animated_plan
+                    reused_plan = actions is not None
                     _log("[animated] reusing the recorded answer — "
-                         "same board, same screens")
-                    reused_plan = True
+                         "same board, same screens" if reused_plan else
+                         "[animated] same screens, but the last answer was "
+                         "refused — re-asking on the frames already recorded")
                 else:
                     reused_plan = False
                     with self._phase("burst"):
@@ -3199,7 +3343,7 @@ class PageSolver:
             # control at all, so `verify_button` is None and nothing is pressed
             # either way. What the exclusion actually bought was a whole extra
             # model call per puzzle, spent asking a board we had already answered
-            # correctly whether it was `done` — 6.2 s of prosopo_grid_3x3's 13.8 s,
+            # correctly whether it was `done` — 6.2 s of a Prosopo 3x3 grid's 13.8 s,
             # on a selection that scored 1.0 on the first call.
             answered = clicked or placed or typed
             should_submit = not slid and (answered or not performed_action)
@@ -3210,7 +3354,7 @@ class PageSolver:
                 # the caller aborts a round that reports none, so submitting a
                 # `done` answer and then returning False re-arms the very guard
                 # this satisfies — the puzzle is sent and the solve gives up on
-                # it one line later, which is what `prosopo_grid_3x3` did.
+                # it one line later, which is what `a Prosopo 3x3 grid` did.
                 performed_action = True
                 # Snapshot at submit time so the NEXT attempt waits for the real
                 # transition before treating whatever is on screen as fresh.
@@ -3540,7 +3684,7 @@ class PageSolver:
                 # `is_captcha_solved` — which reads only the hCaptcha and
                 # reCAPTCHA anchors — can never fire for them and this loop
                 # ran out its whole 2.5s budget on EVERY round, waiting for
-                # a signal that cannot arrive. Measured on geetest_v4_slide:
+                # a signal that cannot arrive. Measured on a GeeTest v4 slider:
                 # 5.2s of a 12.3s solve, spent after the puzzle was already
                 # answered, with the widget sitting there visibly solved.
                 #
@@ -3557,6 +3701,9 @@ class PageSolver:
                 else:
                     widget_gone = 0
                 if self._is_challenge_freshly_rendered(page):
+                    # A DIFFERENT puzzle, so the greedy answer has not been
+                    # tested against it and the escalation must not carry over.
+                    self._fresh_board()
                     break  # next round is up; go solve it now
                 _delay(cfg.post_solve_outcome_poll_ms)
             _verdict_ms = (time.perf_counter() - _verdict_t0) * 1000.0

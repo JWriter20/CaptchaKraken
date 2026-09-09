@@ -1,28 +1,27 @@
 /**
  * How the JS client hands a solve request to the bundled Python CLI.
  *
- * The API key used to travel as a POSITIONAL ARGUMENT, and the whole command
- * line was then echoed:
+ * Two rules govern this module, and both exist because the alternative is
+ * unsafe rather than merely untidy:
  *
- *   console.log(`Executing CaptchaKraken CLI: ${command}`);
- *   // Executing CaptchaKraken CLI: python -m captchakraken.cli "shot.png" \
- *   //   captcha-v12 captchaKrakenApi DEADBEEF01232...  --puzzle-source=hcaptcha
+ * 1. The API key travels in the ENVIRONMENT, never in argv and never to stdout.
+ *    Argv is world-readable on Linux — any local user can read
+ *    `/proc/<pid>/cmdline` while a solve runs, and `ps` shows it — and anything
+ *    printed alongside the command lands in CI logs and terminal scrollback.
+ *    An environment block is per-process and not world-readable.
  *
- * Two leaks from one mistake. Argv is world-readable on Linux — any local user
- * can read `/proc/<pid>/cmdline` while the solve runs, and `ps` shows it — and
- * the key was additionally written to stdout, so it landed in CI logs, terminal
- * scrollback, and anything scraping driver output.
- *
- * Secrets go through the environment instead, which is per-process and not
- * world-readable, and the command is built as an ARGV ARRAY for `execFile`
- * rather than a joined string for a shell, so a path with a space or a quote
- * cannot reshape the command.
+ * 2. The command is built as an ARGV ARRAY for `execFile`, not a joined string
+ *    for a shell, so a screenshot path containing a space or a quote cannot
+ *    reshape the command.
  */
 
 /** Env var the CLI reads the bearer token from. */
 export const API_KEY_ENV = 'CAPTCHA_KRAKEN_API_KEY';
 
-/** Historical positional placeholder. The CLI still accepts the slot. */
+/** Env var carrying the re-ask level for a board the vendor already refused. */
+export const RESAMPLE_LEVEL_ENV = 'CAPTCHA_RESAMPLE_LEVEL';
+
+/** Positional placeholder the CLI still accepts in this slot. */
 export const API_PROVIDER = 'captchaKrakenApi';
 
 export interface SolveInvocation {
@@ -62,9 +61,21 @@ export function buildSolveArgs(invocation: SolveInvocation): string[] {
 export function solveEnv(
   base: NodeJS.ProcessEnv,
   apiKey?: string,
+  resampleLevel?: number,
 ): NodeJS.ProcessEnv {
-  if (!apiKey) return base;
-  return { ...base, [API_KEY_ENV]: apiKey };
+  const out: NodeJS.ProcessEnv = apiKey ? { ...base, [API_KEY_ENV]: apiKey } : { ...base };
+  // How many times THIS board has already been read and refused. The CLI is a
+  // fresh process per round, so it cannot know; and without it a re-ask is the
+  // same greedy arithmetic on the same pixels and returns the same answer,
+  // which is the whole of the "same answer 3 times running" failure.
+  //
+  // The LEVEL travels, not the temperature: the schedule lives once, in
+  // `planner.RESAMPLE_TEMPERATURES`, so the two ports cannot drift apart on a
+  // number Tier 3 would then average.
+  if (resampleLevel && resampleLevel > 0) {
+    out[RESAMPLE_LEVEL_ENV] = String(resampleLevel);
+  }
+  return out;
 }
 
 /**

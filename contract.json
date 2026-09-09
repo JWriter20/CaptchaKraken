@@ -260,6 +260,10 @@
     "CAPTCHA_REQUEST_PRIORITY": [
       "python/src/captchakraken/planner.py"
     ],
+    "CAPTCHA_RESAMPLE_LEVEL": [
+      "js/src/cli-invocation.ts",
+      "python/src/captchakraken/planner.py"
+    ],
     "CAPTCHA_TIMINGS": [
       "js/src/timing.ts",
       "python/src/captchakraken/timing.py"

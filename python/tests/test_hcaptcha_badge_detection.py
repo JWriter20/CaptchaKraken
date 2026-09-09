@@ -126,11 +126,12 @@ def test_the_recaptcha_corner_chip_is_unaffected():
 
 
 # ── the corpus this was measured on ─────────────────────────────────────────
-# Only present in the dev monorepo (tests -> python -> CaptchaKraken -> finetune
-# root); a standalone clone skips.
-_CORPUS = (
-    Path(__file__).resolve().parents[3] / "cleanSamples" / "test" / "raw" / "recaptcha_grid_3x3"
-)
+# A directory of reCAPTCHA 3x3 board captures. Point CAPTCHA_GRID_CORPUS at one
+# to run this; without it the test skips, which is what a clone without a corpus
+# should do.
+# Path("") is Path("."), which IS a directory — the skip has to test the
+# environment variable, not the path.
+_CORPUS = Path(os.environ.get("CAPTCHA_GRID_CORPUS") or "/nonexistent")
 # Every capture in it is a FRESH board — the collector photographs a puzzle
 # before anyone has clicked it — so any selection reported is a phantom. A
 # budget rather than zero: the residue is all ONE class, and it is a class no
