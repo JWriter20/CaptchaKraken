@@ -5,12 +5,14 @@ solve rates depend on more than the model.
 
 ## Accuracy
 
-**The figures we publish are the recorded solves in the
-[main README](../README.md#watch-it-work).** Thirteen puzzle types, each driven
-on the vendor's own public demo page through the hosted API, every attempt
-scored (one row excepted and labelled), recorded 2026-08-19 against the adapter
-the hosted API serves today. Counts rather than percentages, and a median
-whole-solve time taken from the run rather than from the footage.
+**Every figure we publish is on one page: [benchmarks.md](./benchmarks.md)** —
+the real-captcha browser runs and the per-puzzle model accuracy side by side,
+because neither answers the other's question. The headline is the browser table:
+thirteen puzzle types, each driven on the vendor's own public demo page through
+the hosted API, every attempt scored (one row excepted and labelled), recorded
+2026-08-19 against the adapter the hosted API serves today. Counts rather than
+percentages, and a median whole-solve time taken from the run rather than from
+the footage.
 
 That is deliberately an **end-to-end** number — detect, read, click, verify, and
 the vendor accepting — not a model score. It is the one worth quoting because it
@@ -23,9 +25,10 @@ measured memorisation alongside skill, by an amount that varied per puzzle type
 and was largest exactly where the headline number was highest. The split was
 replaced — **every** real capture is held out and nothing hand-labeled trains,
 which is the only arrangement in which real captures can still detect drift in
-the training data — and the model has been re-measured against it since. We are
-not restating a bare model-accuracy percentage here, because on its own it tells
-you very little about whether a captcha actually clears.
+the training data — and the model has been re-measured against it since. The
+re-measured per-puzzle rates are on [benchmarks.md](./benchmarks.md), printed
+beside the browser counts rather than alone, because on its own a model score
+tells you very little about whether a captcha actually clears.
 
 The method behind the recorded solves: exact set match — every correct tile
 selected and no incorrect ones, no partial credit, because a partially-correct

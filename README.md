@@ -370,7 +370,7 @@ set, so they are the likeliest to move.
 
 ### Accuracy, measured
 
-**The numbers we publish are the clips at the top of this page.** Each one is
+**The headline numbers are the clips at the top of this page.** Each one is
 that puzzle driven on the vendor's own public demo page through the hosted API,
 with every attempt scored — counts, not percentages, and a median solve time
 computed from the run rather than from the footage. Recorded 2026-08-19 against
@@ -384,9 +384,10 @@ An earlier revision of this section carried per-type **model** accuracy taken on
 2026-07-27. Those figures were withdrawn — the eval split of the day let some
 hand-labeled captures reach training, so they measured memorisation alongside
 skill. The split was replaced (**every** real capture is held out; nothing
-hand-labeled trains) and the model has been re-measured against it since, but we
-are not restating a bare model-accuracy percentage here: on its own it tells you
-very little about whether a captcha clears. The clips do.
+hand-labeled trains) and the model has been re-measured against it since. Those
+re-measured rates are published on the benchmark page below, never on their own:
+a bare model score tells you very little about whether a captcha clears, so it is
+printed beside the browser counts rather than instead of them.
 
 The method behind them, so you can reproduce the shape of it: exact set match —
 every correct tile and no incorrect ones, no partial credit, because a
@@ -401,6 +402,12 @@ captures the adapter has never trained on.
 > screenshots the same model scores **0% on 4×4**, because it has to invent a
 > numbering convention for sixteen cells of one continuous photograph and
 > answers `1..k`. If you are building your own client, draw the overlay.
+
+**Both tables, one page: [docs/benchmarks.md](./docs/benchmarks.md).** That is
+the canonical benchmark page — the browser runs above in full, and beside them
+the per-puzzle model accuracy over 1,715 held-out real captures, scored the way a
+widget scores. Two measurements, because they answer two different questions; a
+figure quoted anywhere else in this repo is a copy of one of them.
 
 Method, per-device speed tables, and why browser solve rates differ from model
 accuracy: **[docs/performance.md](./docs/performance.md)**.
@@ -444,17 +451,25 @@ all you face and you want the smaller stack.
 | 🟦 **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
 | 🟦 **Sunlight** | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
 
-### ⬛ Abyss — not published, not serving yet
+### ⬛ Abyss — hosted for licence holders, never downloadable
 
-**In training**, on a **different and larger base: Qwen3.8-27B**, where every
-public model above is Qwen3.5-9B. Trained against the failures of the open
-weights, and **hosted-only** when it lands — it is not a bigger quantisation of
-the public models, and nothing about its size or VRAM follows from theirs. Every puzzle the open model gets wrong on the held-out set is a
+**Serving now, to licence holders only.** It shares the public models' base —
+Qwen3.5-9B — but it is not a bigger quantisation of them and nothing about its
+VRAM follows from theirs: it is a **routed mixture of specialist adapters**,
+one each for grids, pixel-precision work, animation and text, chosen per
+request by the shape of the puzzle. Trained against the failures of the open
+weights, and **hosted-only**. Every puzzle the open model gets wrong on the held-out set is a
 labelled example of a weakness, and Abyss is trained specifically to close
 them, starting with the non-grid hCaptcha puzzles. Keeping it on our own fleet
 is what lets it keep learning from production failures without shipping a
-customer's puzzle set to everyone who runs `hf download`. **Do not plan around
-it today** — the hosted API answers with Twilight v1.2 until it ships.
+customer's puzzle set to everyone who runs `hf download`.
+
+**It is not the default, and there is nothing to download.** The hosted API
+answers with Twilight v1.2 unless a request names Abyss, and an account without
+a licence that names it gets a clear 403 — never a quiet substitution, so you
+always know which model answered. No weights are published for it, and no
+accuracy figures are either: every number on this page is Twilight v1.2's. Open
+an issue to ask about a licence.
 
 Which one you want:
 
@@ -581,7 +596,8 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 | 📦 [Self-hosting](./docs/self-hosting.md) | `setup.sh`, model sizes, server management, config, **updating** |
 | 🚀 [Usage](./docs/usage.md) | Install, the 4 browser frameworks, **mouse / mobile / no humanization**, the Python CLI, migrating from v1 |
 | ⚙️ [How it works](./docs/how-it-works.md) | The solve pipeline, `find_grid`, the freshness guard, dedup |
-| 📊 [Performance](./docs/performance.md) | Accuracy, speed-by-device tables, IP-reputation & rate limits |
+| 📊 [Benchmarks](./docs/benchmarks.md) | The canonical numbers: real captchas in a browser, and per-puzzle model accuracy |
+| ⚡ [Performance](./docs/performance.md) | Speed-by-device tables, IP-reputation & rate limits |
 | 🗺️ [Roadmap](./docs/roadmap.md) | What shipped, what's in progress, and what's planned |
 | 📜 [Licensing](./docs/licensing.md) | Plain-English: what you can and can't build |
 
@@ -595,7 +611,9 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 - 🟢 **Shipped** — **v1.2**: every vendor we solve (44 puzzle types across 10),
   animated challenges, typed text — as a LoRA and as **Sunlight** / **Twilight**
   merges, all public on [HuggingFace](https://huggingface.co/CaptchaKraken).
-- 🟡 **In progress** — **Abyss**, the next hosted-only model.
+- 🟢 **Shipped** — **Abyss**, hosted-only: served to licence holders who name it
+  on the request, never downloadable, and not the default — the hosted API still
+  answers with **Twilight v1.2** unless you ask for it.
 - ⚪ **Planned** — 🎯 higher accuracy on the **freehand hCaptcha puzzles**
   (connect-the-path and the numbered-line / missing-piece drags), which are the
   families the model is least reliable on. Every hCaptcha family we ship is
