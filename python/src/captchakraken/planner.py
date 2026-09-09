@@ -284,11 +284,30 @@ def video_action_prompt(n_keyframes: int) -> str:
 
 
 #: Sampling temperature per RE-ASK of a board the vendor refused, first entry
-#: first. THE ONE COPY: `PageSolverConfig.resample_temperatures` defaults to it
-#: and the JS port reaches it through `CAPTCHA_RESAMPLE_LEVEL` rather than
-#: carrying its own numbers, because a schedule written down twice is a schedule
-#: the two ports can disagree about — and Tier 3 drives both and averages them.
-RESAMPLE_TEMPERATURES = (0.0, 0.35, 0.7)
+#: first. THE ONE COPY: the JS port reaches this through `CAPTCHA_RESAMPLE_LEVEL`
+#: rather than carrying its own numbers, because a schedule written down twice is
+#: a schedule the two ports can disagree about — and the driver gate drives both
+#: and averages them.
+#:
+#: GREEDY ONLY, AND THAT IS A MEASUREMENT, NOT AN OVERSIGHT. Heating the re-ask
+#: was tried: `(0.0, 0.35, 0.7)`, escalating each time a board came back with the
+#: answer it had already given. On five puzzle types that a greedy driver passes,
+#: the escalating one scored 0/5 against 4/5, and the median FAILED attempt cost
+#: 24.0s against 13.9s. Two things went wrong and they compound:
+#:
+#:   1. A hotter sample is a WORSE answer. The greedy read is the best single
+#:      guess this model has; the schedule spends rounds walking away from it.
+#:   2. It defeats the give-up rule. `_no_progress_rounds` counts IDENTICAL
+#:      answers, so making each re-ask differ resets the counter — the attempt
+#:      stops bailing at round 3 and runs to the round ceiling instead. Slower
+#:      failures, not fewer.
+#:
+#: The plumbing stays because the LEVEL is the right thing to travel; what was
+#: wrong was the trigger. A re-ask should be driven by the vendor actually
+#: refusing the answer — read off the network response — and not by the model
+#: agreeing with itself, which is only ever evidence that decoding is
+#: deterministic. Add temperatures here when that signal exists to gate them.
+RESAMPLE_TEMPERATURES = (0.0,)
 
 
 def sampling_for_level(level: int) -> Dict[str, Any]:
