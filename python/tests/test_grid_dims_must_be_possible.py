@@ -21,7 +21,7 @@ Two independent guards, because they catch different things:
     board is not a hard call, it is a contradiction. Measured on real captures:
     that single rule removes four of the five boards that currently clear both
     `find_grid` and `_is_real_grid` and would be answered as grids
-    (`hcaptcha_drag_missing_slot`, three variations).
+    (an hCaptcha drag-into-slot board, three variations).
 
 `unknown` stays permissive, deliberately and in both directions. It is what the
 driver reports for every vendor that is not hCaptcha or reCAPTCHA — GeeTest and
@@ -57,7 +57,7 @@ def test_hcaptcha_never_has_sixteen_cells():
 
 
 def test_hcaptcha_still_solves_its_own_3x3():
-    """hcaptcha_grid_3x3_property is a registered grid type and must survive —
+    """an hCaptcha 3x3 property grid is a registered grid type and must survive —
     the CLI's own help text claims 'hCaptcha skips grid detection', which would
     have broken it."""
     assert _grid_dims(9, "hcaptcha") == (3, 3)

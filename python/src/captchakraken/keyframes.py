@@ -1,7 +1,7 @@
 """Reduce a recorded captcha clip to the few frames the model is shown.
 
 VERBATIM PORT. Everything below the docstring is byte-identical to
-`src/video/keyframes.py` in the the training repo repo, and
+the training-side extractor in the training repo, and
 `scripts/the parity gate` there fails the build if the two ever diverge.
 
 That is not tidiness, it is a correctness requirement. The model is trained on

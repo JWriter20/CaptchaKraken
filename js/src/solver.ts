@@ -971,7 +971,7 @@ export class CaptchaKrakenSolver {
           // authority immediately after this loop, so this only reaches the
           // same verdict sooner — confirmed over two polls so a frame caught
           // mid-swap between rounds cannot read as a solve. page_solver.py has
-          // had this since the geetest_v4_slide measurement (5.2s of a 12.3s
+          // had this since the a GeeTest v4 slider measurement (5.2s of a 12.3s
           // solve, spent after the puzzle was already answered); this port had
           // not, which is most of why it measured slower on those vendors.
           if (!(await this.detectCaptcha(page))) {
@@ -1074,7 +1074,7 @@ export class CaptchaKrakenSolver {
       // observability snapshot, and `animations: 'disabled'` makes Playwright
       // wait for the element to stop moving before it will take it. On a widget
       // that is still animating that wait ran to the full 8s, per step:
-      // measured 8.0s of a 12.0s mtcaptcha_text solve, spent photographing a
+      // measured 8.0s of a 12.0s an MTCaptcha distorted-text puzzle solve, spent photographing a
       // text box for a trace. An observer must never cost more than the action
       // it is observing, and a missed frame in a trace costs nothing.
       await captchaElement.screenshot({
@@ -1107,7 +1107,7 @@ export class CaptchaKrakenSolver {
     // find_grid false-positives on the header+footer bands of hCaptcha's click
     // puzzles, and hCaptcha ships only a 3x3 — so a 16-cell lattice on one is a
     // contradiction and is dropped back to the click path. It is not a blanket
-    // skip: hcaptcha_grid_3x3_property is a real grid and still solves as one.
+    // skip: an hCaptcha 3x3 property grid is a real grid and still solves as one.
     // Anything that is not hCaptcha or reCAPTCHA reports 'unknown' and is
     // allowed every shape (GeeTest and Prosopo both ship real 3x3 grids).
     const src = await captchaElement.getAttribute('src').catch(() => null);
@@ -1552,7 +1552,7 @@ export class CaptchaKrakenSolver {
         // caller aborts a round that reports none, so submitting a `done`
         // answer and then reporting false re-arms the very guard this
         // satisfies — the puzzle is sent and the solve gives up on it one line
-        // later, which is what `prosopo_grid_3x3` did.
+        // later, which is what a Prosopo 3x3 grid did.
         performedAction = true;
         await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
         // Snapshot the frame at submit time so the NEXT attempt waits for the
@@ -1773,7 +1773,7 @@ export class CaptchaKrakenSolver {
       // couple of seconds after the winning submit. Gating this on the anchor's
       // visibility meant the one signal that was already true went unread, and
       // the loop ground on against a frame being torn down. Mirrors the Python
-      // driver; pinned by tests/test_solved_detection.py in the finetune repo.
+      // driver; pinned by the training repo's solved-detection tests in the training repo.
       if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
       if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
       // Turnstile. detectCaptcha already reads this exact field to decide a
@@ -3334,8 +3334,8 @@ export class CaptchaKrakenSolver {
    * one-way fade, a sprite crossing — so there is no state to come back to and
    * this can only run out its full 6s, PER CLICK, before clicking the
    * coordinates it already had. It is also the normal case, not a corner: all
-   * 116 real clips under cleanSamples/test/raw are `even` and `cycle` has never
-   * fired on real footage. Measured on hcaptcha_rotating_obj_video: 6.0s of a
+   * 116 real clips under the held-out sample corpus are `even` and `cycle` has never
+   * fired on real footage. Measured on an hCaptcha rotating-object animation: 6.0s of a
    * 28.8s solve, closest region diff 0.0721 against a 0.05 tolerance, then the
    * same click, then solved. Kept for `cycle`/`static`, where the state does
    * come back and waiting is the difference between the sprite and background.
@@ -4105,7 +4105,7 @@ export class CaptchaKrakenSolver {
     // BOUNDED. Playwright's default is 30s and it waits for the element to be
     // STABLE — not animating — before it will scroll. This runs once per action
     // and once per submit, so on a challenge that is mid-animation it burned
-    // the full default every time: measured 10.1s of a 12.0s mtcaptcha_text
+    // the full default every time: measured 10.1s of a 12.0s an MTCaptcha distorted-text puzzle
     // solve, spent scrolling to a text box that was already on screen. The
     // element is on screen in every real case here (we just screenshotted it),
     // so a short bound loses nothing: on timeout we move to wherever it is.

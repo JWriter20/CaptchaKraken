@@ -17,7 +17,7 @@ that HAS Chromium — just not the pinned one — and this file used to report t
 as four ERRORS. Four broken tests, in the one place that checks the
 compatibility claim against something real. So the launch walks every installed
 build and passes `executable_path`, the same resolution
-CaptchaKrakenFinetune's `tests/test_fixtures_are_solvable.py` uses.
+the training repo's fixture suite uses.
 
 Skipping is reserved for a box with NO browser at all, because the package
 ships with no browser dependency and an end user is not required to have one.

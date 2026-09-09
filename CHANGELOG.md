@@ -205,7 +205,7 @@ drive a phone, and no way to turn it off when your stack already did it.
 
 A solve-timing release. Nothing here changes what the model answers; it changes
 how much of a solve is spent waiting for things that cannot happen. The measured
-end of it: a `recaptcha_grid_4x4` attempt that used to run 66.1s and fail now
+end of it: a a reCAPTCHA 4x4 grid attempt that used to run 66.1s and fail now
 gives up at round 4, and Tier 3 stops spending half its wall-clock on attempts
 that had no way to succeed.
 
@@ -274,7 +274,7 @@ that had no way to succeed.
   mask landed on a strip of empty card ABOVE the handle, leaving the handle the
   largest moving thing in frame; the widths came back 2.6x too wide;
   `solveSlideGeometry` threw them out as wider than the widget; and the drive
-  fell back to open-loop guessing. Measured on the geetest_v3_slide fixture:
+  fell back to open-loop guessing. Measured on the a GeeTest v3 slider fixture:
   0/2 ports on a Pixel 7 against 2/2 on the same three boards under a mouse,
   and 2/2 after. The scale is read off the shot rather than asked of the page —
   what the CV measures is the image, whatever the window thinks its ratio is.
@@ -441,7 +441,7 @@ that had no way to succeed.
   `tool_calls/track_piece.py`, and CLI `track-piece` (also a `serve` cmd, since
   it runs several times per drag with the button held). `prompts.py` gained the
   generation-2 `text` family, which the client had been missing since the
-  finetune repo defined it.
+  training repo defined it.
 
   **Requires a generation-2 model.** Generation 1 — including the currently
   served `CaptchaKraken_v1.1` — has no text prompt and no slider clause, so a v1
@@ -764,7 +764,7 @@ unless you deliberately set it.
   imported from `playwright-core`), so any Playwright-compatible launcher works —
   vanilla `playwright`, `patchright`, `camoufox-js`, etc. Install whichever one
   you want yourself and hand the solver its `Page`. (The live solve-and-record
-  tests moved to the parent `CaptchaKrakenFinetune` repo, which owns the launcher.)
+  tests moved to the training repo, which owns the launcher.)
 - **Puppeteer support via `fromPuppeteer()` adapter.** Puppeteer isn't
   Playwright-API-compatible, so the package exports a thin `fromPuppeteer(page)`
   wrapper that bridges the few differing methods (`viewport`/`viewportSize`,

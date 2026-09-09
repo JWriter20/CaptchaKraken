@@ -8,7 +8,7 @@
  * that is still animating never stops, so the wait ran to the full budget, per
  * step.
  *
- * MEASURED on mtcaptcha_text, fixture seed 20260730, with the timestamps
+ * MEASURED on an MTCaptcha distorted-text puzzle, the fixture, with the timestamps
  * printed from inside the round:
  *
  *     detect-done       59ms

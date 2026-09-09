@@ -12,9 +12,9 @@ noise defeating the byte hash, and it does not: driving the real fixtures
 through camoufox and screenshotting one element 25 times at 10fps
 (2026-09-09) —
 
-    hcaptcha_click_blocked_by_lines   1 distinct sha1 / 25   MAD 0.0000
-    hcaptcha_connect_path             1 distinct sha1 / 25   MAD 0.0000
-    hcaptcha_tower_stack              2 distinct sha1 / 25   MAD 32.51  (really moves)
+    an hCaptcha click board           1 distinct sha1 / 25   MAD 0.0000
+    an hCaptcha connect-the-path board             1 distinct sha1 / 25   MAD 0.0000
+    an hCaptcha stacking animation              2 distinct sha1 / 25   MAD 32.51  (really moves)
     geetest_v4_svg                    3 distinct sha1 / 25   MAD  8.29  (really cycles)
 
 Still frames really are byte-identical, so "one screen after the floor" is a
@@ -131,7 +131,7 @@ def test_the_js_port_has_the_same_still_exit():
 
 
 def test_a_board_that_moves_once_and_holds_also_stops(monkeypatch):
-    """`hcaptcha_tower_stack` — two screens, neither repeating.
+    """an hCaptcha stacking animation — two screens, neither repeating.
 
     A one-screen rule misses it entirely: it has moved, so it is not "still",
     and it never comes back to a screen it has shown, so the cycle never

@@ -476,8 +476,8 @@ export interface CaptchaKrakenConfig {
    * timeout — which reads as a slow model rather than as a budget with no room
    * for what the solver had just decided to do.
    *
-   * Measured 2026-08-22, Tier 3 run 32596340560: hcaptcha_click_image_by_traits,
-   * hcaptcha_connect_path and hcaptcha_grid_3x3_property each failed this port
+   * Measured 2026-08-22, a full driver-gate run: an hCaptcha click-by-trait board,
+   * an hCaptcha connect-the-path board and an hCaptcha 3x3 property grid each failed this port
    * with "Captcha solve timed out after 45000ms (attempt 6/6)" at 49-59s, and
    * solve in 14-20s on the rounds the still path answers them.
    *

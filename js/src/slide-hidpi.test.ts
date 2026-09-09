@@ -12,7 +12,7 @@
  * mask landed on a strip of empty card ABOVE the handle, leaving the handle
  * itself the largest moving thing in frame; the widths came back 2.6x too wide;
  * `solveSlideGeometry` threw them out as wider than the widget; and the drive
- * fell back to open-loop guessing. Measured on geetest_v3_slide: mouse arm 2/3
+ * fell back to open-loop guessing. Measured on a GeeTest v3 slider: mouse arm 2/3
  * boards solved, mobile arm 1/3 (js) and 0/3 (python), on the same three seeds.
  *
  * The Python driver had the identical bug and is fixed in the same commit;

@@ -71,7 +71,7 @@ def _draw_badge(patch: np.ndarray, diameter: int, style: str) -> np.ndarray:
 
     `filled` is a solid disc with a white check inside it
     (`_has_hcaptcha_check`'s own docstring); `ringed` is the white-ringed circle
-    with an X that the finetune repo's fixtures draw (`dom.py` `_circle_x`).
+    with an X that the training repo's fixtures draw (`dom.py` `_circle_x`).
     Which one the live widget uses decides nothing here — the detector has to
     find both, because the point of the test is that it recognises a MARK rather
     than a particular drawing of one.

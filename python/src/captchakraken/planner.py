@@ -537,7 +537,7 @@ class ActionPlanner:
             "Content-Type": "application/json",
             # Fleet routing: absent unless CAPTCHA_REQUEST_PRIORITY is set (see
             # routing_headers). Low-priority batch traffic is steered to the
-            # backup GPUs by the the gateway front on this header.
+            # backup GPUs by the gateway front on this header.
             **routing_headers(),
         }
 

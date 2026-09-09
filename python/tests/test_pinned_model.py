@@ -10,7 +10,7 @@ schema (`action: drag` / `drags[]` / lowercase) while planner.py still asked for
 the legacy `output` / `simulate_drag` / PascalCase schema. The model replied in a
 hybrid of the two, the parser dropped it, and every drag puzzle failed as
 "unsupported" — with nothing in CI going red, because train/grade parity inside
-the finetune repo was intact. Only the SHIPPED prompt had drifted.
+the training repo was intact. Only the SHIPPED prompt had drifted.
 
 So: editing a serving prompt fails this test until someone updates the manifest,
 which forces the question "does the pinned adapter still expect this prompt?".

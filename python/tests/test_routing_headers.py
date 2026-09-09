@@ -1,7 +1,7 @@
 """Tests for the fleet-routing and hosted-API request headers.
 
 `routing_headers` turns CAPTCHA_REQUEST_PRIORITY into the `X-JH-Priority` header
-that the fleet's haproxy front routes on (values >5 → backup GPUs). The whole
+that the fleet's edge proxy routes on (values >5 → backup GPUs). The whole
 point is that it fires ONLY when deliberately set — an unset or malformed value
 must never silently tag production traffic for the backups — so that boundary is
 what these pin. Hermetic: no server, no network.
@@ -40,13 +40,13 @@ def test_integer_value_becomes_the_header():
 
 
 def test_value_is_normalized_to_a_bare_int_string():
-    # haproxy compares it as an integer (req.hdr_val), so surrounding whitespace
+    # the edge proxy compares it as an integer (req.hdr_val), so surrounding whitespace
     # or a leading zero must not reach the wire as-is.
     assert routing_headers(env={"CAPTCHA_REQUEST_PRIORITY": " 07 "}) == {_PRIORITY_HEADER: "7"}
 
 
 def test_the_tier2_default_of_10_clears_the_routing_threshold():
-    # tier2_gate.sh defaults CAPTCHA_REQUEST_PRIORITY=10; haproxy routes >5 to the
+    # the model gate defaults CAPTCHA_REQUEST_PRIORITY=10; the edge proxy routes >5 to the
     # backups, so 10 must survive as an int well above the threshold.
     hdr = routing_headers(env={"CAPTCHA_REQUEST_PRIORITY": "10"})
     assert int(hdr[_PRIORITY_HEADER]) > 5

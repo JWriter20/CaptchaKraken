@@ -10,12 +10,12 @@ ANIMATED families closed their cycle at the 4s floor — `tile_flip_video` 3.96s
 `odd_animal_video` 3.98s, `click_highest_jumper` 3.95s — while STILL boards ran
 to the 12s ceiling:
 
-    hcaptcha_tower_stack             single_drag   12.03s   0% solved
-    hcaptcha_click_blocked_by_lines  click         11.93s   0% solved
-    hcaptcha_missing_piece           multi_drag    11.89s
-    hcaptcha_silhouette_match        click         11.76s
-    hcaptcha_tetris_fit              single_drag    9.96s
-    hcaptcha_connect_path            single_drag    9.94s   0% solved
+    an hCaptcha stacking animation             single_drag   12.03s   0% solved
+    an hCaptcha click board          click         11.93s   0% solved
+    an hCaptcha missing-piece board           multi_drag    11.89s
+    an hCaptcha silhouette-match board        click         11.76s
+    an hCaptcha shape-fit board              single_drag    9.96s
+    an hCaptcha connect-the-path board            single_drag    9.94s   0% solved
 
 Those are click and drag archetypes with no animation in them. They were not
 answered wrongly — the budget went on filming them, and three ran out of it.

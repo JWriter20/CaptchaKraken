@@ -10,7 +10,7 @@
  * So for those vendors this loop was waiting for something that cannot arrive,
  * and spent the WHOLE window on every round — after the puzzle had already been
  * answered, with the widget sitting there visibly solved. Measured in the
- * Python port on geetest_v4_slide before it got this fix: 5.2s of a 12.3s
+ * Python port on a GeeTest v4 slider before it got this fix: 5.2s of a 12.3s
  * solve. This port never got it, which is a large part of why it measured
  * slower than Python on exactly those families.
  *
@@ -22,7 +22,7 @@
  * single poll can catch that gap and call a re-deal a solve.
  *
  * The Python half is `page_solver.py`'s verdict loop, pinned by
- * CaptchaKrakenFinetune's tests/test_verdict_window_is_measured.py; per
+ * the training repo's verdict-window tests; per
  * CLAUDE.md 1c the two ports must behave the same.
  */
 

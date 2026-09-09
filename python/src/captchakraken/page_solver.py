@@ -1635,7 +1635,7 @@ class PageSolver:
             # overlay up for a couple of seconds after the winning submit.
             # Gating this on `_visible(anchor)` meant the one signal that was
             # already true went unread, and the loop ground on against a frame
-            # being torn down. See tests/test_solved_detection.py.
+            # being torn down. See the training repo's solved-detection tests.
             if self._has_non_empty_field_value(page, '[name="h-captcha-response"]'):
                 return True
             if self._has_non_empty_field_value(page, '[name="g-recaptcha-response"]'):
@@ -2104,7 +2104,7 @@ class PageSolver:
         buys nothing. It is WRONG the moment the widget has refused the answer:
         re-submitting the identical coordinates cannot succeed, and the driver
         did exactly that until it ran out of rounds. Measured 2026-09-09 on
-        `an hCaptcha line-pieces board`, where every round logged "reusing the recorded
+        an hCaptcha line-pieces board, where every round logged "reusing the recorded
         answer" and then "the model returned the same answer again" — the model
         was never asked a second time.
 
@@ -2356,7 +2356,7 @@ class PageSolver:
         separations top out around 0.007, well under this"). So on real traffic
         this gate was 6s of dead time on every animated click, always followed by
         the same click it would have made immediately. Measured on
-        `an hCaptcha rotating-object animation`: 6.0s of a 28.8s solve, closest region diff
+        an hCaptcha rotating-object animation: 6.0s of a 28.8s solve, closest region diff
         0.0721 against a 0.05 tolerance, then it clicked and solved.
 
         The gate stays for `cycle`/`static`, where a state genuinely does recur
@@ -2462,7 +2462,7 @@ class PageSolver:
         `return !!(example && ...)`, which is false when there is no example
         image — so a challenge with no tile grid, no canvas and no example
         polled until the timeout and then carried on regardless. Measured on
-        `an hCaptcha highest-value animation`: 24.0s of a 45.2s solve, the
+        an hCaptcha highest-value animation: 24.0s of a 45.2s solve, the
         full 8s three times over, more than half the budget spent asking a
         question about elements that were not on the page. A readiness gate can
         only report on what it can see; with nothing to check it has no opinion,
@@ -3354,7 +3354,7 @@ class PageSolver:
                 # the caller aborts a round that reports none, so submitting a
                 # `done` answer and then returning False re-arms the very guard
                 # this satisfies — the puzzle is sent and the solve gives up on
-                # it one line later, which is what `a Prosopo 3x3 grid` did.
+                # it one line later, which is what a Prosopo 3x3 grid did.
                 performed_action = True
                 # Snapshot at submit time so the NEXT attempt waits for the real
                 # transition before treating whatever is on screen as fresh.

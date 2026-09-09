@@ -8,7 +8,7 @@
  * that wait run long, and the element is already on screen anyway, because the
  * driver has just screenshotted it.
  *
- * MEASURED on mtcaptcha_text, fixture seed 20260730, this port:
+ * MEASURED on an MTCaptcha distorted-text puzzle, the fixture, this port:
  *
  *     [trial 1] SOLVED  12.0s
  *         # 1 initial  +0.89s   @0.9s   initial (pre-action)

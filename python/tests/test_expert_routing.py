@@ -135,7 +135,7 @@ def test_only_the_declared_routed_models_are_routed():
 
 def test_abyss_routes_all_four_families_to_distinct_experts():
     """Four families, four names, and every one of them resolvable — that last
-    part is what `check_prompt_parity.py` gates and what keeps a routed solve
+    part is what the release parity gate gates and what keeps a routed solve
     from resolving its prompts by guessing.
 
     Resolvable is NOT "resolves to the router". The arms started as four
@@ -180,7 +180,7 @@ def test_an_unrouted_model_returns_the_name_it_was_given():
             assert prompts.route(name, family) == name
 
 
-#: The release gate lives in the PRIVATE finetune repo, which this one is a
+#: The release gate lives in the PRIVATE training repo, which this one is a
 #: The release-side parity gate holds its own copy of PROMPT_FAMILIES, and the
 #: two can drift. Point CAPTCHA_PARITY_GATE at that file to check them against
 #: each other; without it this skips, because a clone of this repo alone has
