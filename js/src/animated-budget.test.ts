@@ -10,11 +10,11 @@
  * clock out and reported a timeout — a message about the model being slow, for
  * a budget with no room for what the solver had just decided to do.
  *
- * MEASURED, Tier 3 run 32596340560 (2026-08-22). This port:
+ * MEASURED, a full driver-gate run (2026-08-22). This port:
  *
- *     hcaptcha_click_image_by_traits   FAIL 52.4s, 49.7s  "timed out after 45000ms (attempt 6/6)"
- *     hcaptcha_connect_path            FAIL 50.2s          same
- *     hcaptcha_grid_3x3_property       FAIL 49.7s, 49.4s   same
+ *     an hCaptcha click-by-trait board   FAIL 52.4s, 49.7s  "timed out after 45000ms (attempt 6/6)"
+ *     an hCaptcha connect-the-path board            FAIL 50.2s          same
+ *     an hCaptcha 3x3 property grid       FAIL 49.7s, 49.4s   same
  *
  * …against 14-20 s whenever the still path happened to answer the same fixture.
  *

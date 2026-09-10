@@ -432,6 +432,24 @@ export const SOLVE_DEFAULTS = {
   keyframeWaitTimeoutMs: 9_000,
 } as const;
 
+/**
+ * How long a keyframe burst may run before it is called HUNG.
+ *
+ * A hang detector, not a budget: the solve timeout is what bounds real time.
+ * This only has to notice a screenshot that never returns, so it is
+ * deliberately slack.
+ *
+ * Sized off the CEILING, because that is what sizes the loop — the burst plans
+ * `videoBurstMaxMs` worth of frames, not `videoBurstDurationMs` worth. Must
+ * match `burst_hang_deadline_ms` in the python port, which had this guard
+ * first and had it sized off the floor: a 120-frame burst got 17s, i.e. 141ms
+ * per frame against a 100ms interval, and a burst that simply ran to its
+ * ceiling killed the attempt.
+ */
+export function burstHangDeadlineMs(cfg: { videoBurstMaxMs?: number }): number {
+  return 3 * (cfg.videoBurstMaxMs ?? 12_000) + 5_000;
+}
+
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
   /** Extra ms this solve has been granted for a recording; see recordKeyframeBurst. */
@@ -535,6 +553,8 @@ export class CaptchaKrakenSolver {
   // have re-executed it.
   private lastAnswerSig: string | null = null;
   private noProgressRounds = 0;
+  /** How far up planner.RESAMPLE_TEMPERATURES this BOARD has escalated. */
+  private resampleLevel = 0;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
   // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
   private state: CaptchaState = CaptchaState.Detecting;
@@ -969,7 +989,7 @@ export class CaptchaKrakenSolver {
           // authority immediately after this loop, so this only reaches the
           // same verdict sooner — confirmed over two polls so a frame caught
           // mid-swap between rounds cannot read as a solve. page_solver.py has
-          // had this since the geetest_v4_slide measurement (5.2s of a 12.3s
+          // had this since the a GeeTest v4 slider measurement (5.2s of a 12.3s
           // solve, spent after the puzzle was already answered); this port had
           // not, which is most of why it measured slower on those vendors.
           if (!(await this.detectCaptcha(page))) {
@@ -980,7 +1000,13 @@ export class CaptchaKrakenSolver {
           }
           // A fresh next round has rendered → stop waiting, go solve it now
           // (keeps multi-round solves fast instead of burning the full window).
-          if (await this.isChallengeFreshlyRendered(page)) break;
+          if (await this.isChallengeFreshlyRendered(page)) {
+            // A DIFFERENT puzzle, so the greedy answer has not been tested
+            // against it and the escalation must not carry over.
+            if (this.resampleLevel) console.log('[resample] fresh board — back to greedy');
+            this.resampleLevel = 0;
+            break;
+          }
           await delay(this.config.postSolveOutcomePollMs ?? 75);
         }
         this.budget?.add(didInteract ? 'await-verdict' : 'post-submit-delay',
@@ -1066,7 +1092,7 @@ export class CaptchaKrakenSolver {
       // observability snapshot, and `animations: 'disabled'` makes Playwright
       // wait for the element to stop moving before it will take it. On a widget
       // that is still animating that wait ran to the full 8s, per step:
-      // measured 8.0s of a 12.0s mtcaptcha_text solve, spent photographing a
+      // measured 8.0s of a 12.0s an MTCaptcha distorted-text puzzle solve, spent photographing a
       // text box for a trace. An observer must never cost more than the action
       // it is observing, and a missed frame in a trace costs nothing.
       await captchaElement.screenshot({
@@ -1099,7 +1125,7 @@ export class CaptchaKrakenSolver {
     // find_grid false-positives on the header+footer bands of hCaptcha's click
     // puzzles, and hCaptcha ships only a 3x3 — so a 16-cell lattice on one is a
     // contradiction and is dropped back to the click path. It is not a blanket
-    // skip: hcaptcha_grid_3x3_property is a real grid and still solves as one.
+    // skip: an hCaptcha 3x3 property grid is a real grid and still solves as one.
     // Anything that is not hCaptcha or reCAPTCHA reports 'unknown' and is
     // allowed every shape (GeeTest and Prosopo both ship real 3x3 grids).
     const src = await captchaElement.getAttribute('src').catch(() => null);
@@ -1544,7 +1570,7 @@ export class CaptchaKrakenSolver {
         // caller aborts a round that reports none, so submitting a `done`
         // answer and then reporting false re-arms the very guard this
         // satisfies — the puzzle is sent and the solve gives up on it one line
-        // later, which is what `prosopo_grid_3x3` did.
+        // later, which is what a Prosopo 3x3 grid did.
         performedAction = true;
         await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
         // Snapshot the frame at submit time so the NEXT attempt waits for the
@@ -1765,7 +1791,7 @@ export class CaptchaKrakenSolver {
       // couple of seconds after the winning submit. Gating this on the anchor's
       // visibility meant the one signal that was already true went unread, and
       // the loop ground on against a frame being torn down. Mirrors the Python
-      // driver; pinned by tests/test_solved_detection.py in the finetune repo.
+      // driver; pinned by the training repo's solved-detection tests in the training repo.
       if (await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) return true;
       if (await this.hasNonEmptyFieldValue(page, '[name="g-recaptcha-response"]')) return true;
       // Turnstile. detectCaptcha already reads this exact field to decide a
@@ -3116,17 +3142,30 @@ export class CaptchaKrakenSolver {
     const ceilingMs = this.config.videoBurstMaxMs ?? 12_000;
     const total = Math.max(floorFrames, Math.round(ceilingMs / (1000 / fps)));
     const intervalMs = 1000 / fps;
+    // A burst that runs far past its own length is a hung screenshot, not a
+    // tight budget — bounded separately so the two cannot be confused. Mirrors
+    // `_record_keyframes` in the python port.
+    const hangDeadline = Date.now() + burstHangDeadlineMs(this.config);
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_burst_'));
     const order: string[] = [];        // distinct screens, in first-seen order
     let captured = 0;
     let lastDigest: string | null = null;
+    // Frame index of the most recent NEW screen. A board that has shown
+    // nothing new for a whole floor-length window has SETTLED.
+    let lastNewAt = 0;
     let cycleClosed = false;
     let stopped = false;
     let runToEnd = false;              // set by finish(): keep going past the floor
 
     const loop = (async () => {
       for (let i = 0; i < total && !stopped; i++) {
+        if (Date.now() > hangDeadline) {
+          console.warn(
+            `[animated] the recording stalled: ${captured} of ${total} frames in `
+            + `${burstHangDeadlineMs(this.config)}ms — the widget is not screenshotting`);
+          break;
+        }
         const started = Date.now();
         const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`);
         try {
@@ -3151,7 +3190,10 @@ export class CaptchaKrakenSolver {
               // A screen already recorded, coming back after another one: the
               // loop has closed and every screen is now in the clip.
               if (order.includes(d) && order.length >= 2) cycleClosed = true;
-              else if (!order.includes(d)) order.push(d);
+              else if (!order.includes(d)) {
+                order.push(d);
+                lastNewAt = captured;
+              }
               lastDigest = d;
             }
           } catch { /* a digest we could not take just means no early stop */ }
@@ -3160,6 +3202,18 @@ export class CaptchaKrakenSolver {
         }
         // Past the floor and the cycle has closed — anything more is the same
         // screens again, paid for in wall-clock the solve budget needs.
+        // A board that never closes a cycle used to have no exit at all: the
+        // loop ran to `total`, so every escalation onto a non-cycling widget
+        // filmed the whole videoBurstMaxMs. Mirrors `_record_keyframes` in the
+        // python port, which carries the measurement — including why "one
+        // screen" is not enough: a board that transitions ONCE and then holds
+        // shows two screens, repeats neither, and ran the full ceiling.
+        if (runToEnd && i + 1 >= floorFrames && captured - lastNewAt >= floorFrames) {
+          console.log(
+            `[animated] no new screen for ${(floorFrames * intervalMs / 1000).toFixed(1)}s `
+            + `(${order.length} seen) — the board has settled; stopping the burst`);
+          break;
+        }
         if (runToEnd && cycleClosed && i + 1 >= floorFrames) {
           console.log(
             `[animated] cycle closed after ${((i + 1) * intervalMs / 1000).toFixed(1)}s `
@@ -3259,6 +3313,7 @@ export class CaptchaKrakenSolver {
         env: solveEnv(
           cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
           apiKey,
+          this.resampleLevel,
         ),
         maxBuffer: 10 * 1024 * 1024,
       });
@@ -3307,8 +3362,8 @@ export class CaptchaKrakenSolver {
    * one-way fade, a sprite crossing — so there is no state to come back to and
    * this can only run out its full 6s, PER CLICK, before clicking the
    * coordinates it already had. It is also the normal case, not a corner: all
-   * 116 real clips under cleanSamples/test/raw are `even` and `cycle` has never
-   * fired on real footage. Measured on hcaptcha_rotating_obj_video: 6.0s of a
+   * 116 real clips under the held-out sample corpus are `even` and `cycle` has never
+   * fired on real footage. Measured on an hCaptcha rotating-object animation: 6.0s of a
    * 28.8s solve, closest region diff 0.0721 against a 0.05 tolerance, then the
    * same click, then solved. Kept for `cycle`/`static`, where the state does
    * come back and waiting is the difference between the sprite and background.
@@ -3428,6 +3483,7 @@ export class CaptchaKrakenSolver {
     this.solveDeadlineAt = 0;
     this.lastAnswerSig = null;
     this.noProgressRounds = 0;
+    this.resampleLevel = 0;
     // Per SOLVE, not per process: a grant leaking into the next captcha would
     // silently hand a still puzzle 18s it was never meant to have.
     this.videoBudgetMs = 0;
@@ -3479,9 +3535,14 @@ export class CaptchaKrakenSolver {
         + `(${this.noProgressRounds}/${this.config.maxNoProgressRounds ?? 2}) — `
         + `the previous one already ran and changed nothing`,
       );
-      // A board that reads the same every round is the signature of a CYCLING
-      // challenge answered as a still. Let the recording path have a go before
-      // giving up on the solve entirely.
+      // THE SAME ANSWER IS NOT NEWS — IT IS ARITHMETIC. The CLI sends
+      // `temperature: 0`, so re-reading an unchanged board returns the
+      // identical answer by construction, and counting that to a limit
+      // measures the limit. Ask for a different SAMPLE instead.
+      this.resampleLevel++;
+      // A board that reads the same every round is ALSO the signature of a
+      // CYCLING challenge answered as a still. Let the recording path have a go
+      // before giving up on the solve entirely.
       this.repeatedAnswerSeen = true;
     } else {
       this.noProgressRounds = 0;
@@ -3546,7 +3607,13 @@ export class CaptchaKrakenSolver {
    */
   private shouldSpeculate(puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown', textMode: boolean): boolean {
     if (this.config.videoSolveEnabled === false) return false;
-    if (this.config.speculativeBurstEnabled === false) return false;
+    // OPT-IN — `!== true`, so UNSET means off. Mirrors
+    // `PageSolverConfig.speculative_burst_enabled`, which carries the
+    // measurement: the burst calls a board "moving" on an exact frame hash, so
+    // render noise reads as a second screen, the cycle never closes, and a
+    // STILL board films to the ceiling while real animations stop at the floor.
+    // Both ports flip together or the driver gate measures two drivers.
+    if (this.config.speculativeBurstEnabled !== true) return false;
     if (puzzleSource === 'recaptcha') return false;
     if (textMode) return false;
     return true;
@@ -3631,6 +3698,7 @@ export class CaptchaKrakenSolver {
         env: solveEnv(
           cliEnv(cliRoot, this.solveSessionId ? { CAPTCHA_KRAKEN_SESSION: this.solveSessionId } : undefined),
           apiKey,
+          this.resampleLevel,
         ),
         maxBuffer: 10 * 1024 * 1024 // Increase buffer for large outputs if needed
       });
@@ -4065,7 +4133,7 @@ export class CaptchaKrakenSolver {
     // BOUNDED. Playwright's default is 30s and it waits for the element to be
     // STABLE — not animating — before it will scroll. This runs once per action
     // and once per submit, so on a challenge that is mid-animation it burned
-    // the full default every time: measured 10.1s of a 12.0s mtcaptcha_text
+    // the full default every time: measured 10.1s of a 12.0s an MTCaptcha distorted-text puzzle
     // solve, spent scrolling to a text box that was already on screen. The
     // element is on screen in every real case here (we just screenshotted it),
     // so a short bound loses nothing: on timeout we move to wherever it is.

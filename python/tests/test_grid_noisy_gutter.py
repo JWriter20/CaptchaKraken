@@ -85,7 +85,7 @@ def test_a_dithered_gutter_is_still_detected(noise):
     of those were tried and measured:
 
       - Bridging a bounded run of rejected pixels: our fixtures 3/20 -> 10/20 but
-        recaptcha_grid_3x3 on the real corpus collapsed 40/40 -> 7/40 (overall
+        a reCAPTCHA 3x3 grid on the real corpus collapsed 40/40 -> 7/40 (overall
         144/144 -> 111/144). Bridging lets near-white lines survive INSIDE photo
         tiles; the extras trip the off-lattice gate and real grids return None.
       - Flat wider thresholds: SEED_L/STEP_L of 10/8 costs a real sample, 14/12

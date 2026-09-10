@@ -480,7 +480,7 @@ class CaptchaSolver:
             # colour is its own; a sprite board shares one board colour behind
             # every cell, so the medians collapse onto a single value.
             # Measured over the real captures: iconcrush and gobang 0.0-0.8,
-            # against 14.9 (recaptcha_grid_4x4) up to 93.0 (geetest_v4_nine)
+            # against 14.9 (a reCAPTCHA 4x4 grid) up to 93.0 (a GeeTest v4 icon board)
             # for the five true grid families. The threshold sits in an 18x
             # gap, which is why it is a fixed number rather than a tuned one.
             medians = []
@@ -529,7 +529,7 @@ class CaptchaSolver:
             #     ...plus contiguity         40/1748 2.29%       0/269 0.00%
             #
             # It cost 38 real grids and caught nothing the two checks above did
-            # not already catch — 19 of those were recaptcha_grid_4x4 alone,
+            # not already catch — 19 of those were a reCAPTCHA 4x4 grid alone,
             # 5.5% of that family, every one of them sent to the click path to
             # be asked for coordinates on a board answered with cell numbers.
             # Nothing errors when that happens; the reply is simply graded

@@ -1,12 +1,14 @@
 name: Request Tier 3 driver gate
 
 # Every PR here triggers a TIER 3 gate: both shipped solver ports driven
-# end to end through a real browser against the fixture suite. The fixtures,
-# generators and adapter live in the PRIVATE CaptchaKrakenFinetune repo, not
-# here, so this workflow does not run the gate itself — it asks the private repo
-# to run it and post a redacted result back (a commit status + a PR comment; see
-# that repo's public-pr-gate.yml and scripts/post_public_check.py for exactly
-# what does and does not leave it).
+# end to end through a real browser against a fixture suite. The fixtures,
+# generators and adapter are not in this repo, so this workflow does not run the
+# gate itself — it asks the repo that holds them to run it and post a redacted
+# result back: a commit status plus a PR comment carrying per-port and
+# per-vendor pass rates, and nothing else.
+#
+# That repo is named by the GATE_REPO variable rather than written here, so this
+# public workflow does not carry the address of a private one.
 #
 # TIER 3, NOT TIER 2. This repo ships the DRIVER. A pull request here cannot
 # change the model, so a Tier 2 solve-rate measurement gated on the one thing
@@ -41,9 +43,12 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - name: Dispatch public-pr-gate.yml on the private repo
+      - name: Dispatch the driver gate
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_DISPATCH_TOKEN }}
+          # owner/repo of the gate. A repository VARIABLE, not a literal: this
+          # file is public, and the address of a private repo is not.
+          GATE_REPO: ${{ vars.GATE_REPO }}
         run: |
           set -euo pipefail
           # The REST dispatch endpoint directly, NOT `gh workflow run`.
@@ -67,5 +72,5 @@ jobs:
             --arg sha "${{ github.event.pull_request.head.sha }}" \
             '{ref: "main", inputs: {pr: $pr, sha: $sha}}' \
           | gh api --input - -X POST \
-              repos/JWriter20/CaptchaKrakenFinetune/actions/workflows/public-pr-gate.yml/dispatches
-          echo "Dispatched. The private repo verifies this PR's head via the API before running anything — see public-pr-gate.yml. Status arrives as the 'tier3/driver-gate' check on this PR shortly after."
+              "repos/${GATE_REPO}/actions/workflows/public-pr-gate.yml/dispatches"
+          echo "Dispatched. The gate verifies this PR's head via the API before running anything. Status arrives as the 'tier3/driver-gate' check on this PR shortly after."

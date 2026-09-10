@@ -6,7 +6,7 @@ import sys
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-# DEAD SINCE THE MONOREPO RESTRUCTURE (529f144). `attention` was a v1-architecture
+# DEAD SINCE THE v1 ARCHITECTURE WAS RETIRED. `attention` was a v1-architecture
 # module; v1 is preserved on the `v1-old-architecture` branch and this module does
 # not exist here, so this file has been uncollectable — it did not fail CI only
 # because CI ran a four-file allowlist. Skipping visibly instead of silently

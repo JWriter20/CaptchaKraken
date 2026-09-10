@@ -31,7 +31,7 @@ import path from 'node:path';
  * When installed from npm this file is in `<pkgRoot>/dist` (compiled) or
  * `<pkgRoot>/src` (dev), and published packages bundle the engine at
  * `<pkgRoot>/python` (copied in by scripts/copy-python.mjs at build time). In
- * the source monorepo it instead lives at the sibling `../python`.
+ * the source development checkout it instead lives at the sibling `../python`.
  */
 export function getBundledCliRoot(): string {
   const bundled = path.resolve(__dirname, '..', 'python');

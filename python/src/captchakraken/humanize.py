@@ -14,7 +14,7 @@ three directions at once —
     device farm, a model of their own users) was composing two of them. That is
     not hypothetical — camoufox's `humanize` juggler re-humanises every
     `mouse.move()` it is handed, and running both measured 82.1s against 13.4s
-    on one geetest_v4_slide solve, because each of the 60 trajectory points
+    on one a GeeTest v4 slider solve, because each of the 60 trajectory points
     became its own humanised sub-trajectory.
   - a caller on their own infrastructure, against their own fixtures, is paying
     for texture nobody is measuring.
@@ -41,7 +41,7 @@ pointer", because that is what the next gesture starts from and what
 `SolveResult.final_mouse_position` reports.
 
 The TypeScript side is `js/src/humanize.ts`; the two are one design in two
-languages, and `tests/test_humanizer_parity.py` in CaptchaKrakenFinetune pins
+languages, and `the training repo's humanizer parity tests` in the training repo pins
 that the mode names and the pause vocabulary have not drifted.
 """
 

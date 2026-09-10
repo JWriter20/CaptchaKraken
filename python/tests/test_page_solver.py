@@ -1259,7 +1259,7 @@ class TestSliderlessFreeDrag:
     the piece slid along the tray and stopped, and every attempt submitted a
     piece that had never left it.
 
-    Only reachable from a SOURCELESS drag, which `lemin_cropped` no longer
+    Only reachable from a SOURCELESS drag, which a Lemin cropped-image puzzle no longer
     emits — but every model published before that data change still does, and
     the shipped client has to keep working with them.
     """
@@ -1301,8 +1301,8 @@ class TestInlineWidgetSubmit:
     the right hole, and then sat there re-solving a puzzle it had already
     answered until the loop cap or the deadline.
 
-    Measured on the Tier 3 fixtures (run 20260805-235956), it is the single
-    biggest failure class: `lemin_cropped` and `prosopo_grid_3x3` abort with
+    Measured on the Tier 3 fixtures (a training run), it is the single
+    biggest failure class: a Lemin cropped-image puzzle and a Prosopo 3x3 grid abort with
     "performed no interactions", and eleven more types burn all ten solve
     loops. Every one of them is an inline vendor.
     """
@@ -1329,7 +1329,7 @@ class TestInlineWidgetSubmit:
         return performed, [k for k, _, _ in page.mouse.log]
 
     def test_done_on_an_inline_widget_presses_verify(self):
-        """`prosopo_grid_3x3`, exactly as traced: round 1 clicks four tiles,
+        """a Prosopo 3x3 grid, exactly as traced: round 1 clicks four tiles,
         round 2 the model answers `done` because everything matching is already
         selected — and `done` performs no action, so the outer loop's
         "performed no interactions" guard fired and aborted a puzzle whose only
@@ -1345,7 +1345,7 @@ class TestInlineWidgetSubmit:
         assert performed is True
 
     def test_a_placed_piece_is_submitted(self):
-        """`lemin_cropped`, exactly as traced: the model drags the piece into
+        """a Lemin cropped-image puzzle, exactly as traced: the model drags the piece into
         the gap and then, round after round, nudges it by a pixel — because
         nothing ever tells the widget to grade it. A piece placement has no
         count to reach and no release to be judged on, so unlike a click round
@@ -1363,7 +1363,7 @@ class TestInlineWidgetSubmit:
     def test_a_click_round_is_submitted_without_waiting_for_done(self):
         """The round that used to cost a model call.
 
-        `prosopo_grid_3x3` answered all four tiles correctly on its first call,
+        a Prosopo 3x3 grid answered all four tiles correctly on its first call,
         then spent 6.2 s of a 13.8 s solve on a second call whose entire content
         was `done`, purely so the press had a round to happen on."""
         from captchakraken.action_types import ClickAction

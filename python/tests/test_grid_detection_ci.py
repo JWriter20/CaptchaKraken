@@ -2,7 +2,7 @@
 Hermetic grid-detection smoke tests for CI.
 
 Unlike test_grid_detection.py (which needs the local captchaimages/ fixtures) and
-test_find_grid_corpus.py (which needs the cleanSamples/ real corpus), this module
+test_find_grid_corpus.py (which needs the sample corpus real corpus), this module
 SYNTHESIZES grid images in memory, so it runs anywhere — no GPU, no network, no
 large fixtures. It is the fast guard that protects the core invariant: a clean
 NxN grid of distinct-coloured tiles separated by white gutters is detected as an

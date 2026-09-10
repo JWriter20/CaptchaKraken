@@ -8,9 +8,9 @@ for it, so a solve that escalated late ran the clock out MID-BURST and reported
 a timeout — a message about the model being slow, for a budget that never had
 room for what the solver had just decided to do.
 
-Measured 2026-08-22, Tier 3 run 32596340560: every python-port failure on
-hcaptcha_fish_swim_different, hcaptcha_number_with_highest_value_video and
-hcaptcha_tile_flip_video was "exceeded overall_solve_timeout_ms during recording
+Measured 2026-08-22, a full driver-gate run: every python-port failure on
+an hCaptcha odd-one-out animation, an hCaptcha highest-value animation and
+an hCaptcha tile-flip animation was "exceeded overall_solve_timeout_ms during recording
 the animated challenge" at 45.7-52.7 s, on fixtures that solve in 11-20 s
 whenever the still path happens to answer them.
 """

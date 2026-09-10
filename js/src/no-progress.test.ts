@@ -6,7 +6,7 @@
  * previous one already ran and the page is still asking the same question.
  * Performing it again cannot do better — it just spends a round.
  *
- * MEASURED in the Python port, recaptcha_grid_4x4, fixture seed 20260730,
+ * MEASURED in the Python port, a reCAPTCHA 4x4 grid, the fixture,
  * adapter captcha-v12:
  *
  *     loop 1  [2,6,7,9,10]
@@ -18,7 +18,7 @@
  *
  * This file is the JS half of that fix. Both ports drive the same fixtures under
  * Tier 3 and CLAUDE.md 1c requires them to behave the same, so the rule is
- * pinned twice — here and in CaptchaKrakenFinetune's
+ * pinned twice — here and in the training repo's
  * tests/test_no_progress_bailout.py, which carries the full measurement.
  */
 

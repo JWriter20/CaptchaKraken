@@ -73,15 +73,26 @@ test('a moving board drops the still answer and finishes the recording', async (
 test('reCAPTCHA never speculates', () => {
   // Its dynamic 3x3 replaces tiles in place and has its own fade gates; a burst
   // there would film a fade and call it a cycle.
-  const solver: any = new CaptchaKrakenSolver({});
-  assert.equal(solver.shouldSpeculate('recaptcha', false), false);
-  assert.equal(solver.shouldSpeculate('hcaptcha', false), true);
-  assert.equal(solver.shouldSpeculate('unknown', false), true);
+  const on: any = new CaptchaKrakenSolver({ speculativeBurstEnabled: true });
+  assert.equal(on.shouldSpeculate('recaptcha', false), false);
+  assert.equal(on.shouldSpeculate('hcaptcha', false), true);
+  assert.equal(on.shouldSpeculate('unknown', false), true);
+});
+
+test('speculating is OPT-IN: unset is off', () => {
+  // The burst calls a board "moving" on an exact frame hash, so a still board
+  // that renders with any noise films to the ceiling — 12s of recording a
+  // picture, on the types that are cheapest to solve without it. Unset must
+  // therefore mean off, and `!== true` is the line that decides it: `=== false`
+  // would make unset ON, which is what it used to be.
+  const unset: any = new CaptchaKrakenSolver({});
+  assert.equal(unset.shouldSpeculate('hcaptcha', false), false);
+  assert.equal(unset.shouldSpeculate('unknown', false), false);
 });
 
 test('a distorted-text round never speculates', () => {
   // The answer is a string, not a place. Nothing in a recording helps read one.
-  const solver: any = new CaptchaKrakenSolver({});
+  const solver: any = new CaptchaKrakenSolver({ speculativeBurstEnabled: true });
   assert.equal(solver.shouldSpeculate('unknown', true), false);
 });
 

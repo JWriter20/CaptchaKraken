@@ -13,13 +13,13 @@ Where CaptchaKraken is headed. Legend: 🟢 shipped · 🟡 in progress · ⚪ p
 | 🧩 **hCaptcha click / drag puzzles** | 🟢 shipped | Full-puzzle model → pixel-space click/drag actions. Click, drag, path/connect and tetris-fit all route and are driven. |
 | 🪶 **Sunlight / Twilight merges** | 🟢 shipped | The adapter merged into the base at 4-bit (11 GB) and 8-bit (13 GB), so self-hosting is one download instead of two. Published for both v1.1 and v1.2, all public on [HuggingFace](https://huggingface.co/CaptchaKraken). |
 | 🎥 **Video challenge support** | 🟢 shipped | **Both halves are out.** A challenge that never settles is recorded (4 s @ 10 fps), cut into keyframes, and sent to the model as one multi-image prompt; the answer names which keyframe it acted on, and the driver waits for the widget to return to that frame before clicking. The model half shipped with **v1.2** — trained on the keyframe format, installed by `setup.sh`, and what the hosted API answers with. |
+| ⬛ **Abyss** | 🟢 shipped | Hosted-only and licence-gated, on a larger base, trained against the open weights' measured failures. A licence holder names it on the request; an account without one gets a clear 403 rather than a substitution, and there is nothing to download. **Not the default** — the endpoint answers with **Twilight v1.2** unless asked. |
 | 📱 **Mobile / touch input** | 🟢 shipped | `humanization: 'mobile'` dispatches real touch events with finger kinematics, in a Chromium page with `hasTouch` or at a real handset over Appium / WebdriverIO / Selenium. See [Usage → How it moves](./usage.md#how-it-moves--mouse-mobile-none-or-yours). |
 
 ## 🟡 In progress
 
 | Item | Status | Notes |
 |---|---|---|
-| ⬛ **Abyss** | 🟡 in progress | The next hosted-only model, on a larger base, trained against the open weights' measured failures. **Not serving yet** — the endpoint answers with Twilight v1.2 until it lands. |
 | 📈 **More real labeled data** | 🟡 in progress | Broader coverage for under-represented prompts. |
 
 ## ⚪ Planned

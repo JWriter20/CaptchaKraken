@@ -16,13 +16,13 @@ correct answer is to select nothing and press it. Fixture seed 20260730 is
 exactly that — `target_class: "traffic light"`, `target_ids: []`,
 `submit_label: "SKIP"`.
 
-It surfaced when CaptchaKrakenFinetune fixed font resolution on the macOS Tier 3
+It surfaced when the training repo fixed font resolution on the macOS Tier 3
 runner. Before that fix the prompt rendered in a fallback bitmap face and read
 "Selectall images with / traffic lights"; after it, the widget draws real
 reCAPTCHA chrome with the target term bolded and a legible "If there are none,
 click skip." The client runs at temperature 0, so the model is a function of the
 picture: a correct picture got a correct empty answer, and the empty answer is
-the one shape the driver could not send. `recaptcha_grid_3x3` js went 2/3 -> 1/3
+the one shape the driver could not send. a reCAPTCHA 3x3 grid js went 2/3 -> 1/3
 and read as the font fix causing a regression.
 
 `getVerifyButton` was never the problem — "Skip" has always been in its list.

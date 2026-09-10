@@ -5,7 +5,7 @@ Why this exists
 The prompt a captcha model is sent has to be the prompt it was trained on. When
 they drift, nothing errors — the model answers in a schema the client does not
 recognise and puzzles silently fail. That has happened: see failure-mode 3 in
-the finetune repo's `scripts/check_prompt_parity.py`, where the shipped prompt
+the training repo's release parity gate, where the shipped prompt
 kept asking for the legacy `output`/`simulate_drag`/PascalCase schema long after
 the LoRA had been retrained on `action: drag`/`drags[]`.
 
@@ -48,14 +48,14 @@ _PROMPTS_FILE_ENV = "CAPTCHA_PROMPTS_FILE"
 _DISABLE_FETCH_ENV = "CAPTCHA_PROMPTS_NO_FETCH"
 
 # The newest generation this client ships built-ins for. NOT "the version to
-# send" — that is per model, resolved below. This exists so the finetune repo
+# send" — that is per model, resolved below. This exists so the training repo
 # can ask "do you speak the generation I am training?" without importing us.
 LATEST_PROMPT_VERSION = "2"
 
 
 # ── built-in templates, one entry per generation in service ─────────────────
 #
-# A PURE LITERAL, deliberately: the finetune repo's check_prompt_parity.py reads
+# A PURE LITERAL, deliberately: the training repo's release parity gate reads
 # it by AST without importing this package (which pulls in pydantic/cv2 that the
 # training venv need not have). Keep it literal — an f-string, a .join(), or a
 # reference to another constant makes it unreadable to that gate, and the gate
@@ -68,7 +68,7 @@ LATEST_PROMPT_VERSION = "2"
 #   2 — adds the PUZZLE PIECE SLIDER clause and the animated + text families.
 #       Byte-identical to src/synthetic/reasoning/instructions.py
 #       ::PIXEL_INSTRUCTION_TEMPLATE, ::VIDEO_INSTRUCTION_TEMPLATE and
-#       ::TEXT_INSTRUCTION in the finetune repo at PROMPT_VERSION 2.
+#       ::TEXT_INSTRUCTION in the training repo at PROMPT_VERSION 2.
 #
 # Do not edit a published generation's text. Ever. Those models are frozen and
 # so are their prompts; a change here is a change to what an already-shipped
@@ -258,7 +258,7 @@ PRIVATE = "private"
 LICENSED = "licensed"
 #: Anything outside this set is a typo, and a typo must not read as "public".
 #: The whole class of bug this file exists to prevent is a field that fails
-#: open — `check_prompt_parity.py` rejects an unknown value at release time,
+#: open — the release parity gate rejects an unknown value at release time,
 #: and `is_licensed` below treats one as licensed rather than guessing.
 #:
 #: Spelled out as literals rather than `(PUBLIC, PRIVATE, LICENSED)`: the

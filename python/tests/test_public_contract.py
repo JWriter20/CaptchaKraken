@@ -302,7 +302,7 @@ def test_an_unregistered_model_name_falls_back_loudly_not_silently(capsys):
     So registry lookup misses, the Hub step is skipped, and the client answers
     with `latest`'s prompt generation. That mispairing is invisible in a solve
     and looks exactly like a catastrophic model regression — reCAPTCHA 3x3 at
-    0.300 against a pinned 0.953 on training run 20260805-002154. It cannot be
+    0.300 against a pinned 0.953 on training a training run. It cannot be
     made to work from here (the client has no way to know what a candidate was
     trained on), so the contract is that it WARNS. Silence is the bug.
     """

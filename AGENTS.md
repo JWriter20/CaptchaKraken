@@ -364,18 +364,20 @@ client unless you have a reason not to.
 
 ## Rules for agents
 
-- **Never invent accuracy numbers.** The only figures we publish are the
-  recorded end-to-end solves in the
-  [README](./README.md#watch-it-work) — each puzzle driven on the vendor's own
-  demo page, quoted as counts rather than percentages, with the date and the
-  adapter beside them. Quote those or quote nothing. One row there is marked
-  **not scored**; do not turn it into a number. There is no published per-type
-  model-accuracy table, so do not produce one, derive one, or convert a count
-  into a percentage.
-- **Abyss is not serving yet** and is never downloadable. Do not tell a user
-  the hosted API runs it, and do not suggest weights or a workaround for it.
-  The hosted endpoint answers with **Twilight v1.2**. Verify with
-  `GET /v1/models` before claiming otherwise.
+- **Never invent accuracy numbers.** Everything we publish is on one page,
+  [docs/benchmarks.md](./docs/benchmarks.md): the end-to-end browser runs (each
+  puzzle driven on the vendor's own demo page, quoted as counts rather than
+  percentages, with the date and the model beside them) and the per-puzzle
+  static-image rates over held-out real captures. Quote those or quote nothing.
+  One browser row is marked **not scored**; do not turn it into a number, do not
+  convert a count into a percentage, and do not read a static-image rate as a
+  promise about a browser — the page says why they differ.
+- **Abyss is hosted for licence holders and is never downloadable.** It is not
+  the default: the hosted endpoint answers with **Twilight v1.2** unless a
+  request names Abyss, and an account without a licence that names it gets a
+  403 rather than a substitution. Do not suggest weights, a download or a
+  workaround for it, and do not quote accuracy figures for it — none are
+  published. Verify what is serving with `GET /v1/models`.
 - **Never print an API key** into a transcript, a log, or a commit. Use the MCP
   flow, which writes it to disk instead.
 - **Do not commit `captchakraken.env`.** It holds a key and is gitignored.
@@ -392,5 +394,6 @@ client unless you have a reason not to.
 | Hardware, server management, updating | [docs/self-hosting.md](./docs/self-hosting.md) |
 | Every browser framework, the watcher, migrating from v1 | [docs/usage.md](./docs/usage.md) |
 | The solve pipeline | [docs/how-it-works.md](./docs/how-it-works.md) |
+| The published accuracy numbers | [docs/benchmarks.md](./docs/benchmarks.md) |
 | Speed by device, IP reputation | [docs/performance.md](./docs/performance.md) |
 | What you may build | [docs/licensing.md](./docs/licensing.md) |

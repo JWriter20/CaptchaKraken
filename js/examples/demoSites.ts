@@ -55,10 +55,10 @@ interface Site {
  * deals a dynamic board perhaps half the time: tiles fade out and are replaced,
  * and it only ends when the board comes back clean, which runs past the
  * client's shipped 45s budget often enough that it is genuinely a coin flip.
- * That is a real property of the product and it has its own recorded figure in
- * the deck. Leading with it means the first thing the room sees is the one
- * puzzle most likely to time out, which tells them less about the model than
- * the other three do. Run `demoSites.ts recaptcha` to go straight at it.
+ * That is a real property of the product and it is reported as its own figure.
+ * Leading with it would mean the first thing you see is the puzzle most likely
+ * to time out, which tells you less about the model than the other three do.
+ * Run `demoSites.ts recaptcha` to go straight at it.
  */
 const SITES: Site[] = [
   {
@@ -199,8 +199,8 @@ async function main(): Promise<void> {
       // the recorded medians measure and the only figure comparable to them.
       // `totalMs` also carries the page load, the settle and the demo page's
       // own reveal click — real time a visitor waits, but not the model's.
-      // Printing one number for both makes the live demo look like it
-      // contradicts the deck, which is the last thing it should do.
+      // Printing one number for both would make this example look like it
+      // disagrees with the published medians when it does not.
       let s0 = t0;
       let solved = false;
       let note: string | undefined;

@@ -57,7 +57,7 @@ def test_a_board_that_holds_screens_is_waited_for(monkeypatch, tmp_path):
 
 
 def test_a_one_way_animation_still_does_not_wait(monkeypatch, tmp_path):
-    """hcaptcha_rotating_obj_video and the other four continuous types.
+    """an hCaptcha rotating-object animation and the other four continuous types.
 
     Measured 0 steady screens for 60 of 60 of those clips, so the 2026-08-19
     finding — 6.0s of a 28.8s solve spent waiting for a frame that could not

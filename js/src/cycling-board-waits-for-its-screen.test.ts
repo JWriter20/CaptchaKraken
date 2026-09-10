@@ -18,7 +18,7 @@
  *    is what 1/14 looks like.
  *
  *    The skip was added for a real measurement (2026-08-19,
- *    hcaptcha_rotating_obj_video: 6.0s of a 28.8s solve spent waiting for a
+ *    an hCaptcha rotating-object animation: 6.0s of a 28.8s solve spent waiting for a
  *    frame that could not return) and that case must keep its behaviour. It
  *    does: a rotation is nearly all transition, so it decomposes into no steady
  *    holds at all. Measured across all five continuous hCaptcha video types,
@@ -66,7 +66,7 @@ test('a clip that sits on steady screens waits, even when sliced `even`', async 
 });
 
 test('a one-way animation still does not wait', async () => {
-  // hcaptcha_rotating_obj_video and the other four continuous types: no steady
+  // an hCaptcha rotating-object animation and the other four continuous types: no steady
   // holds, nothing to come back to, and waiting is pure cost. Preserved.
   const { solver, element, probes } = gated({ mode: 'even', screens: 0 });
   const matched = await solver.waitForKeyframe(element, '/tmp/kf.png', 0.5, 0.5);
