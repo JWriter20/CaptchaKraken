@@ -71,9 +71,12 @@ module docstring of `captchakraken/cli.py` lists every mode with its arguments.
 ## 4. Errors
 
 `PageSolver.solve()` raises from `captchakraken.page_solver`:
-`NoCaptchaFoundError` (nothing to solve — usually not a failure),
-`UnsupportedChallengeError`, `AnimatedChallengeError`, `PageClosedError`, and
-`CaptchaSolveError`, which is the base class of the other four.
+`NoCaptchaFoundError` (no interactive widget — usually not a failure),
+`UnsupportedChallengeError`, `AnimatedChallengeError` (the challenge could not
+be *recorded*), `PageClosedError`, and `CaptchaSolveError`, which is the base
+class of the other four — catch it last or it swallows them. The TypeScript
+port raises none of these; it exports one error class and throws plain `Error`
+otherwise.
 
 Refusals from the hosted API raise `CaptchaKrakenAPIError` (exported from the
 package root). **Branch on `.code`, never on the message text** — the codes are

@@ -344,17 +344,31 @@ prompt generation and the weights can drift apart.
 
 ## Errors and what to do
 
-Typed errors from `solve()`:
+**The two ports do not raise the same classes**, so a `catch` written for one
+never matches in the other.
+
+**Python.** `PageSolver.solve()` raises these, importable from
+`captchakraken.page_solver`. `CaptchaSolveError` is the base class of the other
+four, so catch it last or it swallows them:
 
 | Error | Meaning | Do |
 |---|---|---|
-| `NoCaptchaFoundError` | Nothing to solve (reCAPTCHA v3 / invisible) | Continue — this is not a failure |
-| `UnsupportedChallengeError` | A puzzle type this build does not handle | Skip, or retry to get a different puzzle |
-| `AnimatedChallengeError` | An animated challenge could not be recorded | Retry |
-| `CaptchaSolveError` | Everything else | Read the message |
+| `NoCaptchaFoundError` | No interactive widget — reCAPTCHA v3 / invisible, or one that only triggers on user action | Continue — this is not a failure |
+| `UnsupportedChallengeError` | A settled frame the model reports it cannot solve | Skip, or retry to get a different puzzle |
+| `AnimatedChallengeError` | An animated challenge could not be **recorded** (the element refuses to screenshot, or the recording decodes to nothing) | Retry |
+| `PageClosedError` | The page, context or browser went away mid-solve | Nothing to retry against — reopen the page |
+| `CaptchaSolveError` | Everything else, and the base of the four above | Read the message |
 
-Hosted API refusals arrive as `CaptchaKrakenAPIError`. **Branch on `e.code`,
-never on the message text** — wording changes, codes do not.
+**TypeScript.** The driver exports exactly **one** error class,
+`CaptchaKrakenAPIError`. Everything else — no widget on the page, a puzzle it
+cannot drive, the round budget exhausted — arrives as a plain `Error` whose
+message says which. Do not write `catch (e) { if (e instanceof
+NoCaptchaFoundError) }` against this port: that class does not exist here and
+the branch can never be taken. Read `result.isSolved`, and read the message.
+
+Hosted API refusals arrive as `CaptchaKrakenAPIError` in **both** ports.
+**Branch on `e.code`, never on the message text** — wording changes, codes do
+not.
 
 | `code` | Meaning | Do |
 |---|---|---|
