@@ -76,9 +76,11 @@ The default. `setup.sh` installs
 plus a base model sized for your card, and vLLM applies the adapter at serve
 time.
 
-**Abyss** is the next hosted model — trained against the failures of the open
-weights, still in training, and never published. The hosted API answers with
-**Twilight v1.2** today, not Abyss. See [the roadmap](./roadmap.md).
+**Abyss** — trained against the failures of the open weights — is hosted-only
+and never published, so there is nothing here to self-host. Licence holders name
+it on a request to the hosted API; by default that API answers with **Twilight
+v1.2**, the merge of the same adapter this page installs. See
+[Hosted API](./hosted-api.md).
 
 ## One-command install
 

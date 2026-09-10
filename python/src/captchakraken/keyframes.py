@@ -1,8 +1,8 @@
 """Reduce a recorded captcha clip to the few frames the model is shown.
 
 VERBATIM PORT. Everything below the docstring is byte-identical to
-`src/video/keyframes.py` in the CaptchaKrakenFinetune repo, and
-`scripts/check_prompt_parity.py` there fails the build if the two ever diverge.
+the training-side extractor in the training repo, and
+`scripts/the parity gate` there fails the build if the two ever diverge.
 
 That is not tidiness, it is a correctness requirement. The model is trained on
 keyframes cut by that code and answers with a frame NUMBER indexing into them. If
@@ -41,7 +41,7 @@ DEFAULT_MAX_KEYFRAMES = 6
 # picture". A false "same" merges two distinct states, which loses an answer, so
 # this is the most consequential number in the file.
 #
-# MEASURED, not guessed. Over all 20 real clips in cleanSamples/test/raw, the
+# MEASURED, not guessed. Over all 20 real clips in the sample corpus, the
 # consecutive-frame differences fall into two clusters with a 64x gap:
 #
 #   same picture (compression + antialiasing)  <= 0.000067   (0.067 per mille)
@@ -162,6 +162,15 @@ class KeyframeSet:
     # `keyframes`). Empty for the other modes. Lets a caller answer "which
     # keyframe was the clip showing at source frame i?" without re-diffing.
     frame_states: List[int] = field(default_factory=list)
+    # How many distinct steady screens the clip sits on; 0 if it is not that
+    # kind of clip. INDEPENDENT OF `mode`, and the difference is the whole
+    # point: `mode` says what the slicer could PROVE about recurrence from one
+    # burst, this says what the board looks like. A three-screen captcha whose
+    # loop is longer than the recording is `even` with `steady_screens == 3`.
+    # The live driver reads this to decide whether waiting for a named screen
+    # is meaningful; reading `mode` for that put the wait off on 100% of real
+    # animated captchas. See `steady_screens()`.
+    steady_screens: int = 0
 
     def __len__(self) -> int:
         return len(self.keyframes)
@@ -226,6 +235,7 @@ class KeyframeSet:
         return {
             "stem": stem,
             "mode": self.mode,
+            "steady_screens": self.steady_screens,
             "fps": self.fps,
             "source_frames": self.source_frames,
             "params": self.params.as_dict(),
@@ -440,14 +450,22 @@ def _distinct_indices(
     return sorted(kept)
 
 
-def _detect_cycle(
+def _steady_screens(
     frames: Sequence[np.ndarray], params: KeyframeParams
-) -> Optional[Tuple[List[int], List[int]]]:
-    """`(state_medoid_indices, per_frame_state)` if the clip is a cycle of steady
-    pictures, else None.
+) -> Optional[Tuple[List[Tuple[int, int]], List[int], List[int]]]:
+    """`(holds, state_medoid_indices, state_per_hold)` if the clip is a set of
+    steady held pictures, else None.
 
-    `per_frame_state[i]` is the 0-based state of source frame i, or -1 for a
-    transition frame that belongs to no hold.
+    Split out of `_detect_cycle` because the answer is wanted TWICE and the two
+    questions are not the same one:
+
+      - "is this a cycle?" — needs a state to be seen coming BACK, which takes
+        more than one pass through the loop.
+      - "does this board sit on a few stable screens?" — needs only one pass,
+        and is what the live driver has to know in order to decide whether
+        waiting for a particular screen is meaningful.
+
+    Answering only the first left the second unasked. See `steady_screens`.
     """
     n = len(frames)
     runs = _anchor_runs(frames, params.steady_ratio)
@@ -479,6 +497,55 @@ def _detect_cycle(
     if len(state_reps) < 1:
         return None
 
+    # NO `distinct_ratio` HERE, deliberately. The merge above already separated
+    # these states by more than `steady_ratio`, which is the measured noise
+    # floor — that is the whole of "are these different pictures".
+    #
+    # `distinct_ratio` (0.02) is twenty times coarser and exists to license
+    # `cycle`'s COLLAPSE to one frame per state, where being too generous throws
+    # away the middle of a clip. Applying it here instead answers a question
+    # nobody asked and answers it wrongly: measured on a live GeeTest svg burst,
+    # the three screens are separated by 0.0056 and 0.0050 — thin line art, a
+    # few glyph strokes change — so a 0.02 bar reports a board with three
+    # obvious screens as having none. keyframes.py's own comment already said
+    # so ("real state separations top out around 0.007, well under this") and
+    # read it as evidence the check was harmless.
+    return holds, state_reps, hold_state
+
+
+def steady_screens(frames: Sequence[np.ndarray], params: KeyframeParams) -> int:
+    """How many distinct steady screens this clip sits on. 0 if it does not.
+
+    THE LIVE DRIVER'S QUESTION, and it is not `mode`. A board that advances
+    through three held pictures gives a burst that contains ONE pass, so
+    `_detect_cycle` cannot prove it recurs and the clip is sliced `even` — which
+    is right for slicing (dedup reaches the same stills) and was being read by
+    the driver as "nothing recurs, do not wait for a screen". Every real
+    geetest_v4_svg clip is exactly this shape: 2-3 holds covering 95-100% of the
+    burst, mutually distinct, and the page absolutely does come back around.
+
+    A one-way animation — the case the no-wait path exists for — is nearly all
+    transition, so it has no qualifying holds and this returns 0.
+    """
+    got = _steady_screens(frames, params)
+    return len(got[1]) if got else 0
+
+
+def _detect_cycle(
+    frames: Sequence[np.ndarray], params: KeyframeParams
+) -> Optional[Tuple[List[int], List[int]]]:
+    """`(state_medoid_indices, per_frame_state)` if the clip is a cycle of steady
+    pictures, else None.
+
+    `per_frame_state[i]` is the 0-based state of source frame i, or -1 for a
+    transition frame that belongs to no hold.
+    """
+    n = len(frames)
+    got = _steady_screens(frames, params)
+    if got is None:
+        return None
+    holds, state_reps, hold_state = got
+
     # A cycle REVISITS. More holds than states means some picture came back, which
     # is what "the video is just a shift between N steady images" describes. Equal
     # counts mean every hold was a new picture — a one-way progression (a slow
@@ -497,8 +564,10 @@ def _detect_cycle(
     if len(holds) <= len(state_reps) and len(state_reps) > 1:
         return None
 
-    # Every pair of states must be clearly different, or we are calling noise a
-    # state and would hand the model two images of the same thing.
+    # Every pair of states must be clearly different before the clip is
+    # COLLAPSED to one frame per state — that collapse is what this threshold
+    # licenses, and being too generous with it discards the middle of a clip.
+    # `steady_screens` deliberately does not apply it; see `_steady_screens`.
     for a in range(len(state_reps)):
         for b in range(a + 1, len(state_reps)):
             if frame_diff_ratio(frames[state_reps[a]], frames[state_reps[b]]) < params.distinct_ratio:
@@ -538,7 +607,7 @@ def _drop_smeared(
         six eval clips, dropping a SCREEN. A page that never reaches the model is
         unanswerable whenever the target lived on it.
       * *Drop when some other still is within `distinct_ratio`* cut
-        `hcaptcha_tile_flip_video` from 6 stills to 3, because two boards of that
+        an hCaptcha tile-flip animation from 6 stills to 3, because two boards of that
         puzzle differ by ONE TILE — well inside `distinct_ratio` — so a diff
         threshold cannot tell "the same picture again" from "the next board".
         EXPECTED_SLICING says it directly: fewer than 6 "means dedup merged two
@@ -625,6 +694,7 @@ def extract_keyframes(
         reps, per_frame = cycle
         mode = "static" if len(reps) == 1 else "cycle"
         return KeyframeSet(
+            steady_screens=len(reps),
             mode=mode,
             keyframes=[
                 Keyframe(number=k + 1, source_index=idx, timestamp_ms=_ms(idx),
@@ -654,6 +724,9 @@ def extract_keyframes(
         # smears the first pass had just removed.
         indices = _drop_smeared(frames, indices, p)
     return KeyframeSet(
+        # Asked even though the cycle test refused: the two questions differ,
+        # and this is the one the driver needs answered.
+        steady_screens=steady_screens(frames, p),
         mode="even",
         keyframes=[
             Keyframe(number=k + 1, source_index=idx, timestamp_ms=_ms(idx),
@@ -679,7 +752,7 @@ def extract_keyframes_from_video(
 #   <media_dir>/keyframes/<stem>/keyframes.json
 #
 # Derived, regenerable, and ADDITIVE — the clip stays canonical next to it. That
-# matters most under `cleanSamples/test/`, which is irreplaceable hand-labeled
+# matters most under the held-out sample corpus, which is irreplaceable hand-labeled
 # data we never rewrite (CLAUDE.md § Data trees): extraction only ever creates a
 # new sibling directory there.
 

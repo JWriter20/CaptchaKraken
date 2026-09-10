@@ -2,8 +2,8 @@
  * How the driver MOVES. One pluggable object per input device.
  *
  * The TypeScript side of `python/src/captchakraken/humanize.py`; the two are one
- * design in two languages, and `tests/test_humanizer_parity.py` in
- * CaptchaKrakenFinetune pins that the mode names and the pause vocabulary have
+ * design in two languages, and `the training repo's humanizer parity tests` in
+ * the training repo pins that the mode names and the pause vocabulary have
  * not drifted.
  *
  * Humanisation used to be wired straight into `solver.ts`: every gesture was a
@@ -19,7 +19,7 @@
  *     device farm, a model of their own users) was composing two of them. That
  *     is not hypothetical — camoufox's `humanize` juggler re-humanises every
  *     `mouse.move()` it is handed, and running both measured 82.1s against
- *     13.4s on one geetest_v4_slide solve, because each of the 60 trajectory
+ *     13.4s on one a GeeTest v4 slider solve, because each of the 60 trajectory
  *     points became its own humanised sub-trajectory.
  *   - a caller on their own infrastructure, against their own fixtures, is
  *     paying for texture nobody is measuring.

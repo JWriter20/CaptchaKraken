@@ -12,7 +12,7 @@ is the entire difference between the two kinds of board:
     to be read again, which is what the multi-round driver is for.
 
 A widget that swaps one clicked cell swaps them all, so a chip and a centred
-check are never on one board at once — the finetune repo's 3x3 generator says so
+check are never on one board at once — the training repo's 3x3 generator says so
 in prose and pins it on every board it draws
 (`tests/test_recaptcha_3x3_clicked_states.py`). One look at the tiles we just
 clicked therefore settles which board this is, and `detect_selected_cells` can

@@ -18,7 +18,7 @@
  *
  * Camoufox's own `humanize` is a DIFFERENT, browser-level mechanism that
  * re-humanises every `mouse.move()` it is handed. Running both composes them —
- * measured 82.1s vs 13.4s on one geetest_v4_slide solve, because each of the 60
+ * measured 82.1s vs 13.4s on one a GeeTest v4 slider solve, because each of the 60
  * points below became its own humanised sub-trajectory. Drive with humanize off.
  */
 

@@ -12,7 +12,7 @@
  *
  * It was not silent for the two families generation 1 does NOT have: Tier 3 run
  * 2026-08-20 lost 19 puzzle types to `prompt generation 1 has no animated-puzzle
- * prompt` and 3 more (botdetect_text, mtcaptcha_text, yandex_text) to the
+ * prompt` and 3 more (botdetect_text, an MTCaptcha distorted-text puzzle, yandex_text) to the
  * distorted-text equivalent surfacing as UNSUPPORTED_CAPTCHA — 22 of the port's
  * 44 types, against a python port that scored 37/44 locally on the same commit.
  */

@@ -8,9 +8,9 @@ for it, so a solve that escalated late ran the clock out MID-BURST and reported
 a timeout — a message about the model being slow, for a budget that never had
 room for what the solver had just decided to do.
 
-Measured 2026-08-22, Tier 3 run 32596340560: every python-port failure on
-hcaptcha_fish_swim_different, hcaptcha_number_with_highest_value_video and
-hcaptcha_tile_flip_video was "exceeded overall_solve_timeout_ms during recording
+Measured 2026-08-22, a full driver-gate run: every python-port failure on
+an hCaptcha odd-one-out animation, an hCaptcha highest-value animation and
+an hCaptcha tile-flip animation was "exceeded overall_solve_timeout_ms during recording
 the animated challenge" at 45.7-52.7 s, on fixtures that solve in 11-20 s
 whenever the still path happens to answer them.
 """
@@ -49,13 +49,18 @@ def test_the_budget_is_derived_from_what_a_recording_actually_costs():
     The whole failure was a fixed number that had no relationship to the work,
     so a constant here would be the same mistake with a friendlier value.
     """
+    # Derived from the burst's CEILING since 2026-09-07. A burst now runs until
+    # the board's cycle closes rather than for a fixed 4s — a 4s window cannot
+    # contain the 5.3s cycle measured on GeeTest svg, so it was omitting one
+    # screen of three — and the grant has to cover the longest one it will sit
+    # through, not the shortest.
     cfg = PageSolverConfig()
-    assert cfg.video_budget_ms() == (cfg.video_burst_duration_ms
+    assert cfg.video_budget_ms() == (cfg.video_burst_max_ms
                                      + cfg.keyframe_wait_timeout_ms
                                      + cfg.video_extra_inference_ms)
 
-    longer = PageSolverConfig(video_burst_duration_ms=cfg.video_burst_duration_ms * 2)
-    assert longer.video_budget_ms() - cfg.video_budget_ms() == cfg.video_burst_duration_ms
+    longer = PageSolverConfig(video_burst_max_ms=cfg.video_burst_max_ms * 2)
+    assert longer.video_budget_ms() - cfg.video_budget_ms() == cfg.video_burst_max_ms
 
 
 def test_recording_extends_the_deadline_once_and_only_once(monkeypatch):

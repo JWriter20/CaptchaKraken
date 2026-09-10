@@ -1,6 +1,6 @@
 {
   "name": "captchakraken",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "Captcha solver for Playwright and Puppeteer. Finds the captcha, reads the puzzle with a fine-tuned Qwen3.5-9B vision model, and clicks, drags, slides or types through to a token — reCAPTCHA, hCaptcha, GeeTest, NetEase Yidun, Tencent, Lemin, Prosopo, Turnstile and distorted text. Hosted API or self-hosted.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,6 +13,7 @@
   "scripts": {
     "prebuild": "node scripts/copy-python.mjs",
     "build": "tsc",
+    "demo": "tsx examples/demoSites.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --test .test-build/*.test.js",
     "prepublishOnly": "npm run build",

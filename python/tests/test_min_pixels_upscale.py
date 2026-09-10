@@ -1,13 +1,13 @@
 """Images below the training pixel floor must be upscaled before they are sent.
 
 The adapters are trained with `MIN_PIXELS=200704` (448², exported by the
-finetune repo's `scripts/train_unified.sh`), so every image smaller than that
+training repo's `the training pipeline`), so every image smaller than that
 is enlarged before the ViT ever sees it. Nothing did the same at inference:
 vLLM is launched with no `--mm-processor-kwargs` and this client re-encoded the
 file byte-for-byte, so small captchas reached the model at a geometry it was
 never tuned on.
 
-It is not a subtle degradation. Measured 2026-08-10 on real geetest_v3_slide
+It is not a subtle degradation. Measured 2026-08-10 on real a GeeTest v3 slider
 captures (277x285 = 78,945 px, well under the floor), same adapter, same
 prompt, only the input size differing:
 
@@ -18,7 +18,7 @@ prompt, only the input size differing:
 
 80-105 px out versus 1-4 px, on every sample. Tier 2 scored the affected types
 at 0.000-0.119 while types whose captures happen to exceed the floor
-(recaptcha_grid_3x3, 232,000 px) scored 0.704 — the split follows image size,
+(a reCAPTCHA 3x3 grid, 232,000 px) scored 0.704 — the split follows image size,
 not puzzle difficulty.
 
 The deployed v1.1 adapter improves under the same change (mean error ~40 px

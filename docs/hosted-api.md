@@ -7,10 +7,13 @@ The hosted API answers with **Twilight v1.2**, running on our fleet — the same
 weights we publish, merged from the same LoRA on the same base. You are paying
 for the hardware and the uptime, not for weights you cannot get.
 
-**Abyss** — the next model, trained against the failures of the open weights,
-on a larger base (**Qwen3.8-27B**, where Twilight and Sunlight are Qwen3.5-9B) —
-is still in training. It is not serving yet, and when it lands it will be
-hosted-only. Do not plan around it today.
+**Abyss** — trained against the failures of the open weights, and routed across
+four specialist adapters on the same Qwen3.5-9B base as Twilight and Sunlight —
+is served here too, to licence holders only, and is hosted-only: the weights are not published
+and there is nothing to download. It is **not the default**. Name it on the
+request and hold a licence, or the endpoint answers with Twilight v1.2; an
+account without a licence that names it gets a clear 403, never a silent
+substitution.
 
 The client code is identical to the self-hosted path. Only the endpoint changes.
 
