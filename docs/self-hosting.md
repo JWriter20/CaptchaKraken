@@ -13,7 +13,7 @@ There are three ways to self-host, and they install different things.
 | | **Merged model** | **GGUF** | **LoRA adapter** (what `setup.sh` installs) |
 |---|---|---|---|
 | Downloads | One file set | One file + a projector | Base model + adapter |
-| Runtimes | vLLM, and any runtime that loads standard safetensors | Ollama, llama.cpp | vLLM only |
+| Runtimes | vLLM, and any runtime that loads standard safetensors | Ollama, llama.cpp, LM Studio | vLLM only |
 | Needs a GPU | Yes | No — CPU works, slowly | Yes |
 | Setup | `vllm serve <id>` | `ollama run <id>` | `./setup.sh` |
 
@@ -70,7 +70,7 @@ generation-1 adapter. The v1.2 builds, and the adapter `setup.sh` installs, are
 generation 2. If you want the best open weights and you run vLLM, use the
 adapter.
 
-### GGUF, for Ollama and llama.cpp
+### GGUF, for Ollama, LM Studio and llama.cpp
 
 The same v1.2 merge converted to GGUF, so it runs without vLLM and without a
 GPU. One repo holds every quantisation:
@@ -203,6 +203,32 @@ ollama create captchakraken -f Modelfile
 `ollama show <name>` lists `vision` under Capabilities when the projector was
 picked up. If it does not, the model cannot see the puzzle.
 
+## Run it with LM Studio
+
+Search `CaptchaKraken-v1.2-GGUF` in the **Discover** tab and download a quant.
+LM Studio pairs `mmproj-F16.gguf` automatically — the model should show
+**Vision** among its capabilities.
+
+Two settings before you load it:
+
+- **Context Length → 16384.** Same reason as Ollama: an animated challenge
+  arrives as several stills in one request and will not fit the default.
+- **Runtime.** It needs one new enough for Qwen3.5 vision. If the model refuses
+  to load, update it under **Runtime**.
+
+Start the server from the **Developer** tab, then point the client at it:
+
+```bash
+export VLLM_BASE_URL=http://localhost:1234/v1
+export CAPTCHA_KRAKEN_API_KEY=lm-studio
+export CAPTCHA_LORA_NAME=captchakraken-v1.2-gguf     # whatever the server lists
+export CAPTCHA_LORA_ADAPTER=CaptchaKraken/CaptchaKraken-v1.2-GGUF
+```
+
+> 💡 **You do not need to disable thinking.** These GGUF builds emit the
+> no-think prefix unconditionally, so a plain request answers correctly in
+> LM Studio, Ollama and llama.cpp alike.
+
 ## Configuration
 
 The solver only needs **two** environment variables to talk to a server (both
@@ -292,7 +318,7 @@ which sources your `captchakraken.env` and hands off to `captchakraken fetch`.
 | Out of memory at startup | Base too big for the card | `./setup.sh --quant awq`, or lower `VLLM_GPU_MEMORY_UTILIZATION` |
 | Answers describe nothing that is in the image | GGUF loaded without its projector | `ollama show <name>` should list `vision`; re-create with `mmproj-F16.gguf` |
 | Still puzzles solve, animated ones fail | Context too small for a multi-still request | `OLLAMA_CONTEXT_LENGTH=16384`, or `--ctx-size` on llama.cpp |
-| Every answer is empty, and the reply carries a `reasoning` field | Thinking is on, so the answer never reaches `content` | Our GGUF builds have it off by default; on your own build send `reasoning_effort: "none"` (Ollama) or `chat_template_kwargs: {"enable_thinking": false}` |
+| Every answer is empty, and the reply carries a `reasoning` field | Thinking is on, so the answer never reaches `content` | Our GGUF builds have it off unconditionally; on a GGUF you converted yourself send `reasoning_effort: "none"` (Ollama) or `chat_template_kwargs: {"enable_thinking": false}` |
 
 Set `CAPTCHA_DEBUG=1` to print solver diagnostics to stderr.
 

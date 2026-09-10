@@ -8,8 +8,8 @@ semantic versioning; v2 is a major, **breaking** release.
 ### Added
 
 - **GGUF builds — `CaptchaKraken/CaptchaKraken-v1.2-GGUF`.** The v1.2 merge for
-  **Ollama** and **llama.cpp**, so the model runs without vLLM and without a
-  GPU. One repo holds `Q4_K_M` (5.6 GB), `Q8_0` (9.5 GB) and `F16` (17.9 GB).
+  **Ollama**, **LM Studio** and **llama.cpp**, so the model runs without vLLM
+  and without a GPU. One repo holds `Q4_K_M` (5.6 GB), `Q8_0` (9.5 GB) and `F16` (17.9 GB).
   Registered in `models.json`, so the client resolves generation-2 prompts and
   the right pixel budget for it like any other published model.
 
@@ -19,11 +19,22 @@ semantic versioning; v2 is a major, **breaking** release.
   precision in every build: quantising the half that reads a small picture
   costs far more accuracy than the space it saves.
 
+  **Thinking is off unconditionally, so a plain request just works** — in
+  Ollama, LM Studio and llama.cpp alike. All three turn thinking on by default
+  for any template that mentions it, and with it on the answer goes to
+  `reasoning` while `content` comes back empty, on every puzzle, with no error.
+  A better default would not have survived them, so the branch is gone: these
+  weights carry the empty-think prefix on every training row.
+
   Ollama names a model after whatever you pulled it as, so that name can never
   match a registry entry. Set `CAPTCHA_LORA_NAME` to what `ollama list` shows
   and `CAPTCHA_LORA_ADAPTER` to the repo id — the first is what goes on the
   wire, the second is what decides the prompts and the resolution. See
-  [Self-hosting → GGUF](./docs/self-hosting.md#gguf-for-ollama-and-llamacpp).
+  [Self-hosting → GGUF](./docs/self-hosting.md#gguf-for-ollama-lm-studio-and-llamacpp).
+
+- **`examples/with_local_gguf.py`.** One image, no browser — the shortest way to
+  prove a local Ollama or LM Studio server is wired up before pointing a real
+  browser at it.
 
 ### Fixed
 

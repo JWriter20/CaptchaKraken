@@ -419,7 +419,8 @@ accuracy: **[docs/performance.md](./docs/performance.md)**.
 Two public releases. Within each, the same weights in several shapes: the
 **LoRA adapter** (strongest, needs vLLM and two downloads), two **merged**
 builds that are one self-contained file any safetensors runtime will serve,
-and — for v1.2 — a **GGUF** build for Ollama and llama.cpp that needs no vLLM
+and — for v1.2 — a **GGUF** build for Ollama, LM Studio and llama.cpp that
+needs no vLLM
 and no GPU.
 
 ### v1.2 — current

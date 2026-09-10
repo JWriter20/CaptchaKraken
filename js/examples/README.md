@@ -82,6 +82,12 @@ source ../captchakraken.env       # VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY
 # (produced by ../setup.sh; or export VLLM_BASE_URL yourself for a remote server)
 ```
 
+Running the model locally on **Ollama** or **LM Studio**? Those load GGUF, so
+they need the GGUF build rather than the AWQ/FP8 downloads — see
+[Self-hosting → GGUF](../../docs/self-hosting.md#gguf-for-ollama-lm-studio-and-llamacpp).
+The same four environment variables configure both ports, because this one
+forwards `process.env` to the engine unchanged.
+
 ## Run
 
 ```bash
