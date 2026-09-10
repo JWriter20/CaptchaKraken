@@ -1,9 +1,8 @@
 import os
-import tempfile
 import cv2
 import numpy as np
 from PIL import Image
-from typing import Optional, List, Tuple, Dict, Any
+from typing import List, Tuple
 
 class ImageProcessor:
     """

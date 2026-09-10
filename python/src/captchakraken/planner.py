@@ -269,20 +269,6 @@ PIXEL_ACTION_PROMPT = _LATEST.action_prompt
 VIDEO_ACTION_PROMPT_TEMPLATE = _LATEST.video_template
 
 
-def video_action_prompt(n_keyframes: int) -> str:
-    """The prompt for a challenge served as `n_keyframes` stills.
-
-    The count is in the text because the model has no other way to know how many
-    images arrived — frame identities live in the prompt, not in the image payload.
-    Mirrors `instructions.video_instruction` in the training repo exactly.
-    """
-    n = int(n_keyframes)
-    if n < 1:
-        raise ValueError(f"a keyframe request needs at least one frame, got {n_keyframes}")
-    listing = ", ".join(f"frame {i}" for i in range(1, n + 1))
-    return VIDEO_ACTION_PROMPT_TEMPLATE.format(n=n, listing=listing)
-
-
 #: Sampling temperature per RE-ASK of a board the vendor refused, first entry
 #: first. THE ONE COPY: the JS port reaches this through `CAPTCHA_RESAMPLE_LEVEL`
 #: rather than carrying its own numbers, because a schedule written down twice is

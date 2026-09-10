@@ -1,0 +1,16 @@
+{
+  "reporter": [
+    "text",
+    "lcov"
+  ],
+  "report-dir": "coverage",
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.js",
+    "scripts/**",
+    "python/**"
+  ],
+  "check-coverage": true,
+  "lines": 71,
+  "branches": 78
+}

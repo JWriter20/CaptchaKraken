@@ -1,0 +1,17 @@
+{
+  "name": "captchakraken-repo-tooling",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Repository tooling only. This is NOT the published package: `npm i captchakraken` installs js/, and `pip install captchakraken` installs python/. Nothing here is ever published.",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "repomix": "repomix",
+    "file-map": "node .github/scripts/check-file-purposes.mjs"
+  },
+  "devDependencies": {
+    "repomix": "1.18.0"
+  }
+}

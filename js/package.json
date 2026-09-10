@@ -8,6 +8,7 @@
     "dist",
     "python",
     "scripts",
+    "AGENTS.md",
     "LICENSE"
   ],
   "scripts": {
@@ -16,6 +17,7 @@
     "demo": "tsx examples/demoSites.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --test .test-build/*.test.js",
+    "coverage": "tsc -p tsconfig.test.json && c8 node --test .test-build/*.test.js",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup-python.js"
   },
@@ -50,7 +52,8 @@
   },
   "homepage": "https://github.com/JWriter20/CaptchaKraken#readme",
   "devDependencies": {
-    "@types/node": "^24.10.2",
-    "typescript": "^5.9.3"
+    "@types/node": "24.10.2",
+    "c8": "12.0.0",
+    "typescript": "5.9.3"
   }
 }

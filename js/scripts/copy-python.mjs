@@ -19,11 +19,22 @@ if (!existsSync(src)) {
   process.exit(1)
 }
 
-const SKIP = new Set(['.venv', '__pycache__', 'dist', 'build', '.pytest_cache', '.ruff_cache', 'tests'])
+// Coverage artifacts are in this list because a developer who ran `pytest --cov`
+// before `npm run build` would otherwise PUBLISH the dump: `files` in
+// package.json whitelists `python` wholesale, so whatever is in the copy ships.
+const SKIP = new Set([
+  '.venv', '__pycache__', 'dist', 'build', '.pytest_cache', '.ruff_cache', 'tests',
+  'coverage', 'htmlcov', '.nyc_output', 'coverage.xml', 'lcov.info',
+  // tests/test_solver.py writes debug PNGs here, relative to the CWD.
+  'latestDebugRun',
+])
 
 rmSync(dest, { recursive: true, force: true })
 cpSync(src, dest, {
   recursive: true,
-  filter: (p) => !p.split(/[\\/]/).some((seg) => SKIP.has(seg) || seg.endsWith('.egg-info')),
+  filter: (p) =>
+    !p
+      .split(/[\\/]/)
+      .some((seg) => SKIP.has(seg) || seg.endsWith('.egg-info') || seg.startsWith('.coverage')),
 })
 console.log('[copy-python] bundled python/ engine -> js/python/')
