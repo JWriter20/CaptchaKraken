@@ -432,6 +432,24 @@ export const SOLVE_DEFAULTS = {
   keyframeWaitTimeoutMs: 9_000,
 } as const;
 
+/**
+ * How long a keyframe burst may run before it is called HUNG.
+ *
+ * A hang detector, not a budget: the solve timeout is what bounds real time.
+ * This only has to notice a screenshot that never returns, so it is
+ * deliberately slack.
+ *
+ * Sized off the CEILING, because that is what sizes the loop — the burst plans
+ * `videoBurstMaxMs` worth of frames, not `videoBurstDurationMs` worth. Must
+ * match `burst_hang_deadline_ms` in the python port, which had this guard
+ * first and had it sized off the floor: a 120-frame burst got 17s, i.e. 141ms
+ * per frame against a 100ms interval, and a burst that simply ran to its
+ * ceiling killed the attempt.
+ */
+export function burstHangDeadlineMs(cfg: { videoBurstMaxMs?: number }): number {
+  return 3 * (cfg.videoBurstMaxMs ?? 12_000) + 5_000;
+}
+
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
   /** Extra ms this solve has been granted for a recording; see recordKeyframeBurst. */
@@ -3124,6 +3142,10 @@ export class CaptchaKrakenSolver {
     const ceilingMs = this.config.videoBurstMaxMs ?? 12_000;
     const total = Math.max(floorFrames, Math.round(ceilingMs / (1000 / fps)));
     const intervalMs = 1000 / fps;
+    // A burst that runs far past its own length is a hung screenshot, not a
+    // tight budget — bounded separately so the two cannot be confused. Mirrors
+    // `_record_keyframes` in the python port.
+    const hangDeadline = Date.now() + burstHangDeadlineMs(this.config);
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_burst_'));
     const order: string[] = [];        // distinct screens, in first-seen order
@@ -3138,6 +3160,12 @@ export class CaptchaKrakenSolver {
 
     const loop = (async () => {
       for (let i = 0; i < total && !stopped; i++) {
+        if (Date.now() > hangDeadline) {
+          console.warn(
+            `[animated] the recording stalled: ${captured} of ${total} frames in `
+            + `${burstHangDeadlineMs(this.config)}ms — the widget is not screenshotting`);
+          break;
+        }
         const started = Date.now();
         const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`);
         try {

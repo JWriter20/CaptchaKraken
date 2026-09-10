@@ -226,6 +226,23 @@ def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int) -> st
     return "timeout"
 
 
+def burst_hang_deadline_ms(cfg) -> float:
+    """How long a keyframe burst may run before it is called HUNG.
+
+    A hang detector, not a budget: `overall_solve_timeout_ms` is what bounds
+    real time. This only has to notice a screenshot that never returns, so it
+    is deliberately slack.
+
+    Sized off the CEILING, because that is what sizes the loop —
+    `_record_keyframes` plans `video_burst_max_ms` worth of frames, not
+    `video_burst_duration_ms` worth. Deriving it from the floor gave a
+    120-frame burst 17s, i.e. 141ms per frame against a 100ms interval, and a
+    burst that simply ran to its ceiling killed the attempt. Must match
+    `burstHangDeadlineMs` in the JS port.
+    """
+    return 3.0 * float(cfg.video_burst_max_ms) + 5_000.0
+
+
 #: How unlike the chosen keyframe the widget must look before the gate calls it
 #: a different board, and over how many polls. Measured on GeeTest svg: two
 #: SCREENS of one board differ by 0.0056, a different board by 0.77 — two orders
@@ -2218,14 +2235,13 @@ class PageSolver:
         shot = _tmp_png("burst")
         # A burst that runs far past its own length is a hung screenshot, not a
         # tight budget — bounded separately so the two cannot be confused.
-        burst_deadline = (time.monotonic() * 1000.0
-                          + 3 * cfg.video_burst_duration_ms + 5_000)
+        burst_deadline = time.monotonic() * 1000.0 + burst_hang_deadline_ms(cfg)
         try:
             for i in range(remaining):
                 if time.monotonic() * 1000.0 > burst_deadline:
                     raise CaptchaSolveError(
                         f"the animated recording stalled: {i} of {remaining} frames "
-                        f"in {3 * cfg.video_burst_duration_ms + 5000}ms. The widget "
+                        f"in {burst_hang_deadline_ms(cfg):.0f}ms. The widget "
                         f"is not screenshotting."
                     )
                 start = time.monotonic()
