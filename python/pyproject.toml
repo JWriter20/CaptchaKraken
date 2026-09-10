@@ -78,6 +78,12 @@ Changelog = "https://github.com/JWriter20/CaptchaKraken/blob/main/CHANGELOG.md"
 [tool.hatch.build.targets.wheel]
 packages = ["src/captchakraken"]
 
+# AGENTS.md lives beside pyproject.toml, not inside the package, so the wheel
+# would not carry it. An agent that only ever sees `site-packages/captchakraken`
+# is exactly the reader it is written for, so it is copied in.
+[tool.hatch.build.targets.wheel.force-include]
+"AGENTS.md" = "captchakraken/AGENTS.md"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

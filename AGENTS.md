@@ -1,9 +1,17 @@
 # AGENTS.md
 
+**Using CaptchaKraken in your own project? This file is for you.**
+
+**Changing CaptchaKraken itself? Stop here — the contributor rules, dev setup
+and gates are in [CONTRIBUTING.md](./CONTRIBUTING.md).**
+
 Setup instructions for AI agents and for humans in a hurry.
 
 CaptchaKraken solves captchas in a browser you control. You give it a page, it
 finds the captcha, reads it with a vision model, clicks, and verifies.
+
+It is a library you drive, not a service you hand a URL to and not a browser:
+you bring the page, and no browser is installed for you.
 
 The model runs in one of two places. **Pick one before you install anything.**
 
@@ -276,6 +284,28 @@ the hosted API it should show `api.captchakraken.com` and `local: false`.
 
 ---
 
+## Account MCP tools
+
+Installed by the one command in §2A. They manage the **account** — none of them
+solves a captcha, and none of them applies to a self-hosted server, which has no
+account. What each one is for:
+
+| Tool | Reach for it to |
+|---|---|
+| `sign_in` | Connect a GitHub account, or resume a sign-in already in progress. Nothing else works until this has |
+| `sign_out` | Disconnect this client. Keys already minted keep solving |
+| `get_account` | Learn who is signed in and which base URL to point a solving client at |
+| `get_balance` | Answer "am I out of credit?" before blaming a failed solve on the model |
+| `get_usage` | See what has already been spent, per day, when a bill looks wrong |
+| `get_pricing` | Estimate what a job will cost before you run it |
+| `create_api_key` | Get a working key onto disk without it passing through this conversation |
+| `list_api_keys` | Find the id of the key you want to revoke. Secrets are never listed, only minted |
+| `revoke_api_key` | Kill a key that leaked, or one a finished job no longer needs |
+| `get_topup_link` | Hand a human a link to add credits. It charges nothing by itself |
+| `get_models` | Decide whether to pay per solve or self-host, by seeing which weights are downloadable |
+
+---
+
 ## Environment variables
 
 Most users set **none** (hosted, via MCP) or **two** (everything else).
@@ -391,6 +421,8 @@ client unless you have a reason not to.
 
 | Topic | Guide |
 |---|---|
+| The npm package alone, as `npm i` installs it | [js/AGENTS.md](./js/AGENTS.md) |
+| The PyPI package alone, as `pip install` installs it | [python/AGENTS.md](./python/AGENTS.md) |
 | Hardware, server management, updating | [docs/self-hosting.md](./docs/self-hosting.md) |
 | Every browser framework, the watcher, migrating from v1 | [docs/usage.md](./docs/usage.md) |
 | The solve pipeline | [docs/how-it-works.md](./docs/how-it-works.md) |

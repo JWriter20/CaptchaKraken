@@ -8,6 +8,7 @@
     "dist",
     "python",
     "scripts",
+    "AGENTS.md",
     "LICENSE"
   ],
   "scripts": {
