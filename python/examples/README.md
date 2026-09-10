@@ -44,6 +44,16 @@ If `CAMOUFOX_BINARY` is unset, camoufox falls back to its default binary
 source ../captchakraken.env       # VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY
 ```
 
+Running the model locally on **Ollama** or **LM Studio** instead? Those load
+GGUF, so they need the GGUF build rather than the AWQ/FP8 downloads — see
+[Self-hosting → GGUF](../../docs/self-hosting.md#gguf-for-ollama-lm-studio-and-llamacpp),
+then check the wiring with one image and no browser:
+
+```bash
+python examples/with_local_gguf.py path/to/captcha.png
+python examples/with_local_gguf.py path/to/text-captcha.png --text
+```
+
 ## Run
 
 ```bash

@@ -528,7 +528,18 @@ class ActionPlanner:
             # Qwen3.5's reasoning otherwise eats the token budget. `/no_think`
             # in the prompt alone is unreliable; disabling at the chat-template
             # level is the documented way.
+            #
+            # BOTH FIELDS, because runtimes disagree about which one exists.
+            # vLLM and llama.cpp read `chat_template_kwargs`. Ollama has no such
+            # field at all — it reads `reasoning_effort` — so without the second
+            # line every answer there lands in `reasoning` and `content` comes
+            # back EMPTY, on every puzzle, with no error anywhere.
+            #
+            # Sending both is safe rather than merely tolerated: vLLM derives
+            # `enable_thinking` from `reasoning_effort` ONLY when the caller did
+            # not set it explicitly, so the line above still wins there.
             "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning_effort": "none",
         }
         # In-process the driver sets `sampling` directly; the JS port drives
         # its own loop and spawns this as a CLI, so its level arrives in the
