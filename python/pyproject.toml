@@ -113,7 +113,12 @@ precision = 2
 # lands blocks every pull request and teaches people to route around it; the
 # real distance to 90% is recorded in TRIBAL_KNOWLEDGE.md so it cannot be
 # forgotten. Raise this as coverage rises, never lower it.
-fail_under = 53
+#
+# 53 -> 58: dead code removed (the denominator shrank) plus behaviour tests on
+# the overlay, the checkbox detector, the wait-gate metric, the CLI wire format
+# and the worker protocol. Measured 58.33% on 3.10 and 58.31% on 3.12; the floor
+# is the lower, rounded down.
+fail_under = 58
 
 [tool.mypy]
 python_version = "3.10"

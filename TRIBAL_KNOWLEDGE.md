@@ -196,16 +196,16 @@ chose.
 
 **Coverage floors are set at what the suites measure, not at what the spec
 asks.** The spec wants 90% line and branch on a service anything external
-depends on. Python measures **53.45%** combined line-and-branch on 3.12 and
-53.46% on 3.10 — **36.55 points short** of 90. The TypeScript driver measures **68.98%
-line and 76.72% branch** — **21.02 and 13.28 points short**. The floors are
-therefore 53 and 68/76: the measured values rounded down. A gate that is red the
+depends on. Python measures **58.31%** combined line-and-branch on 3.12 and
+58.33% on 3.10 — **31.69 points short** of 90. The TypeScript driver measures **71.10%
+line and 78.48% branch** — **18.90 and 11.52 points short**. The floors are
+therefore 58 and 71/78: the measured values rounded down. A gate that is red the
 day it lands blocks every pull request and teaches the team to bypass gates,
 which costs more than the gap it advertises. The numbers go up, never down, and
 the distance above is the number to close.
 
 **The Python floor is measured on the interpreters CI actually runs.** 3.10
-reports 53.46% and 3.12 reports 53.45% — 0.01 of a point apart — so the
+reports 58.33% and 3.12 reports 58.31% — 0.02 of a point apart — so the
 threshold runs on both legs rather than on one measured leg and one guess. The
 first version of this was measured on 3.14, the only interpreter on the machine
 at the time, and that habit is what produced the numpy break below; a real 3.10
@@ -219,12 +219,14 @@ would and emits the same lcov. The `sourceMap` flag in `tsconfig.test.json`
 exists only so those numbers land on `src/*.ts` rather than on compiled output;
 `dist/` is built by `tsconfig.json` and carries no maps.
 
-**c8 runs without `--all`.** With `--all` pointed at a TypeScript source tree,
-every file reported 0% — the synthesised entries collide with the source-mapped
-ones. Without it, a module no test imports would be invisible, and the reason
-that is survivable here is that `contract.test.ts` imports `index.ts`, which
-re-exports every runtime module: the only file missing from the report is
-`playwright-types.ts`, which is types only and emits no executable line.
+**c8 runs without `--all`, and the new tests did not change that.** With `--all`
+pointed at a TypeScript source tree every file still reports 0% — the synthesised
+entries collide with the source-mapped ones, which is a c8 limitation rather than
+a function of how much is tested. Without it a module no test imports would be
+invisible, and the reason that is survivable is checkable rather than assumed:
+comparing the report's file list against `src/*.ts` leaves exactly one file out,
+`playwright-types.ts`, which is types only and emits no executable line. Re-run
+that comparison when adding a module; do not reach for `--all`.
 
 **`mcp/` has no coverage number because it has no test suite.** Its gates are a
 type-check, a build, and a real MCP handshake against the built binary. A
