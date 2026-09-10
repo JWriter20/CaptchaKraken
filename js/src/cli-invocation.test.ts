@@ -14,9 +14,17 @@ import {
   solveEnv,
 } from './cli-invocation';
 
-// A synthetic token. Every assertion here is about where the string
-// travels, so the fixture is generated rather than read from anywhere.
-const KEY = `deadbeef${'0123456789abcdef'.repeat(3)}deadbeef`;
+// NOT A CREDENTIAL — a tracer. Every assertion below is about where this
+// string ENDS UP: in the environment, never in argv, gone from a logged
+// command. Nothing authenticates with it, so it is deliberately shaped so that
+// neither a reader nor a secret scanner can mistake it for a key.
+//
+// It is hardcoded rather than read from process.env on purpose. An unset
+// variable would make `solveEnv(...)` and the expected value BOTH undefined,
+// so every assertion here would pass while testing nothing — and a set one
+// would put a live credential inside a process whose assertion failures print
+// both sides of the comparison.
+const TRACER = 'not-a-key-just-a-string-this-test-follows';
 
 const invocation = {
   imagePath: '/tmp/captcha_123.png',
@@ -28,15 +36,15 @@ test('the api key never appears in argv', () => {
   const args = buildSolveArgs(invocation);
   for (const arg of args) {
     assert.ok(
-      !arg.includes(KEY),
+      !arg.includes(TRACER),
       `argv carried the credential (${arg}). /proc/<pid>/cmdline is world-readable.`,
     );
   }
 });
 
 test('the key is passed through the environment instead', () => {
-  const env = solveEnv({ PATH: '/usr/bin' }, KEY);
-  assert.equal(env[API_KEY_ENV], KEY);
+  const env = solveEnv({ PATH: '/usr/bin' }, TRACER);
+  assert.equal(env[API_KEY_ENV], TRACER);
   assert.equal(env.PATH, '/usr/bin', 'the base environment must survive');
 });
 
@@ -46,9 +54,9 @@ test('no credential in the environment when none was configured', () => {
 });
 
 test('a logged command is redacted even if a key reaches it', () => {
-  const line = `python -m captchakraken.cli shot.png captcha-v12 captchaKrakenApi ${KEY}`;
-  const redacted = redactCommand(line, KEY);
-  assert.ok(!redacted.includes(KEY), 'the printed command still contained the key');
+  const line = `python -m captchakraken.cli shot.png captcha-v12 captchaKrakenApi ${TRACER}`;
+  const redacted = redactCommand(line, TRACER);
+  assert.ok(!redacted.includes(TRACER), 'the printed command still contained the token');
   assert.ok(redacted.includes('***'));
 });
 
