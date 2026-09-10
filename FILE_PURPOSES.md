@@ -181,6 +181,9 @@ a behaviour is a regression: the bug it describes actually happened.
 | `js/src/recaptcha-dynamic-more-is-not-an-error.test.ts` | "Please also check the new images" is progress, not a rejection. |
 | `js/src/verdict-widget-gone.test.ts` | For the vendors with no other signal, the widget disappearing *is* success. |
 | `js/src/watcher.test.ts` | The watcher's contract, driven against a fake solver. |
+| `js/src/api-error-crosses-the-process-boundary.test.ts` | A hosted-API refusal is written by the Python CLI to stderr in snake_case and rebuilt here as `CaptchaKrakenAPIError`. Pins that every field survives the rename, that a wrong type is dropped rather than passed through, and that unrelated stderr yields `null` instead of a confident billing message. |
+| `js/src/token-usage-never-reports-nan.test.ts` | `SolveResult.tokenUsage` is published, and the rounds it sums arrive in two dialects. Pins that both are counted, that an unknown shape contributes zero rather than poisoning the total with `NaN`, and that an unpriced model still yields a finite cost. |
+| `js/src/phase-budget-attributes-not-partitions.test.ts` | Phase timing is an attribution, not a partition: re-entering a phase must not double-count it, a differently named nested phase counts under both, and a phase that throws is still recorded and still releases its name. |
 
 ## `js/examples/`
 
@@ -312,6 +315,12 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_every_keyframe_write_names_its_stem.py` | Both entries into the animated path write keyframes the same way; only one of them used to be exercised. |
 | `python/tests/test_a_reask_is_a_different_sample.py` | Re-asking a refused board must actually produce a different sample, not the same answer again. |
 | `python/tests/test_fetch_command.py` | The `fetch` command's plan: what it would pull, upgrade and restart, without doing any of it. |
+| `python/tests/test_overlay_is_what_the_model_reads.py` | `add_overlays_to_image` is exported API and the model reads what it draws. Pins where marks land for each of the two accepted bbox forms, that the source is not overwritten when an output path is given, that the result is RGB, and that an unusable box raises instead of writing a wrong overlay. |
+| `python/tests/test_find_checkbox_rejects_what_is_not_a_checkbox.py` | One test per gate in the checkbox detector, on synthetic images: squareness, absolute size, relative area and content variance. A false positive here clicks the page background; a false negative reports no widget on a page that has one. |
+| `python/tests/test_the_wait_gate_metric.py` | `region_box` and `region_diff_ratio`, the metric the driver holds the mouse on. Pins that an edge point never yields an empty box (which would read as a perfect match and open the gate immediately), that mismatched shapes read as completely different, and that the box is what bounds the comparison. |
+| `python/tests/test_cli_stdout_is_the_wire_between_the_ports.py` | The CLI's stdout is a wire protocol the TypeScript driver `JSON.parse`s. Pins one JSON document on stdout and nothing else, diagnostics on stderr, a non-zero exit on refusal, and that each handler declines a command that is not its own. |
+| `python/tests/test_a_refusal_keeps_its_machine_readable_half.py` | The Python half of the same boundary: an HTTP refusal becomes a typed error carrying code, status, resolution URL and retry-after, a self-hosted error page stays a plain `RuntimeError`, and the payload the driver reads survives a JSON round trip. |
+| `python/tests/test_the_worker_protocol_survives_a_bad_request.py` | `captchakraken serve` is a long-lived worker the driver polls while the mouse is held down. Pins the readiness line, the echoed request id, and above all that a malformed or unknown request is answered rather than fatal — a worker that dies mid-drag fails every later poll against a dead pipe. |
 
 ## `python/examples/`
 
