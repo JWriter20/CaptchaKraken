@@ -1,0 +1,27 @@
+{
+  "output": {
+    "filePath": "repomix-output.md",
+    "style": "markdown",
+    "compress": false,
+    "removeComments": true,
+    "removeEmptyLines": true,
+    "fileSummary": false,
+    "directoryStructure": true,
+    "showLineNumbers": false,
+    "headerText": "Signature map of all three ports: js/ (browser driver), python/ (engine and CLI), mcp/ (account server). Comments stripped, declarations kept. Grep it for a helper name before writing a new one, then confirm the owning file in FILE_PURPOSES.md. Regenerate with `npm run repomix`."
+  },
+  "include": [
+    "js/src/**/*.ts",
+    "js/scripts/**/*.{js,mjs}",
+    "mcp/src/**/*.ts",
+    "python/src/**/*.py",
+    "setup.sh"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "**/*.test.ts"
+    ]
+  }
+}

@@ -128,7 +128,18 @@ requirements → one agent.
   fail on a new divergence. After an intended change, regenerate it with
   `CONTRACT_WRITE=1 npm test` in `js/` and commit the diff.
 - **`FILE_PURPOSES.md` is the map of this repo**, and `TRIBAL_KNOWLEDGE.md` is
-  why it looks like this. There is no generated code map here — grep the tree.
+  why it looks like this. Adding or deleting a tracked file means editing
+  `FILE_PURPOSES.md` in the same commit — CI checks both directions and fails
+  before it runs a single test.
+- **Grep `repomix-output.md` before you write a helper.** It is a
+  comment-stripped signature map of all three ports, gitignored and rebuilt in
+  under a second:
+
+  ```bash
+  npm install          # once, at the repo root — tooling only, see below
+  npm run repomix      # writes repomix-output.md
+  grep -nE "function foo|const foo =|def foo" repomix-output.md
+  ```
 
 ## Dev setup
 
@@ -140,6 +151,11 @@ PyPI), and `mcp/` (→ npm `captchakraken-mcp`).
 git clone git@github.com:JWriter20/CaptchaKraken.git
 cd CaptchaKraken
 
+# Repo tooling: repomix and the codebase-map gate. NOT a published package —
+# the root package.json is `private: true` and exists only so these two have
+# somewhere to live that is not one of the three shipped manifests.
+npm install
+
 # TypeScript port
 cd js && npm install && npm run build && cd ..
 
@@ -149,6 +165,10 @@ cd python && pip install -e ".[dev]" && cd ..
 # Account MCP server
 cd mcp && npm install && npm run build && cd ..
 ```
+
+Every dependency in all four manifests is pinned to an exact version, and CI
+installs from the lockfiles with `npm ci`. Changing a version is a reviewed
+change, never a side effect of installing.
 
 The `js` package ships **no browser** — it types its public API against an
 implementation-neutral Playwright `Page`, and you bring your own
@@ -160,9 +180,15 @@ To run a solver against a model you'll need a vLLM server — see
 
 ## Tests & CI
 
-Two gates run on every PR, into `dev` and into `main` alike.
+Three gates run on every PR, into `dev` and into `main` alike, cheapest first.
 
-**1. A hermetic suite** (no GPU, no network, no weights) — everything you can
+**1. The codebase map**, in seconds, before anything is installed:
+`FILE_PURPOSES.md` must match `git ls-files` exactly, in both directions. Run it
+yourself with `npm run file-map` at the repo root. Nothing else starts until it
+passes, because a missing entry is one line to add and there is no reason to
+spend a test run discovering it.
+
+**2. A hermetic suite** (no GPU, no network, no weights) — everything you can
 run locally:
 
 ```bash
@@ -181,7 +207,20 @@ npx tsc --noEmit -p tsconfig.json && npm run build
 node ../.github/scripts/mcp-smoke.mjs node dist/index.js
 ```
 
-**2. A driver gate.** Both shipped ports are driven end to end through a real
+Coverage comes off those same runs, and the floor is enforced locally exactly as
+CI enforces it:
+
+```bash
+cd python && python -m pytest -q --cov      # floor in pyproject.toml
+cd js && npm run coverage                   # floor in .c8rc.json
+```
+
+Both floors are set at what the suites measure today, not at a number we would
+like: a gate that is red the day it lands teaches people to route around it. They
+go up, never down. `mcp/` has no test suite — its checks are a type-check, a
+build and an MCP handshake — so it has no coverage floor and no coverage number.
+
+**3. A driver gate.** Both shipped ports are driven end to end through a real
 browser against a fixture suite, and the result comes back as the
 `tier3/driver-gate` commit status plus a PR comment with per-port and
 per-vendor pass rates. The fixtures, generators and adapter are not in this
@@ -193,6 +232,10 @@ one port asking for something the other does not.
 
 This repo has **no browser tests of its own** — it never launches a browser, and
 it ships none.
+
+If you add a tracked file, add its `FILE_PURPOSES.md` row in the same commit; if
+you add a dependency, pin it exactly and say in the PR why it is worth a
+permanent supply-chain surface.
 
 > On a **fork PR** the driver gate cannot run: GitHub does not expose the
 > dispatch secret to a fork's workflow, so the check sits as pending. That is
