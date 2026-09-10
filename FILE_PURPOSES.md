@@ -257,12 +257,13 @@ something every browser-driver install should pay for.
 
 ### `python/tests/`
 
-The whole suite is hermetic and runs on every PR. Files named for a behaviour
-are regressions: the bug each describes actually happened.
+The whole suite is hermetic and runs on every PR, on Python 3.10 and 3.12.
+Files named for a behaviour are regressions: the bug each describes actually
+happened. There is no `conftest.py`: nothing here needs a fixture that
+`pyproject.toml` does not already provide.
 
 | File | Purpose |
 |---|---|
-| `python/tests/conftest.py` | Loads a local, gitignored `.env` before collection so tests that import modules directly see the environment a real solve would. |
 | `python/tests/test_public_contract.py` | The published Python surface, pinned name by name, plus the rule that `__version__`, `pyproject.toml` and `js/package.json` all say one number. Real callers depend on these names; removing one is a major version. |
 | `python/tests/test_version_matches_manifest.py` | `captchakraken.__version__` must equal the version pip installs. It drifted once, and every bug report quoted a release that was not running. |
 | `python/tests/test_api_error_is_exported.py` | The two ports expose the same error surface: what TypeScript exports, Python must too. |
@@ -295,9 +296,6 @@ are regressions: the bug each describes actually happened.
 | `python/tests/test_hcaptcha_badge_detection.py` | A photo is not a selection badge: the selected-state check must not read tile content as a tick. |
 | `python/tests/test_grid_detection.py` | Detection rates over a corpus of real captures. Skips where that corpus is not present, which is the case in a clean checkout. |
 | `python/tests/test_selected_fields.py` | Selected-tile readback over the same corpus, and skips the same way. |
-| `python/tests/grid_trace_reject.py` | Not a test — a diagnostic, run by hand on one image, that reports which gate rejected a lattice and whether the lines were found at all. It has no `test_` prefix, so pytest does not collect it. |
-| `python/tests/test_checkbox_captcha.py` | Skipped in place: it targets the retired v1 architecture, whose module is not in this repo. Kept visibly skipped rather than silently uncollected. |
-| `python/tests/test_object_detection.py` | Skipped for the same reason, with the same note. |
 | `python/tests/test_freshness_check.py` | The stale-frame guard: an image that changed while the model was thinking must not be acted on. |
 | `python/tests/test_stale_handle_after_submit.py` | A submit the vendor already accepted must not be re-solved, and a closed page must not be retried as a stale handle. |
 | `python/tests/test_empty_answer_still_submits.py` | The submit control is looked up outside the loop over the model's actions, so an empty answer is still sent. |

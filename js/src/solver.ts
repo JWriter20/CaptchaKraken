@@ -13,7 +13,7 @@ import {
 } from './playwright-types';
 import { watchPage, CaptchaWatcher, WatchOptions } from './watcher';
 import { Humanizer, resolveHumanizer } from './humanize.js';
-import { exec, execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
+import { execFile, spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -29,7 +29,6 @@ import { buildSolveArgs, redactCommand, solveEnv } from './cli-invocation';
 import { solveSlideGeometry } from './slide-geometry';
 import { getBundledCliRoot, resolveLoraName } from './model-name';
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 /**

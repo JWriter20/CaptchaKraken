@@ -5,7 +5,6 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from ..overlay import add_overlays_to_image
-from ..image_processor import ImageProcessor
 
 # =============================================================================
 # Grid detection: adaptive consistent-color line tracer.
@@ -525,93 +524,6 @@ def _perp_from_strip(strip, center_idx, ref, max_t):
     return offset, float(thick), (up_term and down_term)
 
 
-def _find_band(lab, axis, along, perp, ref, max_t, search=None):
-    """Search perpendicular to the line for the nearest contiguous band of
-    line-colored (within CONT_TOL of `ref`) pixels around `perp`, at the given
-    `along` coordinate. Returns (band_midpoint_perp, thickness) or None.
-
-    Used by the SAVE maneuver: when the slant has shifted the band away from our
-    fixed perp coordinate, find where it went and re-center. The band must be
-    <= max_t thick (a real gutter); a wider run means we've reached a background
-    region, so return None to end the line."""
-    h, w = lab.shape[:2]
-    if search is None:
-        # The save fires when the slant drifts us off the band. With a 1px along
-        # step and <=25deg tilt the band moves <=~0.5px/step, but we only save
-        # after color fails (drift ~ thickness). Search a window of one
-        # thickness + a small margin — NOT wide enough to jump to the next
-        # parallel gutter (that would corrupt the trace).
-        search = max_t + 2
-    # gather the perpendicular strip and a same-color mask
-    if axis == 1:                       # perp is vertical -> column `along`
-        ix = int(round(along))
-        if not (0 <= ix < w):
-            return None
-        lo = max(0, int(round(perp)) - search); hi = min(h, int(round(perp)) + search + 1)
-        strip = lab[lo:hi, ix, :]
-    else:                               # perp is horizontal -> row `along`
-        iy = int(round(along))
-        if not (0 <= iy < h):
-            return None
-        lo = max(0, int(round(perp)) - search); hi = min(w, int(round(perp)) + search + 1)
-        strip = lab[iy, lo:hi, :]
-    diff = strip - ref
-    de = np.sqrt(np.einsum('ij,ij->i', diff, diff))
-    same = de < CONT_TOL
-    if not same.any():
-        return None
-    # find contiguous runs; choose the one nearest the query perp
-    q = int(round(perp)) - lo
-    idx = np.where(same)[0]
-    runs = []
-    s = idx[0]; p = idx[0]
-    for v in idx[1:]:
-        if v == p + 1:
-            p = v
-        else:
-            runs.append((s, p)); s = v; p = v
-    runs.append((s, p))
-    best = min(runs, key=lambda r: min(abs(r[0] - q), abs(r[1] - q),
-                                       0 if r[0] <= q <= r[1] else 10**9))
-    thickness = best[1] - best[0] + 1
-    if thickness > max_t:
-        return None
-    mid = (best[0] + best[1]) / 2.0 + lo
-    return mid, float(thickness)
-
-
-def _perp_centerline(lab, axis, px, py, ref, max_t):
-    """Centerline + thickness perpendicular to the line at (px,py).
-    Horizontal line (axis=1): normal is vertical -> scan column px.
-    Vertical line (axis=0): normal is horizontal -> scan row py.
-    Reads a short strip from `lab` directly (no full-image mask)."""
-    h, w = lab.shape[:2]
-    ix, iy = int(round(px)), int(round(py))
-    # Strip must be wide enough to reach the band boundary even when the gutter
-    # is fused with same-colour tile content; max_t no longer bounds the walk.
-    pad = PERP_SCAN
-    if axis == 1:
-        if not (0 <= ix < w) or not (0 <= iy < h):
-            return None
-        lo = max(0, iy - pad); hi = min(h, iy + pad + 1)
-        strip = lab[lo:hi, ix, :]
-        r = _perp_from_strip(strip, iy - lo, ref, max_t)
-        if r is None:
-            return None
-        off, thick, term = r
-        return px, iy + off, thick, term
-    else:
-        if not (0 <= iy < h) or not (0 <= ix < w):
-            return None
-        lo = max(0, ix - pad); hi = min(w, ix + pad + 1)
-        strip = lab[iy, lo:hi, :]
-        r = _perp_from_strip(strip, ix - lo, ref, max_t)
-        if r is None:
-            return None
-        off, thick, term = r
-        return ix + off, py, thick, term
-
-
 def _seed_thickness(lab, axis, cx, cy, ref):
     """Count contiguous pixels perpendicular to the gutter at (cx,cy) that match
     `ref` (within COLOR_TOL), capped at PERP_SCAN each side. Used ONLY to populate
@@ -638,22 +550,6 @@ def _seed_thickness(lab, axis, cx, cy, ref):
         while i < w and dn < PERP_SCAN and _de2(lab[iy, i], ref) <= COLOR_TOL ** 2:
             dn += 1; i += 1
     return float(up + dn + 1)
-
-
-# ── Stage B: center-out tracer ──────────────────────────────────────────────
-def _seed_order(mid, lo, hi, step=1):
-    yield mid
-    d = step
-    while True:
-        a, b = mid - d, mid + d
-        emitted = False
-        if a >= lo:
-            yield a; emitted = True
-        if b <= hi:
-            yield b; emitted = True
-        if not emitted:
-            break
-        d += step
 
 
 def _split_runs(sorted_idx):
@@ -1043,34 +939,6 @@ def _principal_dir_2d(centered):
         v = np.array([0.0, 1.0])
     n = np.hypot(*v)
     return v / n if n > 1e-9 else np.array([1.0, 0.0])
-
-
-def _scan_seeds(lab, axis, seed_bias, ridge, c_lo, c_hi, span, lines):
-    """Seed EVERY row/col (no skip, no order-based dedup) and collect ALL valid
-    traces. The same gutter is intentionally re-seeded from each of its rows; the
-    duplicates are clustered and averaged later by _merge_lines. This replaces the
-    old 'skip a band-width / first-found-wins' scheme — which let a weak slanted
-    fragment found first block a stronger straight gutter found a few rows later
-    (the missed-straight-gutter bug). Checking every row also recentres the line
-    on the cluster midpoint, like find_grid's original cluster-and-average."""
-    h, w = lab.shape[:2]
-    lo, hi = int(span * (0.5 - MAX_SEED_FRAC)), int(span * (0.5 + MAX_SEED_FRAC))
-    # Decimate seed rows/cols: a gutter is >= MIN_RUN px in the perpendicular
-    # direction, so stepping by SEED_DECIMATE still seeds EVERY gutter from
-    # multiple rows (enough for the cluster-average) while doing a fraction of the
-    # per-seed trace work. The dominant cost is tracing the thousands of seeds that
-    # land on tile CONTENT and die after a few px; decimation cuts that linearly.
-    for c in range(lo, hi + 1, SEED_DECIMATE):
-        if axis == 1:
-            runs = _split_runs(np.where(ridge[c, c_lo:c_hi])[0] + c_lo)
-        else:
-            runs = _split_runs(np.where(ridge[c_lo:c_hi, c])[0] + c_lo)
-        for run in runs:
-            if len(run) < MIN_RUN:
-                continue
-            ln = _trace_one(lab, axis, run, float(c), seed_bias)
-            if ln is not None:
-                lines.append(ln)
 
 
 def _collect_seeds(lab, axis, ridge, c_lo, c_hi, span):

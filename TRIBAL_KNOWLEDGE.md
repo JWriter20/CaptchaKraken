@@ -283,16 +283,33 @@ installs 2.13.0 over it.** The old range did the same thing, so this is not new,
 but pinning made it legible. Aligning them is an image change with a real GPU
 test behind it, not a docs pass.
 
-**Two test files target the retired v1 architecture and are visibly skipped.**
-They import a module that is not in this repo, so they can never run; an explicit
-`importorskip` puts the skip in the run output instead of leaving the files
-silently uncollected. Either port them to the current planner or delete them — a
-test that can never run is not coverage.
+**The two v1-architecture test files are gone, not skipped.** They imported a
+module that is not in this repo, so they could never run under any condition; a
+visible `importorskip` was an improvement on silence but it was still a green
+check over nothing. Deleted rather than ported: the v1 planner they exercise no
+longer exists here.
 
 **The grid-detection corpus of real captures is not in this repo.** The tests
 that measure detection rates over it skip when the directory is absent, which is
 the case in every clean checkout, so the hermetic gate covers the geometry rules
 rather than the rates. It is also part of why the Python floor is where it is.
+
+**Dead code was carrying part of the coverage gap.** Removing four unreferenced
+`find_grid` tracer helpers, three unreferenced overlay drawing functions, a
+prompt builder that duplicated `prompts.py` while hardcoding the newest
+generation, a leftover `promisify(exec)` in the TypeScript solver, and nine
+unused imports moved Python coverage from 53.45% to 54.74% without a single new
+test — those lines were uncovered because nothing called them. Two rules made it
+safe: an exported symbol is published API and was never a candidate, and every
+deletion had to be unreferenced across `git ls-files` AND across the installed
+consumers on this machine.
+
+**`planner.VIDEO_ACTION_PROMPT_TEMPLATE` is unreferenced and was kept.** Its two
+siblings, `SELECT_GRID_PROMPT` and `PIXEL_ACTION_PROMPT`, are hashed by
+`pinned_model.json` and asserted by `test_pinned_model.py`, so the three are one
+declared set rather than three loose constants — and the comment above it is the
+only explanation of the animated pipeline in that module. The function that used
+it was the duplicate worth deleting; the alias is one line.
 
 **Test output is kept out of the published package by the bundler, not by the
 test.** `python/tests/test_solver.py` writes debug PNGs to `latestDebugRun/`

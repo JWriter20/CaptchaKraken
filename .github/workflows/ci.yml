@@ -88,10 +88,8 @@ jobs:
       # same report twice.
       - name: Hermetic no-regression suite
         # The whole suite, not a hand-picked list. The previous four-file
-        # allowlist silently skipped test_solver.py, test_selected_fields.py,
-        # test_checkbox_captcha.py, test_move_indicator.py and
-        # test_object_detection.py — tests that existed, passed locally, and
-        # gated nothing. If a test is too slow or non-hermetic for CI, mark it
+        # allowlist silently skipped test_solver.py, test_selected_fields.py and
+        # others — tests that existed, passed locally, and gated nothing. If a test is too slow or non-hermetic for CI, mark it
         # (`@pytest.mark.skipif`) so the skip is visible in the run output
         # rather than invisible in this file.
         run: python -m pytest -q --cov --cov-report=xml --cov-report=term

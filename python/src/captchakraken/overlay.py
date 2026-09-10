@@ -1,12 +1,9 @@
 import argparse
 import json
-import math
 import sys
-import numpy as np
-import cv2
 from typing import Any, Dict
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
 # Font cache to prevent repeated font loading
 _FONT_CACHE: Dict[tuple, Any] = {}
@@ -219,31 +216,6 @@ def draw_enhanced_bounding_box(
         )
 
 
-def draw_red_border(draw, bbox, width=3):
-    """Draw a solid red border around a bounding box."""
-    x1, y1, x2, y2 = bbox
-    color = "#FF0000"
-    draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
-
-
-def draw_arrow(draw, start, end, color="#FF0000", width=4):
-    """Draw an arrow from start to end (high visibility for model feedback)."""
-    x1, y1 = start
-    x2, y2 = end
-
-    draw.line([start, end], fill=color, width=width)
-
-    # Arrow head
-    angle = math.atan2(y2 - y1, x2 - x1)
-    arrow_len = 20
-    angle_offset = math.pi / 6  # 30 degrees
-
-    p1 = (x2 - arrow_len * math.cos(angle - angle_offset), y2 - arrow_len * math.sin(angle - angle_offset))
-    p2 = (x2 - arrow_len * math.cos(angle + angle_offset), y2 - arrow_len * math.sin(angle + angle_offset))
-
-    draw.polygon([end, p1, p2], fill=color)
-
-
 def add_overlays_to_image(image_path: str, boxes: list[dict], output_path: str = None, label_position="top-left"):
     """
     Load an image, draw bounding boxes and numbered labels, and save it.
@@ -409,99 +381,6 @@ def draw_edge_rulers(draw, image_size, step=0.1, tick_length=8):
         if font:
             draw.text((x + 2, 1), label, fill=label_color, font=font)
             draw.text((1, y + 2), label, fill=label_color, font=font)
-
-
-def add_drag_overlay(
-    image_path: str,
-    source_bbox: list[float],
-    target_bbox: list[float] = None,
-    target_center: tuple = None,
-    show_grid: bool = False,
-    foreground_image: Image.Image = None,
-    mask_points: list[list[float]] = None,
-):
-    """
-    Add drag-and-drop visualization.
-    - THIN GREEN box: The item being dragged at its current location.
-    """
-    try:
-        # Load image with PIL
-        with Image.open(image_path) as img:
-            img = img.convert("RGBA")
-            
-        x1, y1, x2, y2 = map(int, source_bbox)
-        # Clamp
-        w, h = img.size
-        x1 = max(0, x1); y1 = max(0, y1)
-        x2 = min(w, x2); y2 = min(h, y2)
-        
-        # 1. Prepare Background - use cv2.inpaint for clean source removal
-        bg_rgb = np.array(img.convert("RGB"))
-        bg_bgr = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2BGR)
-
-        if mask_points:
-            inpaint_mask = np.zeros(bg_bgr.shape[:2], dtype=np.uint8)
-            pts = np.array([(int(p[0] * w), int(p[1] * h)) for p in mask_points], dtype=np.int32)
-            cv2.fillPoly(inpaint_mask, [pts], 255)
-        else:
-            inpaint_mask = np.zeros(bg_bgr.shape[:2], dtype=np.uint8)
-            inpaint_mask[y1:y2, x1:x2] = 255
-
-        kernel = np.ones((5, 5), np.uint8)
-        dilated_mask = cv2.dilate(inpaint_mask, kernel, iterations=2)
-        bg_inpainted = cv2.inpaint(bg_bgr, dilated_mask, 3, cv2.INPAINT_TELEA)
-        bg_inpainted_rgb = cv2.cvtColor(bg_inpainted, cv2.COLOR_BGR2RGB)
-        background = Image.fromarray(bg_inpainted_rgb).convert("RGBA")
-        
-        # 2. Dim background slightly
-        dim_overlay = Image.new("RGBA", img.size, (0, 0, 0, 40)) 
-        background = Image.alpha_composite(background, dim_overlay)
-        
-        # 3. Prepare Object
-        if foreground_image:
-            object_crop = foreground_image.resize((x2-x1, y2-y1))
-        elif mask_points:
-            # Create masked crop using mask_points
-            mask = Image.new("L", (w, h), 0)
-            draw_mask = ImageDraw.Draw(mask)
-            pts = [(p[0] * w, p[1] * h) for p in mask_points]
-            draw_mask.polygon(pts, fill=255)
-            
-            object_rgba = img.convert("RGBA")
-            object_rgba.putalpha(mask)
-            object_crop = object_rgba.crop((x1, y1, x2, y2))
-        else:
-            object_crop = img.crop((x1, y1, x2, y2))
-
-        # 4. Paste at Target
-        if target_center:
-            tx, ty = target_center
-        else:
-            tx, ty = (x1 + x2) / 2, (y1 + y2) / 2
-            
-        cw, ch = object_crop.size
-        paste_x = int(tx - cw / 2)
-        paste_y = int(ty - ch / 2)
-        
-        background.alpha_composite(object_crop, (paste_x, paste_y))
-        
-        # 5. Draw Overlays
-        draw = ImageDraw.Draw(background)
-        if show_grid:
-            draw_grid_overlay(draw, background.size, step=0.1)
-
-        # Subtle edge ruler marks for spatial reference
-        draw_edge_rulers(draw, background.size)
-
-        # THIN GREEN BOX around the item being dragged (no labels, no source box, no arrow)
-        draw_enhanced_bounding_box(draw, [paste_x, paste_y, paste_x + cw, paste_y + ch], color="#00FF00", box_style="thin", image_size=background.size)
-
-        background = background.convert("RGB")
-        background.save(image_path)
-
-    except Exception as e:
-        print(f"Error adding drag overlays: {e}", file=sys.stderr)
-        raise
 
 
 if __name__ == "__main__":
