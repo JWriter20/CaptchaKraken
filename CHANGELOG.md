@@ -3,6 +3,34 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [Unreleased]
+
+### Added
+
+- **GGUF builds — `CaptchaKraken/CaptchaKraken-v1.2-GGUF`.** The v1.2 merge for
+  **Ollama** and **llama.cpp**, so the model runs without vLLM and without a
+  GPU. One repo holds `Q4_K_M` (5.6 GB), `Q8_0` (9.5 GB) and `F16` (17.9 GB).
+  Registered in `models.json`, so the client resolves generation-2 prompts and
+  the right pixel budget for it like any other published model.
+
+  **`mmproj-F16.gguf` is required.** It is the vision half of the model, and a
+  runtime given only the weights loads a text-only model that does not error —
+  it answers every puzzle without having seen the image. It stays full
+  precision in every build: quantising the half that reads a small picture
+  costs far more accuracy than the space it saves.
+
+  Ollama names a model after whatever you pulled it as, so that name can never
+  match a registry entry. Set `CAPTCHA_LORA_NAME` to what `ollama list` shows
+  and `CAPTCHA_LORA_ADAPTER` to the repo id — the first is what goes on the
+  wire, the second is what decides the prompts and the resolution. See
+  [Self-hosting → GGUF](./docs/self-hosting.md#gguf-for-ollama-and-llamacpp).
+
+### Fixed
+
+- **Self-hosting said the merged builds were a prompt generation behind.** True
+  when only the v1.1 merges existed; the v1.2 merges listed in the same table
+  are generation 2.
+
 ## [2.8.0] - 2026-09-06
 
 A model can now be a MIXTURE rather than a single adapter, and a model can now

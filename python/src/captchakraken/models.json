@@ -154,6 +154,16 @@
       },
       "note": "CaptchaKraken-Lora-v1.2 merged into Qwen/Qwen3.5-9B at AWQ 4-bit. Generation 2. Quantization changes the weights, not the schema they answer in, so the prompt generation and the pixel budget are the adapter's."
     },
+    "CaptchaKraken/CaptchaKraken-v1.2-GGUF": {
+      "prompt_version": "2",
+      "kind": "merged",
+      "lora_name": "CaptchaKraken/CaptchaKraken-v1.2-GGUF",
+      "pixel_budget": {
+        "min": 518400,
+        "max": 518400
+      },
+      "note": "CaptchaKraken-Lora-v1.2 merged into Qwen/Qwen3.5-9B and converted to GGUF, for llama.cpp and Ollama. ONE entry covers every quantisation in that repo: Q4_K_M, Q8_0 and F16 differ in weight precision, not in the schema they answer or the resolution they read at, so all three share this generation and this band. The vision tower ships beside them as a separate F16 projector and is never quantised — a runtime that loads the weights without it is text-only and cannot see a puzzle at all. Ollama names a model after whatever it was pulled or created as, and that name is what reaches us as `model`; an unrecognised one resolves through CAPTCHA_LORA_ADAPTER instead, which is why the self-hosting guide sets it."
+    },
     "CaptchaKraken/CaptchaKraken_v1.1": {
       "prompt_version": "1",
       "kind": "lora",

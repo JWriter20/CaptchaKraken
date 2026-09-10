@@ -263,8 +263,8 @@ stays up. Hardware notes, server commands, and updating:
 
 > `setup.sh` installs a **LoRA adapter**, which needs vLLM. If you use another
 > runtime — or just want one file and no adapter flags — serve the merged
-> **Sunlight v1.2** (4-bit) or **Twilight v1.2** (8-bit) builds instead. Both
-> are public.
+> **Sunlight v1.2** (4-bit) or **Twilight v1.2** (8-bit) builds instead. On
+> **Ollama**, or with no GPU at all, take the **GGUF** build. All are public.
 > See [The models](#the-models).
 
 **Already run your own vLLM server?** Point at it and skip all of the above. A
@@ -416,9 +416,11 @@ accuracy: **[docs/performance.md](./docs/performance.md)**.
 
 ## The models
 
-Two public releases. Within each, the same weights in three shapes: the **LoRA
-adapter** (strongest, needs vLLM and two downloads) and two **merged** builds
-that are one self-contained file any safetensors runtime will serve.
+Two public releases. Within each, the same weights in several shapes: the
+**LoRA adapter** (strongest, needs vLLM and two downloads), two **merged**
+builds that are one self-contained file any safetensors runtime will serve,
+and — for v1.2 — a **GGUF** build for Ollama and llama.cpp that needs no vLLM
+and no GPU.
 
 ### v1.2 — current
 
@@ -432,8 +434,14 @@ Prosopo — and it is the first generation to handle **animated challenges** and
 | **LoRA adapter** | bf16 on a stock base | ~0.4 GB + base | depends on base | [`CaptchaKraken-Lora-v1.2`](https://huggingface.co/CaptchaKraken/CaptchaKraken-Lora-v1.2) |
 | 🟦 **Twilight** | 8-bit (FP8) | 13 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
 | 🟦 **Sunlight** | 4-bit (AWQ) | 11 GB | ~14 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
+| 🟩 **GGUF** | 4-bit / 8-bit / F16 | 5.6–17.9 GB | none — CPU works | [`CaptchaKraken-v1.2-GGUF`](https://huggingface.co/CaptchaKraken/CaptchaKraken-v1.2-GGUF) |
 
-All three are **Qwen3.5-9B** — the adapter, and the two merges made from it.
+All of them are **Qwen3.5-9B** — the adapter, and the builds made from it.
+
+The GGUF repo holds every quantisation plus `mmproj-F16.gguf`, the vision half
+of the model. **It is required**: without it a runtime loads a text-only model
+that answers without ever seeing the puzzle. See
+[Self-hosting → GGUF](./docs/self-hosting.md#gguf-for-ollama-and-llamacpp).
 
 `./setup.sh` installs the LoRA adapter. **Twilight v1.2 is what the hosted API
 answers with** — the same LoRA on the same base, merged.

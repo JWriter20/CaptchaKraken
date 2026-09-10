@@ -8,18 +8,19 @@ computer.
 
 ## Pick a model
 
-There are two ways to self-host, and they install different things.
+There are three ways to self-host, and they install different things.
 
-| | **Merged model** (easiest) | **LoRA adapter** (what `setup.sh` installs) |
-|---|---|---|
-| Downloads | One file set | Base model + adapter |
-| Runtimes | vLLM, and any runtime that loads standard safetensors | vLLM only |
-| Generation | Prompt generation 1 | Prompt generation 2 — **newer and stronger** |
-| Setup | `vllm serve <id>` | `./setup.sh` |
+| | **Merged model** | **GGUF** | **LoRA adapter** (what `setup.sh` installs) |
+|---|---|---|---|
+| Downloads | One file set | One file + a projector | Base model + adapter |
+| Runtimes | vLLM, and any runtime that loads standard safetensors | Ollama, llama.cpp | vLLM only |
+| Needs a GPU | Yes | No — CPU works, slowly | Yes |
+| Setup | `vllm serve <id>` | `ollama run <id>` | `./setup.sh` |
 
-Both are published under the Source-Available License. Pick the merged model if
-you want the simplest possible serve, or if you do not use vLLM. Pick the
-adapter if you want the most accurate open weights.
+All three are published under the Source-Available License, and the current
+builds of all three are **prompt generation 2**. Pick GGUF if you use Ollama or
+have no GPU, the merged model for the simplest vLLM serve, and the adapter for
+the most accurate open weights.
 
 ### The merged models
 
@@ -64,10 +65,33 @@ seen. Two things to know if you write your own client against them: send
 `chat_template_kwargs: {"enable_thinking": false}`, and coordinates come back
 normalized 0–1000, not in pixels.
 
-**Merged models are a generation behind.** They are merges of the
-`CaptchaKrakenV1_Lora` adapter (prompt generation 1). The adapter `setup.sh`
-installs is `CaptchaKraken-Lora-v1.2` (generation 2), which scores higher. If
-you want the best open weights and you run vLLM, use the adapter.
+**The v1.1 rows are a generation behind.** They are merges of the
+generation-1 adapter. The v1.2 builds, and the adapter `setup.sh` installs, are
+generation 2. If you want the best open weights and you run vLLM, use the
+adapter.
+
+### GGUF, for Ollama and llama.cpp
+
+The same v1.2 merge converted to GGUF, so it runs without vLLM and without a
+GPU. One repo holds every quantisation:
+
+| File | Precision | Size | Comparable to |
+|---|---|---|---|
+| `CaptchaKraken-v1.2-Q4_K_M.gguf` | 4-bit | 5.6 GB | Sunlight |
+| `CaptchaKraken-v1.2-Q8_0.gguf` | 8-bit | 9.5 GB | Twilight |
+| `CaptchaKraken-v1.2-F16.gguf` | full | 17.9 GB | the unquantised merge |
+| `mmproj-F16.gguf` | full | 918 MB | **required by all three** |
+
+[`CaptchaKraken-v1.2-GGUF`](https://huggingface.co/CaptchaKraken/CaptchaKraken-v1.2-GGUF)
+
+> ⚠️ **The projector is not optional.** `mmproj-F16.gguf` is the vision half of
+> the model — the part that reads the puzzle. A runtime given the weights
+> without it loads a text-only model that does not error, it just answers
+> without ever having seen the image. Ollama picks it up automatically when it
+> is in the same repo or named in the same `Modelfile`.
+
+It stays full precision in every build, on purpose: quantising the half that
+reads a small picture costs far more accuracy than the space it saves.
 
 ### The adapter
 
@@ -133,6 +157,51 @@ vllm serve "$CAPTCHA_BASE_MODEL" \
   --port 8000 \
   --lora-modules "$CAPTCHA_LORA_NAME=$CAPTCHA_LORA_ADAPTER"
 ```
+
+## Run it with Ollama
+
+`setup.sh` does not manage Ollama — you run it, and point the client at it.
+
+```bash
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+ollama run hf.co/CaptchaKraken/CaptchaKraken-v1.2-GGUF:Q4_K_M
+```
+
+> ⚠️ **Raise the context length.** Ollama defaults to **4k tokens on cards
+> under 24 GB**, and an animated challenge arrives as several stills in one
+> request — which does not fit. The symptom is that still puzzles work and
+> animated ones fail. 16k is enough; the weights themselves go far higher.
+
+Then point the client at it. Ollama names a model after whatever you pulled it
+as, so the two names differ and both matter:
+
+```bash
+export VLLM_BASE_URL=http://localhost:11434/v1
+export CAPTCHA_KRAKEN_API_KEY=ollama
+export CAPTCHA_LORA_NAME=hf.co/CaptchaKraken/CaptchaKraken-v1.2-GGUF:Q4_K_M
+export CAPTCHA_LORA_ADAPTER=CaptchaKraken/CaptchaKraken-v1.2-GGUF
+```
+
+`CAPTCHA_LORA_NAME` is what goes on the wire, so it must be exactly what
+`ollama list` shows. `CAPTCHA_LORA_ADAPTER` is what the client looks up to
+decide **which prompts to send and what resolution to send the image at** —
+both are properties of these weights, and neither can be read off an Ollama
+model name. Set it, or the client falls back to whichever model is current.
+
+To run a quantisation other than Q4, swap the tag (`:Q8_0`, `:F16`). Importing
+the files by hand works too, and needs the projector named alongside them:
+
+```dockerfile
+FROM ./CaptchaKraken-v1.2-Q8_0.gguf
+FROM ./mmproj-F16.gguf
+```
+
+```bash
+ollama create captchakraken -f Modelfile
+```
+
+`ollama show <name>` lists `vision` under Capabilities when the projector was
+picked up. If it does not, the model cannot see the puzzle.
 
 ## Configuration
 
@@ -221,6 +290,9 @@ which sources your `captchakraken.env` and hands off to `captchakraken fetch`.
 | Model answers, but badly, on every puzzle | Wrong prompt generation for these weights | Check `CAPTCHA_LORA_NAME` matches the served name |
 | 4×4 grids always wrong, 3×3 mostly fine | Custom client, no cell-number overlay | See [Performance → grids must be numbered](./performance.md#grids-must-be-sent-with-the-cell-numbers-drawn-on) |
 | Out of memory at startup | Base too big for the card | `./setup.sh --quant awq`, or lower `VLLM_GPU_MEMORY_UTILIZATION` |
+| Answers describe nothing that is in the image | GGUF loaded without its projector | `ollama show <name>` should list `vision`; re-create with `mmproj-F16.gguf` |
+| Still puzzles solve, animated ones fail | Context too small for a multi-still request | `OLLAMA_CONTEXT_LENGTH=16384`, or `--ctx-size` on llama.cpp |
+| Every answer is empty, and the reply carries a `reasoning` field | Thinking is on, so the answer never reaches `content` | Our GGUF builds have it off by default; on your own build send `reasoning_effort: "none"` (Ollama) or `chat_template_kwargs: {"enable_thinking": false}` |
 
 Set `CAPTCHA_DEBUG=1` to print solver diagnostics to stderr.
 
