@@ -48,6 +48,12 @@ jobs:
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     strategy:
+      # BOTH LEGS ALWAYS REPORT. With fail-fast on, a 3.10 failure cancels 3.12
+      # mid-install and destroys its result, so a run that should have told us
+      # "3.10 cannot resolve numpy, 3.12 is fine" told us only the first half.
+      # The legs are minutes long and free on a public repo; the information is
+      # worth more than the cancelled runner time.
+      fail-fast: false
       matrix:
         python-version: ['3.10', '3.12']
     defaults:
@@ -76,9 +82,10 @@ jobs:
       # PR and teaches people to route around it. TRIBAL_KNOWLEDGE.md records
       # the real distance to 90%.
       #
-      # Enforced on 3.12 only because that is the interpreter the floor was
-      # measured against; 3.10 runs the same suite without the threshold, so a
-      # version-gated branch cannot make the gate flake on a leg nobody measured.
+      # Enforced on BOTH legs. Both were measured on the real interpreters and
+      # they agree to within 0.01 of a point, so there is no leg where the floor
+      # is guesswork. Only the upload is scoped to one leg, to avoid sending the
+      # same report twice.
       - name: Hermetic no-regression suite
         # The whole suite, not a hand-picked list. The previous four-file
         # allowlist silently skipped test_solver.py, test_selected_fields.py,
@@ -87,12 +94,7 @@ jobs:
         # gated nothing. If a test is too slow or non-hermetic for CI, mark it
         # (`@pytest.mark.skipif`) so the skip is visible in the run output
         # rather than invisible in this file.
-        run: |
-          if [ "${{ matrix.python-version }}" = "3.12" ]; then
-            python -m pytest -q --cov --cov-report=xml --cov-report=term
-          else
-            python -m pytest -q
-          fi
+        run: python -m pytest -q --cov --cov-report=xml --cov-report=term
 
       # The upload is the ONLY thing gated on the secret. The threshold above is
       # unconditional: a required check that passes by not running is worse than

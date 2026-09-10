@@ -41,11 +41,17 @@ classifiers = [
 # captchas against an existing endpoint. The heavy serving stack (vllm/torch)
 # is deliberately NOT here — see the `serve` extra.
 # Pinned exactly, never ranged: a dependency changes when we decide it does.
-# These are the versions the suite is green on — see TRIBAL_KNOWLEDGE.md.
+#
+# EVERY PIN MUST INSTALL ON `requires-python`'s FLOOR, not on the newest
+# interpreter that happens to be on your machine. numpy 2.5.3 was pinned here
+# from a 3.14 box and broke the 3.10 leg outright — it declares
+# `Requires-Python >=3.12`, so pip could not find it at all. 2.2.6 is the newest
+# numpy that still covers 3.10. Resolve against 3.10 before changing any of
+# these, and see TRIBAL_KNOWLEDGE.md.
 dependencies = [
   "pydantic==2.13.5",
   "pillow==12.3.0",
-  "numpy==2.5.3",
+  "numpy==2.2.6",
   "opencv-python-headless==5.0.0.93",
   "requests==2.34.2",
   "python-dotenv==1.2.3",

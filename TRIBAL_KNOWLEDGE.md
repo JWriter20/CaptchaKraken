@@ -196,20 +196,20 @@ chose.
 
 **Coverage floors are set at what the suites measure, not at what the spec
 asks.** The spec wants 90% line and branch on a service anything external
-depends on. Python measures **53.34%** combined line-and-branch (56.45% line
-alone) — **36.66 points short** of 90. The TypeScript driver measures **68.98%
+depends on. Python measures **53.45%** combined line-and-branch on 3.12 and
+53.46% on 3.10 — **36.55 points short** of 90. The TypeScript driver measures **68.98%
 line and 76.72% branch** — **21.02 and 13.28 points short**. The floors are
 therefore 53 and 68/76: the measured values rounded down. A gate that is red the
 day it lands blocks every pull request and teaches the team to bypass gates,
 which costs more than the gap it advertises. The numbers go up, never down, and
 the distance above is the number to close.
 
-**The Python floor was measured on 3.14, and CI gates on 3.12.** This machine
-has no other interpreter. Version-gated branches mean 3.10 and 3.12 can differ
-by a fraction of a point, so the threshold runs on the 3.12 leg only, and the
-3.10 leg runs the same suite without it — a gate must not flake on a leg nobody
-measured. Watch the first real CI run and re-pin the floor from its number if
-3.12 reports lower.
+**The Python floor is measured on the interpreters CI actually runs.** 3.10
+reports 53.46% and 3.12 reports 53.45% — 0.01 of a point apart — so the
+threshold runs on both legs rather than on one measured leg and one guess. The
+first version of this was measured on 3.14, the only interpreter on the machine
+at the time, and that habit is what produced the numpy break below; a real 3.10
+environment (`uv python install 3.10`) costs two seconds.
 
 **c8 and `node:test`, not Vitest and `@vitest/coverage-v8`.** The spec names
 Vitest, and switching would mean rewriting 30 test files that currently import
@@ -243,6 +243,30 @@ no-caret versions taken from what actually resolves and passes, and every GitHub
 Action is pinned to a commit SHA with its release tag in a trailing comment —
 `actions/checkout@…` was `@v4`, a moving tag that silently changes what runs on
 every PR. A version changes through a reviewed PR or not at all.
+
+**A pin must install on the floor the package promises, not on the interpreter
+that pinned it.** `numpy==2.5.3` was chosen from a 3.14 environment and turned
+the 3.10 leg red on arrival: numpy 2.5.x declares `Requires-Python >=3.12`, so
+pip could not find any candidate at all. The fix is 2.2.6, the newest numpy that
+still covers 3.10 — not raising `requires-python`, which would drop a platform
+installed users are already promised and is a breaking change, not a pinning
+detail. Every other pin was re-checked against 3.10 the same way, and the full
+suite now runs green on real 3.10.20 and 3.12.13 interpreters before the pins
+are believed.
+
+**The map tool is pinned above the repo's own Node floor, deliberately.** The
+packages and CI run Node 20; `repomix` needs 22 from 1.14.1 onward. Every
+repomix that runs on Node 20 is covered by an unpatched command-injection
+advisory, so the root tooling manifest declares `engines.node: ">=22"` and keeps
+the patched version. It is a contributor tool, published nowhere and never run
+in CI, so the cost is a clear `EBADENGINE` warning rather than a broken build —
+and that is a better trade than shipping a known RCE to save a Node upgrade.
+
+**The Python matrix does not fail fast.** A 3.10 failure used to cancel the 3.12
+leg mid-install, so a run that should have reported "3.10 cannot resolve this
+pin, 3.12 is fine" reported only the first half and left the second unknown. The
+legs are minutes long and Actions minutes are free on a public repo; the
+information is worth more than the cancelled runner time.
 
 **The `serve` extra is pinned to vllm's own numbers, and cannot be verified
 here.** `vllm==0.29.0` declares `torch==2.13.0`, so that pair cannot disagree.

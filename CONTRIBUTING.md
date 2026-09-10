@@ -141,6 +141,11 @@ requirements → one agent.
   grep -nE "function foo|const foo =|def foo" repomix-output.md
   ```
 
+  The map tool wants **Node 22+** while the packages and CI run Node 20; that
+  is deliberate and the root manifest declares it. The only versions of repomix
+  that run on Node 20 carry an unpatched command-injection advisory, and a
+  contributor tool is not worth an RCE.
+
 ## Dev setup
 
 One repo, two published ports plus an account server: `js/` (TypeScript browser
@@ -169,6 +174,14 @@ cd mcp && npm install && npm run build && cd ..
 Every dependency in all four manifests is pinned to an exact version, and CI
 installs from the lockfiles with `npm ci`. Changing a version is a reviewed
 change, never a side effect of installing.
+
+**A Python pin has to install on 3.10**, which is what `requires-python`
+promises — not merely on whatever interpreter you have. Resolve against the
+floor before changing one:
+
+```bash
+uv venv --python 3.10 /tmp/ck310 && VIRTUAL_ENV=/tmp/ck310 uv pip install -e "python[dev]"
+```
 
 The `js` package ships **no browser** — it types its public API against an
 implementation-neutral Playwright `Page`, and you bring your own
