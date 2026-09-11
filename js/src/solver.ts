@@ -515,7 +515,10 @@ export class CaptchaKrakenSolver {
    * the widget is no longer the board this plan was made for, which is exactly
    * when a fresh recording is warranted.
    */
-  private animatedPlan: { burstDir: string; response: CliResponse } | null = null;
+  // `response` is nullable so a REFUSED answer can be dropped while the
+  // frames are kept: re-asking then costs one inference rather than another
+  // burst. See `invalidateAnimatedAnswer`.
+  private animatedPlan: { burstDir: string; response: CliResponse | null } | null = null;
   // Slicing mode of the burst the current answer came from, as reported by
   // `solve-animated`. `waitForKeyframe` reads it: `even` means the slicer found
   // no state that RECURS, so there is nothing for the page to come back to and
@@ -1311,10 +1314,21 @@ export class CaptchaKrakenSolver {
       let response: CliResponse;
       if (isAnimated) {
         // ONE burst, ONE inference, for as long as this board is on screen.
-        if (this.animatedPlan) {
+        if (this.animatedPlan?.response) {
           burstDir = this.animatedPlan.burstDir;
           response = this.animatedPlan.response;
           console.log('[animated] reusing the recorded answer — same board, same screens');
+        } else if (this.animatedPlan) {
+          // The screens have not changed, so the recording still stands; only
+          // the ANSWER is gone. Re-ask on the frames already in hand.
+          burstDir = this.animatedPlan.burstDir;
+          console.log(
+            '[animated] same screens, but the last answer was refused — '
+            + 're-asking on the frames already recorded',
+          );
+          response = await this.ph('inference', () => this.withIdleWander(page, captchaElement, () =>
+            this.getAnimatedSolution(burstDir as string)));
+          this.animatedPlan = { burstDir, response };
         } else {
           burstDir = await this.ph('burst', () => this.recordKeyframeBurst(captchaElement));
           response = await this.ph('inference', () => this.withIdleWander(page, captchaElement, () =>
@@ -3525,6 +3539,26 @@ export class CaptchaKrakenSolver {
   }
 
   /** Count consecutive identical answers; see `maxNoProgressRounds`. */
+  /**
+   * The recording is still good; the ANSWER it produced is not.
+   *
+   * `animatedPlan` caches one burst and one inference for as long as a board is
+   * on screen. That is right for a cycling board whose answer merely landed on
+   * the wrong screen — the frames do not change, so re-recording buys nothing.
+   * It stops being right the moment the widget has REFUSED the answer:
+   * re-submitting identical coordinates cannot succeed, and a fresh sample
+   * cannot reach the wire while a cached response is standing in front of it.
+   *
+   * Drops the answer and keeps the frames, so the retry costs one inference
+   * rather than another `videoBurstMaxMs` of filming. Mirrors
+   * `_invalidate_animated_answer` in the python port.
+   */
+  private invalidateAnimatedAnswer(): void {
+    const plan = this.animatedPlan;
+    if (!plan || plan.response === null) return;
+    this.animatedPlan = { burstDir: plan.burstDir, response: null };
+  }
+
   private noteAnswer(actions: any[], retryMode: string | null): void {
     const sig = CaptchaKrakenSolver.answerSignature(actions, retryMode);
     if (sig !== null && sig === this.lastAnswerSig) {
@@ -3539,6 +3573,11 @@ export class CaptchaKrakenSolver {
       // identical answer by construction, and counting that to a limit
       // measures the limit. Ask for a different SAMPLE instead.
       this.resampleLevel++;
+      // …and make sure there is something to re-ask. On the animated path the
+      // answer is cached for the life of the board, so without this the new
+      // sampling never reaches a request and the identical coordinates go back
+      // up the wire.
+      this.invalidateAnimatedAnswer();
       // A board that reads the same every round is ALSO the signature of a
       // CYCLING challenge answered as a still. Let the recording path have a go
       // before giving up on the solve entirely.

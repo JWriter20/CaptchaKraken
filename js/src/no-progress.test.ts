@@ -111,3 +111,56 @@ test('the budget fits the loop count', () => {
     `${maxSolveLoops} rounds x 7000ms exceeds the ${overallSolveTimeoutMs}ms cap`,
   );
 });
+
+/*
+ * A CACHED ANIMATED ANSWER MUST NOT OUTLIVE ITS REFUSAL.
+ *
+ * `animatedPlan` holds one burst and one inference for as long as a board is on
+ * screen, which is right while the answer is merely untested: the frames do not
+ * change, so re-recording buys nothing. Once the widget has refused the answer
+ * it is wrong, because re-submitting identical coordinates cannot succeed — and
+ * the escalation above raises the SAMPLE, which never reaches the wire while a
+ * cached response stands in front of it.
+ *
+ * The rule is therefore two-part and both halves matter: drop the answer, keep
+ * the frames. Dropping both would spend another `videoBurstMaxMs` filming
+ * screens already in hand.
+ *
+ * Mirrors `_invalidate_animated_answer` in the Python port. Both ports drive the
+ * same fixtures under Tier 3 and must behave identically.
+ */
+test('a repeat drops the cached animated answer but keeps the frames', () => {
+  const s = solver();
+  s.animatedPlan = { burstDir: '/tmp/burst-abc', response: { actions: [] } };
+
+  s.noteAnswer(click([0.1, 0.1, 0.2, 0.2]), null);
+  s.noteAnswer(click([0.1, 0.1, 0.2, 0.2]), null);
+
+  assert.equal(s.animatedPlan.response, null, 'the refused answer must not be re-served');
+  assert.equal(s.animatedPlan.burstDir, '/tmp/burst-abc', 'the frames are still good');
+});
+
+test('an answer that is still making progress keeps its recording', () => {
+  // Invalidating on every round would re-ask once per round on a board that is
+  // being solved correctly, which is one inference per round of pure cost.
+  const s = solver();
+  const plan = { burstDir: '/tmp/burst-abc', response: { actions: [] } };
+  s.animatedPlan = plan;
+
+  s.noteAnswer(click([0.1, 0.1, 0.2, 0.2]), null);
+  s.noteAnswer(click([0.5, 0.5, 0.6, 0.6]), null);
+
+  assert.equal(s.animatedPlan.response, plan.response, 'a changing answer is not a refusal');
+});
+
+test('invalidating twice is not an error', () => {
+  // The no-progress path can fire again before the next round reaches a
+  // request; the second call must be a no-op rather than clearing the frames.
+  const s = solver();
+  s.animatedPlan = { burstDir: '/tmp/burst-abc', response: { actions: [] } };
+  s.invalidateAnimatedAnswer();
+  s.invalidateAnimatedAnswer();
+
+  assert.equal(s.animatedPlan.response, null);
+  assert.equal(s.animatedPlan.burstDir, '/tmp/burst-abc');
+});
