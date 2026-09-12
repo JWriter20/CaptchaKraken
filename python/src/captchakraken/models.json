@@ -121,6 +121,28 @@
     "routed model in the first place."
   ],
   "latest": "CaptchaKraken/CaptchaKraken-Lora-v1.2",
+  "_comment_hosted_default": [
+    "WHAT THE HOSTED ENDPOINT IS ASKED FOR, which is not what gets DOWNLOADED.",
+    "",
+    "`latest` is the download default: the repo a self-hoster pulls and serves.",
+    "`hosted_default` is the served NAME a client sends when it is talking to",
+    "our API. They were one field until Abyss, and one field cannot express",
+    "this: Abyss is hosted-only, so naming it as `latest` would point every",
+    "self-hoster at weights they are not licensed to download, while leaving it",
+    "out would mean the hosted endpoint never serves the better model.",
+    "",
+    "This is also what makes the rollout version-gated without a version",
+    "header. A client that ships this file asks for `abyss`; one that predates",
+    "it asks for whatever its own registry says and keeps getting v1.2. Nothing",
+    "server-side has to know which is which.",
+    "",
+    "Only consulted for an endpoint that is OURS \u2014 see config.is_hosted_endpoint.",
+    "A self-hosted vLLM, local or remote, resolves from `latest` exactly as",
+    "before, because it serves whatever its operator loaded and asking it for",
+    "`abyss` would 404."
+  ],
+  "hosted_default": "CaptchaKraken/Abyss",
+  
   "models": {
     "CaptchaKraken/CaptchaKraken-Lora-v1.2": {
       "prompt_version": "2",

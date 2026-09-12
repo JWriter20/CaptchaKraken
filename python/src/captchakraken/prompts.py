@@ -231,6 +231,24 @@ def latest_model() -> Optional[str]:
     return registry().get("latest")
 
 
+def served_aliases() -> Dict[str, str]:
+    """Served name -> repo id, as the registry declares them."""
+    return dict(registry().get("served_aliases") or {})
+
+
+def hosted_default_model() -> Optional[str]:
+    """The model OUR hosted endpoint should be asked for, or None.
+
+    Separate from `latest_model` because they answer different questions:
+    `latest` is what a self-hoster downloads, this is the served name a client
+    puts in the request when it is talking to our API. Abyss is the first model
+    where the two differ — hosted-only, so it can be served and cannot be
+    downloaded — and folding them together would either point self-hosters at
+    weights they cannot pull or keep the hosted endpoint on the older model.
+    """
+    return registry().get("hosted_default")
+
+
 def canonical_model_id(model: Optional[str]) -> Optional[str]:
     """Repo id for `model`, resolving a served alias.
 

@@ -74,6 +74,36 @@ def base_url() -> str:
     )
 
 
+#: Hosts whose endpoint is OURS, and therefore serves what `hosted_default`
+#: names. Deliberately an exact host list rather than "is it remote": a
+#: self-hoster running vLLM on their own box across the network is remote too,
+#: and telling THEM to ask for `abyss` would 404 every request. Extend for a
+#: staging gateway with CAPTCHA_HOSTED_HOSTS (comma-separated).
+_HOSTED_HOSTS = ("api.captchakraken.com",)
+
+
+def hosted_hosts() -> tuple:
+    extra = os.getenv("CAPTCHA_HOSTED_HOSTS", "")
+    return _HOSTED_HOSTS + tuple(
+        h.strip().lower() for h in extra.split(",") if h.strip())
+
+
+def is_hosted_endpoint(url: Optional[str] = None) -> bool:
+    """Is this endpoint the CaptchaKraken API, as opposed to someone's own vLLM?
+
+    Decides which default model name goes on the wire — see
+    `prompts.hosted_default_model`. Only our own endpoint serves the hosted-only
+    model, so only our own endpoint may be asked for it.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url or base_url()).hostname or "").lower()
+    except Exception:  # noqa: BLE001 — a malformed URL is not a hosted one
+        return False
+    return host in hosted_hosts()
+
+
 def state_dir() -> Path:
     """Shared state dir for the pidfile, lockfile, server log, and credentials."""
     return Path(os.getenv("CAPTCHA_KRAKEN_STATE_DIR", str(Path.home() / ".captchakraken")))
@@ -251,9 +281,58 @@ def lora_revision() -> str:
 
 
 def lora_name() -> str:
-    """The served LoRA name the client sends as the `model` field."""
-    return os.getenv("CAPTCHA_LORA_NAME") or _registry_default("lora_name") \
-        or pinned()["lora_name"]
+    """The served LoRA name the client sends as the `model` field.
+
+    Against OUR endpoint this is `hosted_default` — the hosted-only model, which
+    a self-hoster cannot download and our API does serve. Against anyone else's
+    vLLM it is the registry default exactly as before, because their server
+    holds whatever they loaded and asking it for a name it has never heard of is
+    a 404 rather than an upgrade.
+
+    An explicit `CAPTCHA_LORA_NAME` still wins over both. Pinning is opt-in and
+    stays that way.
+    """
+    pin = os.getenv("CAPTCHA_LORA_NAME")
+    if pin:
+        return pin
+    if is_hosted_endpoint():
+        hosted = _hosted_default_name()
+        if hosted:
+            return hosted
+    return _registry_default("lora_name") or pinned()["lora_name"]
+
+
+def _hosted_default_name() -> Optional[str]:
+    """The served name for `hosted_default` — the alias, not the entry's arm.
+
+    THE ALIAS, because a routed model is several names and only the alias
+    routes. `CaptchaKraken/Abyss` carries `lora_name: abyss-general`, which is
+    its generalist arm and the right answer for a caller who wants one adapter;
+    it is the wrong thing to put on the wire here, because `prompts.route`
+    looks the mixture up by the name it is given and `abyss-general` resolves to
+    a lone expert that declares no `experts` of its own. Sending it would pin
+    every family to the generalist and silently lose the routing.
+    """
+    try:
+        from . import prompts
+
+        repo = prompts.hosted_default_model()
+        if not repo:
+            return None
+        # Prefer an alias that actually routes; fall back to any alias for it,
+        # then to the entry's own served name.
+        aliases = [a for a, target in prompts.served_aliases().items()
+                   if target == repo and not a.startswith("_")]
+        for alias in aliases:
+            if prompts.experts(alias):
+                return alias
+        if aliases:
+            return aliases[0]
+        entry = prompts.registered_models().get(repo) or {}
+        value = entry.get("lora_name")
+        return value if isinstance(value, str) else None
+    except Exception:  # noqa: BLE001 — a broken registry falls back, never raises
+        return None
 
 
 # ── Local vLLM server knobs ─────────────────────────────────────────────────

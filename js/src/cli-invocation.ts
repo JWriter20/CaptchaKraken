@@ -26,7 +26,8 @@ export const API_PROVIDER = 'captchaKrakenApi';
 
 export interface SolveInvocation {
   imagePath: string;
-  model: string;
+  /** Omit to let the CLI resolve it — see `modelName` in solver.ts. */
+  model?: string;
   puzzleSource: string;
   retryMode?: string | null;
   textMode?: boolean;
@@ -41,14 +42,15 @@ export interface SolveInvocation {
 export function buildSolveArgs(invocation: SolveInvocation): string[] {
   const { imagePath, model, puzzleSource, retryMode, textMode, expert } =
     invocation;
-  const args = [
-    '-m',
-    'captchakraken.cli',
-    imagePath,
-    model,
-    API_PROVIDER,
-    `--puzzle-source=${puzzleSource}`,
-  ];
+  // BOTH POSITIONALS OR NEITHER. `model` and `api_provider` are consecutive
+  // optional positionals, so passing the provider without the model binds the
+  // provider's value to `model`. Dropping both is safe: `api_provider` defaults
+  // to the only value it accepts, and an absent `model` is what lets the CLI
+  // resolve the name itself — which it must, because it reads an endpoint (the
+  // credentials file) this port cannot see. See `modelName` in solver.ts.
+  const args = ['-m', 'captchakraken.cli', imagePath];
+  if (model) args.push(model, API_PROVIDER);
+  args.push(`--puzzle-source=${puzzleSource}`);
   if (retryMode) args.push(`--retry-mode=${retryMode}`);
   if (textMode) args.push('--text-mode');
   // Only when set. An absent flag is what lets the Python side route by prompt

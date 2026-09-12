@@ -2329,8 +2329,33 @@ export class CaptchaKrakenSolver {
    * cannot change inside one process.
    */
   private loraName(cliRoot: string): string {
-    if (this.loraNameCache === null) this.loraNameCache = resolveLoraName({ cliRoot });
+    if (this.loraNameCache === null) {
+      this.loraNameCache = resolveLoraName({ cliRoot, baseUrl: process.env.VLLM_BASE_URL });
+    }
     return this.loraNameCache;
+  }
+
+  /**
+   * The `--model` argv, or nothing at all.
+   *
+   * NOTHING is the right default now that the name depends on WHERE the request
+   * is going. The CLI resolves the endpoint from `VLLM_BASE_URL` and then the
+   * credentials file the MCP signup writes; this port reads neither, so a
+   * hosted user who configured themselves through the MCP has an endpoint the
+   * CLI can see and this process cannot. Forcing a name derived without it is
+   * how the two ports would answer the same question differently — the exact
+   * drift `model-name.ts` exists to prevent.
+   *
+   * An explicitly configured model still goes on the argv, because that is a
+   * pin and a pin must win in both ports.
+   */
+  private modelName(cliRoot: string): string | undefined {
+    const explicit = this.config.model ?? process.env.CAPTCHA_LORA_NAME;
+    if (explicit) return explicit;
+    // Only when THIS process can see the endpoint. Without VLLM_BASE_URL the
+    // CLI will read the credentials file and we cannot, so any name derived
+    // here would be a guess that overrides a better-informed one.
+    return process.env.VLLM_BASE_URL ? this.loraName(cliRoot) : undefined;
   }
 
   private resolveCli(): { cliRoot: string; py: string } {
@@ -3542,7 +3567,6 @@ export class CaptchaKrakenSolver {
     // the same place the Python port reads them. See model-name.ts.
     const { cliRoot, py } = this.resolveCli();
     const {
-      model = this.loraName(cliRoot),
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
 
@@ -3550,7 +3574,10 @@ export class CaptchaKrakenSolver {
       '-m', 'captchakraken.cli', 'solve-animated',
       '--frames-dir', framesDir,
       '--fps', String(this.config.videoBurstFps ?? 10),
-      '--model', model,
+      ...(() => {
+        const m = this.modelName(cliRoot);
+        return m ? ['--model', m] : [];
+      })(),
     ];
     // NOT `args.push('--api-key', apiKey)`: a flag value is argv just as much as
     // a positional is, and argv is world-readable on Linux. Env, same as the
@@ -4024,8 +4051,8 @@ export class CaptchaKrakenSolver {
   private async askModel(imagePath: string, puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown' = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
     // resolveCli() FIRST — see getAnimatedSolution.
     const { cliRoot, py } = this.resolveCli();
+    const model = this.modelName(cliRoot);
     const {
-      model = this.loraName(cliRoot),
       apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY,
     } = this.config;
 
