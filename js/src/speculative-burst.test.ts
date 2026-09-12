@@ -79,15 +79,19 @@ test('reCAPTCHA never speculates', () => {
   assert.equal(on.shouldSpeculate('unknown', false), true);
 });
 
-test('speculating is OPT-IN: unset is off', () => {
-  // The burst calls a board "moving" on an exact frame hash, so a still board
-  // that renders with any noise films to the ceiling — 12s of recording a
-  // picture, on the types that are cheapest to solve without it. Unset must
-  // therefore mean off, and `!== true` is the line that decides it: `=== false`
-  // would make unset ON, which is what it used to be.
+test('speculating is ON when unset', () => {
+  // It was opt-in while `moved()` read a board that transitions ONCE as
+  // animated: a fade or a settle lost its correct still answer and filmed to
+  // the ceiling — 12s of recording a picture, on the types cheapest to solve
+  // without it. `moved()` now also requires a NEW screen inside a floor window,
+  // so a settle reads as still and only a real cycle escalates.
+  //
+  // Unset therefore means ON, and `=== false` is the line that decides it:
+  // `!== true` would make unset off, which is what it used to be. Being on is
+  // what stops an animated board paying a WRONG CLICK to discover it cycles.
   const unset: any = new CaptchaKrakenSolver({});
-  assert.equal(unset.shouldSpeculate('hcaptcha', false), false);
-  assert.equal(unset.shouldSpeculate('unknown', false), false);
+  assert.equal(unset.shouldSpeculate('hcaptcha', false), true);
+  assert.equal(unset.shouldSpeculate('unknown', false), true);
 });
 
 test('a distorted-text round never speculates', () => {

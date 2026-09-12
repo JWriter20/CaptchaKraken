@@ -461,6 +461,13 @@ export interface CaptchaKrakenConfig {
    * known before its answer is acted on. Default on. Off restores the older
    * shape, which learned the same thing two rounds later.
    */
+  /**
+   * Consecutive MOVED settle polls, with no stillness between them, that call a
+   * widget animated without waiting out `animatedChallengeAfterMs`. Default 5 —
+   * 1.1s of unbroken motion at `settlePollMs`. Must match
+   * `animated_motion_streak` in page_solver.py.
+   */
+  animatedMotionStreak?: number;
   speculativeBurstEnabled?: boolean;
 
   /**

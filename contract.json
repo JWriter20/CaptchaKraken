@@ -1,6 +1,6 @@
 {
   "python": {
-    "version": "2.9.0",
+    "version": "2.10.0",
     "exports": [
       "ActionPlanner",
       "AppiumTouchBackend",
@@ -41,6 +41,7 @@
     },
     "page_solver_config_fields": [
       "animated_challenge_after_ms",
+      "animated_motion_streak",
       "animated_probe_enabled",
       "element_screenshot_timeout_ms",
       "expert",
@@ -410,6 +411,7 @@
     ],
     "config_fields": [
       "animatedChallengeAfterMs",
+      "animatedMotionStreak",
       "apiKey",
       "elementScreenshotTimeoutMs",
       "expert",

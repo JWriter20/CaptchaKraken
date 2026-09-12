@@ -413,6 +413,25 @@ const NOT_THIS_BOARD_DIFF = 0.5;
  * under the 0.0056 separation.
  */
 const MOVED_DURING_INFERENCE_DIFF = 0.002;
+
+/**
+ * More distinct screens than this inside the floor window and the board is
+ * ANIMATING CONTINUOUSLY — it needs keyframes even though no screen has come
+ * back yet. hCaptcha's odd-animal board fades its sprites on independent
+ * cycles: measured 38 distinct screens in 4s with no exact repeat, so waiting
+ * for one calls a plainly animated board still. The slicer keeps at most
+ * `DEFAULT_MAX_KEYFRAMES` (6) screens, which is the same number: past it there
+ * is already more motion than a keyframe answer can describe.
+ *
+ * Safe to read as "animating" rather than "noise" because the speculative path
+ * deliberately does not wander the cursor — so during THIS burst, a picture
+ * that keeps changing is the board changing, not the pointer moving over it.
+ * And a wrong guess self-corrects: a widget that turns out static slices to one
+ * keyframe and is answered as the still it is.
+ *
+ * Mirrors `_BURST_ANIMATED_SCREENS` in the python port.
+ */
+const BURST_ANIMATED_SCREENS = 6;
 const NOT_THIS_BOARD_POLLS = 3;
 
 export const SOLVE_DEFAULTS = {
@@ -554,6 +573,19 @@ export class CaptchaKrakenSolver {
   private noProgressRounds = 0;
   /** How far up planner.RESAMPLE_TEMPERATURES this BOARD has escalated. */
   private resampleLevel = 0;
+  /**
+   * Has anything been PERFORMED on the board now on screen? Gates the
+   * speculative burst — see `shouldSpeculate`. Mirrors `_acted_on_board`.
+   */
+  /**
+   * The recording `classifyByRecording` started and left running. The branch
+   * below either finishes it (animated) or uses it as the speculative film
+   * (static) — either way it is the SAME recording that did the classifying, so
+   * a widget is never filmed twice to answer the same question.
+   */
+  private pendingBurst: ReturnType<CaptchaKrakenSolver['startKeyframeBurst']> | null = null;
+
+  private actedOnBoard = false;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
   // gate behaviours; transitions are logged via gridDebug when CAPTCHA_DEBUG=1.
   private state: CaptchaState = CaptchaState.Detecting;
@@ -1004,6 +1036,7 @@ export class CaptchaKrakenSolver {
             // against it and the escalation must not carry over.
             if (this.resampleLevel) console.log('[resample] fresh board — back to greedy');
             this.resampleLevel = 0;
+            this.actedOnBoard = false;
             break;
           }
           await delay(this.config.postSolveOutcomePollMs ?? 75);
@@ -1187,21 +1220,18 @@ export class CaptchaKrakenSolver {
       }
       this.setState(CaptchaState.Loading);
       await this.ph('hcaptcha-images', () => this.waitForHcaptchaChallengeImages(captchaElement));
-      const settle = await this.ph('settle', () => this.waitForElementSettled(captchaElement));
-      if (settle === 'animated') {
-        // A challenge that never settles is animated BY DESIGN — hCaptcha's
-        // "select the odd animal" fades its sprites on independent cycles, and
-        // "unique motion pattern" spins identical meshes. This used to end the
-        // solve; it now routes to the recording path below.
-        if (this.config.videoSolveEnabled === false) {
+      if (this.config.videoSolveEnabled === false) {
+        // No recording allowed, so the old pixel probe is the only classifier
+        // left — and its 'animated' verdict has nowhere to go but an error.
+        if (await this.ph('settle', () => this.waitForElementSettled(captchaElement)) === 'animated') {
           const e: any = new Error(
             'ANIMATED_CHALLENGE: the challenge never settles and videoSolveEnabled is off.',
           );
           e.animated = true;
           throw e;
         }
-        console.log('[animated] challenge never settles — recording it');
-        isAnimated = true;
+      } else if (!textMode) {
+        isAnimated = await this.classifyByRecording(captchaElement) === 'animated';
       }
       // Those three waits total ~21s and none of them watches for success, so
       // the vendor's token routinely lands DURING them. Ask once more before
@@ -1209,6 +1239,7 @@ export class CaptchaKrakenSolver {
       // already accepted, and inference is the most expensive step in the loop.
       if (await this.isCaptchaSolved(page)) {
         console.log('[captchakraken] solved while waiting for the next round; skipping inference.');
+        await this.releasePendingBurst();
         return { didInteract: false, tokenUsage: [] };
       }
       this.setState(CaptchaState.Ready);
@@ -1220,9 +1251,8 @@ export class CaptchaKrakenSolver {
       // moment we happened to catch. reCAPTCHA is excluded on purpose: it has its own
       // readiness gate below, its grids are never animated, and a second probe would
       // only add latency to a path that already works.
-      if (await this.ph('settle', () => this.waitForElementSettled(captchaElement)) === 'animated') {
-        console.log('[animated] challenge never settles — recording it');
-        isAnimated = true;
+      if (!textMode) {
+        isAnimated = await this.classifyByRecording(captchaElement) === 'animated';
       }
     }
 
@@ -1268,6 +1298,7 @@ export class CaptchaKrakenSolver {
         establishedGridSize = 3;
         const elementBox = await captchaElement.boundingBox();
         if (elementBox) {
+          await this.releasePendingBurst();
           return this.solveRecaptchaGrid(page, captchaElement, attempt, retryMode, grid, elementBox);
         }
       } else if (grid && grid.size === 4) {
@@ -1275,13 +1306,25 @@ export class CaptchaKrakenSolver {
       }
     }
 
-    // 1. Take Screenshot
+    // 1. Take Screenshot — or take the one the classifier already came to rest on.
+    //
+    // `classifyByRecording` calls a board static only after the picture has held
+    // for the settle window, so its last frame IS a settled frame: the exact
+    // thing the old pixel probe existed to wait for. Reusing it drops a
+    // screenshot from every solve and removes the gap between "it settled" and
+    // "we photographed it", which is where a board that starts moving again gets
+    // photographed mid-change.
     const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-    await this.ph('screenshot', () => captchaElement.screenshot({
-      path: screenshotPath,
-      timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
-      animations: 'disabled',
-    }));
+    const settledFrame = isAnimated ? null : (this.pendingBurst?.stableFrame() ?? null);
+    if (settledFrame && fs.existsSync(settledFrame)) {
+      fs.copyFileSync(settledFrame, screenshotPath);
+    } else {
+      await this.ph('screenshot', () => captchaElement.screenshot({
+        path: screenshotPath,
+        timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+        animations: 'disabled',
+      }));
+    }
 
     // Save image to debug directory if debugging is enabled
     this.saveImageForDebug(screenshotPath);
@@ -1316,7 +1359,14 @@ export class CaptchaKrakenSolver {
           response = this.animatedPlan.response;
           console.log('[animated] reusing the recorded answer — same board, same screens');
         } else {
-          burstDir = await this.ph('burst', () => this.recordKeyframeBurst(captchaElement));
+          // THE FILM THAT CLASSIFIED IT IS THE FILM WE SLICE. `classifyByRecording`
+          // left it running; only a board that reached here some other way — the
+          // repeated-answer escalation, a later round — needs a fresh one.
+          const rec = this.pendingBurst;
+          this.pendingBurst = null;
+          burstDir = rec
+            ? await this.ph('burst', () => rec.finish())
+            : await this.ph('burst', () => this.recordKeyframeBurst(captchaElement));
           response = await this.ph('inference', () => this.withIdleWander(page, captchaElement, () =>
             this.getAnimatedSolution(burstDir as string)));
           this.animatedPlan = { burstDir, response };
@@ -1347,21 +1397,64 @@ export class CaptchaKrakenSolver {
          * pointer in a different place. That is a new picture each time, which
          * reads as a board with a dozen screens.
          */
-        const rec = this.startKeyframeBurst(captchaElement);
+        // Already filming — `classifyByRecording` started it and called this
+        // board static. Reusing it is the point: the seconds it spent deciding
+        // are seconds of the speculative window, not seconds before it.
+        const rec = this.pendingBurst ?? this.startKeyframeBurst(captchaElement);
+        this.pendingBurst = null;
         let still: CliResponse | null = null;
         let stillError: unknown = null;
         try {
           still = await this.ph('inference', () => this.solveFrameFreshnessGuarded(
             captchaElement, screenshotPath,
             (imagePath) => this.getSolution(imagePath, puzzleSource, retryMode, textMode),
+            { recordingInFlight: true },
           ));
         } catch (e) {
           stillError = e;   // rethrown below only if the board turns out still
         }
 
-        if (!rec.moved()) {
+        // ASK THE RECORDING ONLY ONCE IT CAN ANSWER.
+        //
+        // `moved()` is "a screen came back", and a screen cannot come back
+        // until the board has held one and moved on. Consulting it the instant
+        // inference returned therefore answers "still" on every board that
+        // cycles slower than the model reads: geetest_v4_svg dwells 1.5-2.7s
+        // per screen and answers in 0.4s, so the burst had four frames of one
+        // picture and the driver called a cycling board static, clicked a stale
+        // answer, threw the film away and re-recorded it a round later — 9.6s
+        // of a 14.7s solve, and three wasted `abyss-general` calls.
+        //
+        // Gating the wait on "have we seen two screens YET" does not work and
+        // was the first thing tried: at 0.4s the honest answer is "one screen
+        // so far", which is indistinguishable from "one screen ever". The only
+        // sound stop is the floor window — the same one `recordKeyframeBurst`
+        // uses, and long enough to outlast the worst dwell measured.
+        const cycling = await this.ph('burst', () => rec.verdict());
+
+        if (!cycling) {
+          // Moved and then stopped — a fade, a single transition. The answer in
+          // hand describes the screen BEFORE it, so take the developed one.
+          // This is the re-solve the guard skipped while the film was running.
+          const movedOnce = rec.screensSeen() > 1;
           await rec.abandon();
           if (stillError) throw stillError;
+          if (movedOnce) {
+            console.log(
+              '[animated] the board changed once and settled — not a cycle; '
+              + 're-reading the screen it came to rest on.');
+            try {
+              await captchaElement.screenshot({
+                path: screenshotPath,
+                timeout: this.config.elementScreenshotTimeoutMs ?? 8000,
+                animations: 'disabled',
+              });
+              still = await this.ph('inference', () => this.solveFrameFreshnessGuarded(
+                captchaElement, screenshotPath,
+                (imagePath) => this.getSolution(imagePath, puzzleSource, retryMode, textMode),
+              ));
+            } catch { /* keep the answer in hand — a re-read is an improvement, not a requirement */ }
+          }
           response = still as CliResponse;
         } else {
           console.log(
@@ -1579,6 +1672,10 @@ export class CaptchaKrakenSolver {
         this.lastSubmitFrameHash = await this.elementFrameHash(captchaElement);
       }
     } finally {
+      // A recording that classified the board and that no branch went on to use
+      // — a text round, a path that returned early. Dropping it here is what
+      // keeps "always film once" from becoming "leak a film per round".
+      await this.releasePendingBurst();
       // Cleanup
       if (fs.existsSync(screenshotPath)) {
         fs.unlinkSync(screenshotPath);
@@ -3130,6 +3227,24 @@ export class CaptchaKrakenSolver {
   private startKeyframeBurst(captchaElement: ElementHandle): {
     /** Has the widget shown more than one picture yet? */
     moved: () => boolean;
+    /** Distinct screens banked so far. 1 means nothing has changed. */
+    screensSeen: () => number;
+    /** The most recent frame on disk — after `ready()` says 'static', the settled one. */
+    stableFrame: () => string | null;
+    /** What KIND of board this is, from the frames this burst is already taking. */
+    ready: () => Promise<'static' | 'animated'>;
+    /**
+     * Wait until the recording can actually ANSWER `moved()`, then answer it.
+     *
+     * `moved()` is `cycleClosed`, and a cycle cannot close until a screen has
+     * come back — which on a slow board is several seconds after the still
+     * answer lands. Asking the instant inference returns therefore answers
+     * "not cycling" on exactly the boards that cycle slowest: measured on
+     * geetest_v4_svg, the question was put at 2.7s and that board's cycle
+     * closes at 4.8s, so the recording was abandoned two seconds before it
+     * would have proved the point and re-shot from scratch a round later.
+     */
+    verdict: () => Promise<boolean>;
     /** Stop now and delete the frames — the board turned out to be still. */
     abandon: () => Promise<void>;
     /** Run to the end of the cycle and return the directory. */
@@ -3153,6 +3268,12 @@ export class CaptchaKrakenSolver {
     // Frame index of the most recent NEW screen. A board that has shown
     // nothing new for a whole floor-length window has SETTLED.
     let lastNewAt = 0;
+    // Frame index of the most recent CHANGE of any kind — a screen coming back
+    // counts here and not above. This is what "has the picture held still"
+    // reads, which is the question the separate settle probe used to answer
+    // with its own screenshot loop.
+    let lastChangeAt = 0;
+    let lastFrame: string | null = null;
     let cycleClosed = false;
     let stopped = false;
     let runToEnd = false;              // set by finish(): keep going past the floor
@@ -3183,9 +3304,11 @@ export class CaptchaKrakenSolver {
             animations: 'allow',
           });
           captured++;
+          lastFrame = frame;
           try {
             const d = createHash('sha1').update(fs.readFileSync(frame)).digest('hex');
             if (d !== lastDigest) {
+              lastChangeAt = captured;
               // A screen already recorded, coming back after another one: the
               // loop has closed and every screen is now in the clip.
               if (order.includes(d) && order.length >= 2) cycleClosed = true;
@@ -3213,6 +3336,12 @@ export class CaptchaKrakenSolver {
             + `(${order.length} seen) — the board has settled; stopping the burst`);
           break;
         }
+        // No "enough screens, stop filming" rule here. Both spellings were
+        // measured on number_with_highest_value_video — cutting at the 4.0s
+        // floor (40 frames) and running the extra 0.1s to `cycleClosed` (41) —
+        // and it failed every seed either way, so the clip boundary is not what
+        // decides that board. Leaving the two original exits (a closed cycle,
+        // or settled) rather than adding a third that buys nothing.
         if (runToEnd && cycleClosed && i + 1 >= floorFrames) {
           console.log(
             `[animated] cycle closed after ${((i + 1) * intervalMs / 1000).toFixed(1)}s `
@@ -3231,7 +3360,130 @@ export class CaptchaKrakenSolver {
     return {
       // More than one picture seen. This is the ONLY question the speculative
       // caller needs answered, and the burst answers it for free.
-      moved: () => order.length >= 2,
+      // CYCLING, not merely "more than one screen". A board that transitions
+      // ONCE and then holds has two screens and never repeats either —
+      // tower_stack measured exactly that (2 distinct sha1, MAD 32.51). Calling
+      // it animated discards a correct still answer and films a board that has
+      // already stopped. Settled = no NEW screen for a full floor window, which
+      // is the same rule the burst above stops on; a real cycle always produces
+      // one inside that window (geetest svg dwells p50 1.5s / max 2.7s per
+      // screen against a 4s floor), so it is never mistaken for settled.
+      // Mirrors `_speculate` in the python port; if one moves, move both.
+      // A CYCLE IS A SCREEN THAT COMES BACK. Not "more than one screen" and
+      // not "still changing": tower_stack transitions once and holds;
+      // connect_path and tetris_fit have the cursor on the widget so new
+      // screens never stop arriving. Only a board that REPEATS one has an
+      // answer that depends on which screen is up. Mirrors `_speculate` in the
+      // python port; if one moves, move both.
+      moved: () => cycleClosed,
+
+      screensSeen: () => order.length,
+
+      stableFrame: () => lastFrame,
+
+      ready: async () => {
+        // ONE RECORDING ANSWERS BOTH QUESTIONS.
+        //
+        // There used to be two loops here: a pixel settle probe that
+        // screenshotted the widget to decide "is this animated", and then this
+        // burst, which screenshotted the same widget to film the same motion.
+        // On rotating_obj_video that was 1449ms of observation thrown away
+        // before a 3934ms recording of the identical thing. The probe also had
+        // to take its frames with `animations: 'disabled'` — which freezes CSS
+        // animation, so it could not see a CSS-driven board move at all.
+        //
+        // Three outcomes, all read off the frames already being banked:
+        //
+        //   STATIC    the picture has held for the settle window. That frame is
+        //             the still to send, and it is a SETTLED one — the probe's
+        //             other job — so a board still fading in is not answered
+        //             half-drawn.
+        //   ANIMATED  a screen came back, or enough distinct screens have
+        //             arrived that the board plainly never rests. The second is
+        //             what reaches a continuously-moving board in ~0.5s instead
+        //             of waiting out `animatedChallengeAfterMs`.
+        //
+        // A board that DWELLS — geetest_v4_svg holds each screen 1.5-2.7s —
+        // reads STATIC here on purpose, and that is not a mistake to fix: the
+        // caller asks the still optimistically while this keeps filming, and
+        // `verdict()` catches the cycle when a screen comes back. No stillness
+        // threshold can separate "static" from "animated but resting"; the
+        // measured holds run 0.44s to 8.2s. Asking, and being ready to throw
+        // the answer away, is what covers that gap.
+        const settleWindow = Math.max(2, Math.ceil(
+          ((this.config.settleFrames ?? 2) * (this.config.settlePollMs ?? 220)) / intervalMs));
+        const earlyScreens = Math.max(2, this.config.animatedMotionStreak ?? 5);
+        let ended = false;
+        loop.then(() => { ended = true; }, () => { ended = true; });
+        for (;;) {
+          if (cycleClosed) {
+            console.log('[animated] a screen came back — recording it');
+            return 'animated' as const;
+          }
+          if (order.length >= earlyScreens) {
+            console.log(
+              `[animated] ${order.length} screens in ${(captured * intervalMs / 1000).toFixed(1)}s `
+              + 'and still arriving — recording it');
+            return 'animated' as const;
+          }
+          if (captured >= settleWindow && captured - lastChangeAt >= settleWindow) {
+            return 'static' as const;
+          }
+          if (ended || stopped) {
+            // Ran out of film without deciding. More than one screen means it
+            // moved, which is the safer read: a widget that turns out static
+            // slices to a single keyframe and is answered as the still it is.
+            return order.length > 1 ? ('animated' as const) : ('static' as const);
+          }
+          await delay(intervalMs);
+        }
+      },
+
+      verdict: async () => {
+        // Three ways to be done, and the ceiling is not one of them on its own:
+        //
+        //   the cycle closed          -> cycling; every screen is in the clip.
+        //   settled                   -> no NEW screen for a full floor window,
+        //                                so the board moved once and stopped.
+        //                                tower_stack is exactly this.
+        //   more screens than the
+        //   slicer will ever keep     -> not a cycle at all. connect_path and
+        //                                tetris_fit put a cursor on the widget,
+        //                                so every frame differs and no screen
+        //                                ever comes back; waiting for one costs
+        //                                the whole ceiling and learns nothing.
+        //                                DEFAULT_MAX_KEYFRAMES is the same
+        //                                number the slicer would cut to.
+        let ended = false;
+        let animating = false;
+        let why = 'a screen came back';
+        loop.then(() => { ended = true; }, () => { ended = true; });
+        while (!cycleClosed && !ended && !stopped) {
+          if (captured >= floorFrames) {
+            // Nothing new for a whole floor window: it moved once and stopped.
+            // A fade-in, a settle, tower_stack. The still answer stands.
+            if (captured - lastNewAt >= floorFrames) {
+              why = 'no new screen for a full floor window — it moved once and settled';
+              break;
+            }
+            // Still producing new screens after a full window. No repeat yet,
+            // but a board that never stops changing needs keyframes just as
+            // much as one that loops.
+            if (order.length > BURST_ANIMATED_SCREENS) {
+              animating = true;
+              why = `${order.length} screens and still arriving — animating continuously`;
+              break;
+            }
+          }
+          await delay(intervalMs);
+        }
+        const moved = cycleClosed || animating;
+        if (!moved && (ended || stopped)) why = ended ? 'the recording ended' : 'abandoned';
+        console.log(
+          `[animated] burst verdict after ${(captured * intervalMs / 1000).toFixed(1)}s: `
+          + `${moved ? 'ANIMATED' : 'still'} (${order.length} screens; ${why})`);
+        return moved;
+      },
 
       abandon: async () => {
         stopped = true;
@@ -3367,6 +3619,46 @@ export class CaptchaKrakenSolver {
    * same click, then solved. Kept for `cycle`/`static`, where the state does
    * come back and waiting is the difference between the sprite and background.
    */
+  /**
+   * Does the chosen keyframe's answer area appear in ANY other keyframe of the
+   * same clip? If it does, that appearance recurs within a burst length, so
+   * waiting for it on the live widget terminates.
+   *
+   * Uses `match-region` — the same comparator, box and tolerance the wait polls
+   * with — so "the same" cannot mean two different things either side of the
+   * decision.
+   */
+  private async answerRegionRecurs(
+    keyframePath: string, cx: number, cy: number,
+  ): Promise<boolean> {
+    // THE SIBLINGS OF THIS CLIP, not every PNG that happens to share a folder.
+    // `write_keyframes` emits `frame_NN.png` into a burst's own temp directory,
+    // so that prefix is what names the set. Reading the whole directory instead
+    // picks up anything else living there.
+    let siblings: string[] = [];
+    try {
+      const dir = path.dirname(keyframePath);
+      const base = path.basename(keyframePath);
+      const prefix = base.replace(/_\d+\.png$/i, '_');
+      if (prefix === base) return false;        // not one of a numbered set
+      siblings = fs.readdirSync(dir)
+        .filter((f) => f.startsWith(prefix) && f.toLowerCase().endsWith('.png'))
+        .map((f) => path.join(dir, f))
+        .filter((f) => f !== keyframePath);
+    } catch {
+      return false;   // cannot tell — behave as before and do not wait
+    }
+    for (const other of siblings) {
+      const r = await this.runCvTool(
+        'match-region',
+        { ref: keyframePath, live: other, cx, cy },
+        ['match-region', keyframePath, other, String(cx), String(cy)],
+      );
+      if (r && r.match === true) return true;
+    }
+    return false;
+  }
+
   private async waitForKeyframe(
     captchaElement: ElementHandle,
     keyframePath: string,
@@ -3379,14 +3671,53 @@ export class CaptchaKrakenSolver {
     // steady screens at all — a rotation, a one-way fade, a sprite crossing —
     // where the gate can only ever time out. Measured: 0 steady screens for all
     // five continuous hCaptcha video types, 2-3 for every real GeeTest svg.
-    if (this.keyframeSteadyScreens < 2) {
+    //
+    // TRIED AND REVERTED 2026-09-11: asking the LOCAL question instead — does
+    // the answer's neighbourhood differ between this clip's keyframes — on the
+    // grounds that number_with_highest_value_video's whole frame differs by
+    // 0.0009-0.0099 between keyframes while its answer region differs by up to
+    // 0.1143. The data is right and the conclusion was wrong: that board
+    // changes its number every ~3.2s and runs 12 changes over 40s, so the
+    // screen the model named does not come back inside any clip we could film.
+    // The gate opened for it and then timed out every round — 28-31s solves
+    // against 12-13s, and tile_flip_video went 8.4s -> 12.8-15.4s for the same
+    // reason. A frame that never returns cannot be waited for; see the note in
+    // the report for what that puzzle actually needs.
+    //
+    // `keyframeSteadyScreens` counts screens the WHOLE CLIP returns to, and it
+    // reads 0 for every continuous hCaptcha video type — so the gate refused on
+    // exactly the boards whose answer depends on the moment. On
+    // number_with_highest_value_video the digits fade in and out one at a time,
+    // so which one sits under the answer point IS the answer (the grader
+    // resolves the press against the frame through `_with_leeway`), and
+    // clicking without waiting scores 0.81-0.88 where waiting scores 0.98.
+    //
+    // So ask the local question instead — but ask it the right way round. The
+    // useful fact is not "does the answer area change between keyframes", which
+    // is true of every animated board and would make the gate wait on clips
+    // that can only time out. It is "does the chosen keyframe's answer area
+    // COME BACK": if some other keyframe of this same clip already looks like
+    // it there, the appearance recurs inside a burst length and waiting for it
+    // terminates. If it is unique to that one frame, it will not return in any
+    // budget worth spending, and clicking now is the honest fallback.
+    const steady = this.keyframeSteadyScreens >= 2;
+    if (!steady && !(await this.answerRegionRecurs(keyframePath, cx, cy))) {
       console.log(
-        `[animated] clip sits on ${this.keyframeSteadyScreens} steady screen(s); `
-        + "nothing to come back to, acting on the model's frame without waiting",
+        `[animated] clip sits on ${this.keyframeSteadyScreens} steady screen(s) and the `
+        + "answer area is unique to the chosen frame; acting on it without waiting",
       );
       return false;
     }
-    const timeout = this.config.keyframeWaitTimeoutMs ?? SOLVE_DEFAULTS.keyframeWaitTimeoutMs;
+    // A clip with no steady screens got here on LOCAL evidence, so bound the
+    // wait by what that evidence covers. The appearance was seen to come back
+    // inside ONE burst, so one burst length is what it can be worth waiting;
+    // past that we are no longer waiting on something we observed. Uncapped,
+    // number_with_highest_value_video ran 36s. The full budget stays for clips
+    // that proved recurrence over the whole screen.
+    const fullTimeout = this.config.keyframeWaitTimeoutMs ?? SOLVE_DEFAULTS.keyframeWaitTimeoutMs;
+    const timeout = steady
+      ? fullTimeout
+      : Math.min(fullTimeout, this.config.videoBurstDurationMs ?? 4000);
     const interval = this.config.keyframeWaitPollMs ?? 120;
     // Never past the solve's own deadline: waiting for a screen we no longer
     // have time to click is pure overrun. Mirrors `_check_deadline` in the
@@ -3604,15 +3935,56 @@ export class CaptchaKrakenSolver {
    * Distorted-text rounds are excluded because the answer is a string, not a
    * place, and nothing about a recording helps read one.
    */
+  /**
+   * Is this board static or animated? Decided by FILMING it, once.
+   *
+   * Replaces the pixel settle probe on this path. That probe ran its own
+   * screenshot loop to answer exactly this, threw every frame away, and handed
+   * over to a burst that filmed the same widget again — 1449ms of duplication
+   * on rotating_obj_video before a 3934ms recording of the identical motion.
+   * It also took its frames with `animations: 'disabled'`, which freezes CSS
+   * animation, so a CSS-driven board could not be seen to move at all.
+   *
+   * The recording stays running. `pendingBurst` hands it to the branch below,
+   * which finishes it into keyframes or uses it as the speculative film.
+   */
+  private async classifyByRecording(el: ElementHandle): Promise<'static' | 'animated'> {
+    await this.releasePendingBurst();
+    const rec = this.startKeyframeBurst(el);
+    // Reported as 'settle' because that is the budget line it replaces, and a
+    // per-phase comparison across the change should line up.
+    const kind = await this.ph('settle', () => rec.ready());
+    this.pendingBurst = rec;
+    return kind;
+  }
+
+  /** Drop a classification recording nothing went on to use. */
+  private async releasePendingBurst(): Promise<void> {
+    const rec = this.pendingBurst;
+    this.pendingBurst = null;
+    if (rec) await rec.abandon();
+  }
+
   private shouldSpeculate(puzzleSource: 'hcaptcha' | 'recaptcha' | 'unknown', textMode: boolean): boolean {
     if (this.config.videoSolveEnabled === false) return false;
-    // OPT-IN — `!== true`, so UNSET means off. Mirrors
-    // `PageSolverConfig.speculative_burst_enabled`, which carries the
-    // measurement: the burst calls a board "moving" on an exact frame hash, so
-    // render noise reads as a second screen, the cycle never closes, and a
-    // STILL board films to the ceiling while real animations stop at the floor.
-    // Both ports flip together or the driver gate measures two drivers.
-    if (this.config.speculativeBurstEnabled !== true) return false;
+    // ON unless switched off — `=== false`. It was opt-in while `moved()` read
+    // a board that transitions ONCE as animated, which cost every fade and
+    // settle its correct still answer and filmed it to the ceiling. `moved()`
+    // now requires a NEW screen inside a floor window, so a settle reads as
+    // still and only a real cycle escalates.
+    //
+    // What being on buys: an animated board no longer pays a WRONG CLICK to
+    // discover it cycles. Both ports flip together or the driver gate measures
+    // two drivers — see `PageSolverConfig.speculative_burst_enabled`.
+    if (this.config.speculativeBurstEnabled === false) return false;
+    // ONLY ON A BOARD NOTHING HAS TOUCHED YET. The burst asks "is this moving
+    // on its own", and once we have acted it cannot answer that: a refused
+    // answer makes the widget shake, wash and reset, so a recording started
+    // after a click cannot tell the board's own motion from the feedback to
+    // ours. Nothing is lost — round one is the only round where speculating
+    // buys anything, and a board discovered to cycle later is covered by the
+    // animated probe, which films deliberately instead of guessing.
+    if (this.actedOnBoard) return false;
     if (puzzleSource === 'recaptcha') return false;
     if (textMode) return false;
     return true;
@@ -3798,6 +4170,17 @@ export class CaptchaKrakenSolver {
     captchaElement: ElementHandle,
     initialShot: string,
     runQuery: (imagePath: string) => Promise<CliResponse>,
+    opts: {
+      /**
+       * A speculative burst is filming this widget right now, so a still that
+       * went stale must not be re-asked — the recording is the better answer to
+       * "the screen changed", and it is already running. Without this the guard
+       * printed "rather than answering another still" and then answered one on
+       * the very next line: measured on geetest_v4_svg, two `abyss-general`
+       * calls 1.6s apart, and the second one's answer was the wrong click.
+       */
+      recordingInFlight?: boolean;
+    } = {},
   ): Promise<CliResponse> {
     const enabled = this.config.staleFrameReSolveEnabled !== false;
     const threshold = this.config.staleFrameDiffThreshold ?? 0.02;
@@ -3846,6 +4229,29 @@ export class CaptchaKrakenSolver {
           '[freshness] the widget moved while the model was reading it, with '
           + 'nothing clicked — recording it rather than answering another still.',
         );
+      }
+
+      // ONE QUERY, ALWAYS, WHILE A RECORDING IS RUNNING.
+      //
+      // The re-solve loop below exists to answer "the screen changed under the
+      // model" by asking again on the developed frame. When a speculative burst
+      // is filming, that question already has a better answer in flight — the
+      // film — and re-asking buys a still answer for a board that is about to
+      // be solved from keyframes anyway. Measured on geetest_v4_svg and
+      // odd_animal: two and three `abyss-general` calls per solve, every one of
+      // them discarded, and the last of them clicked.
+      //
+      // Not gated on the motion check above, which is a single frame diff and
+      // fires only if the two samples happen to straddle a transition — it
+      // caught the geetest board on one run and missed it on the next, which is
+      // why tying the bail to it left the second still call in place.
+      //
+      // The stale case is not dropped, it MOVES: if the burst then reports the
+      // board settled rather than cycling, the caller re-reads the screen it
+      // came to rest on. Every other caller — reCAPTCHA's grid, a text round, a
+      // board already clicked — has no film to fall back on and keeps the loop.
+      if (opts.recordingInFlight) {
+        return { actions: response.actions, token_usage: mergedUsage };
       }
 
       let changedDuringInference = 0;
@@ -3983,16 +4389,18 @@ export class CaptchaKrakenSolver {
    */
   private async waitForElementSettled(
     el: ElementHandle,
-    opts?: { pollMs?: number; settleFrames?: number; maxMs?: number; animatedAfterMs?: number; threshold?: number },
+    opts?: { pollMs?: number; settleFrames?: number; maxMs?: number; animatedAfterMs?: number; motionStreak?: number; threshold?: number },
   ): Promise<'settled' | 'animated' | 'timeout'> {
     const pollMs = opts?.pollMs ?? this.config.settlePollMs ?? 220;
     const settleFrames = opts?.settleFrames ?? this.config.settleFrames ?? 2;
     const maxMs = opts?.maxMs ?? this.config.settleTimeoutMs ?? 9000;
     const animatedAfterMs = opts?.animatedAfterMs ?? this.config.animatedChallengeAfterMs ?? 4500;
+    const motionStreak = opts?.motionStreak ?? this.config.animatedMotionStreak ?? 5;
     const threshold = opts?.threshold ?? this.config.settleDiffThreshold ?? 0.01;
     const start = Date.now();
     let prev: string | null = null;
     let stillStreak = 0;
+    let movedStreak = 0;
     const frames: string[] = [];
     const tmp = () => path.join(os.tmpdir(), `settle_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
     try {
@@ -4011,11 +4419,20 @@ export class CaptchaKrakenSolver {
           );
           const moved = !!(res && res.has_movement);
           stillStreak = moved ? 0 : stillStreak + 1;
+          movedStreak = moved ? movedStreak + 1 : 0;
           const stale = frames.shift();
           if (stale && fs.existsSync(stale)) { try { fs.unlinkSync(stale); } catch { /* best-effort */ } }
           if (stillStreak >= settleFrames) return 'settled';
           // Still moving this late in → it's not just loading; call it animated.
           if (moved && (Date.now() - start) >= animatedAfterMs) return 'animated';
+          // MOVED EVERY POLL, NEVER ONCE STILL. That is not a widget loading,
+          // it is one animating, and waiting out `animatedAfterMs` buys the
+          // same answer 3.3s later: rotating_obj_video changes every 133-171ms,
+          // so it spent 4.56s proving it moves and then threw the observation
+          // away to film a fresh burst. Costs a static solve nothing — a static
+          // board is still at `settleFrames` (440ms) and leaves above. Mirrors
+          // `motion_streak` in `settle_verdict`; if one moves, move both.
+          if (motionStreak && movedStreak >= motionStreak) return 'animated';
         }
         prev = frames[frames.length - 1];
         await delay(pollMs);
@@ -4248,6 +4665,10 @@ export class CaptchaKrakenSolver {
       element, awaitKeyframe,
       rel[0] / elementBox.width, rel[1] / elementBox.height,
     );
+    // No longer untouched; see `shouldSpeculate`. This path presses without
+    // going through executeClick, so it carries its own mark — the twin of
+    // `_click_when_frame_matches` in the python port, which always has.
+    this.actedOnBoard = true;
     await this.ph('mouse', () => this.human.click(page, at));
   }
 
@@ -4257,6 +4678,8 @@ export class CaptchaKrakenSolver {
     action: ClickAction,
     elementBox: { x: number, y: number, width: number, height: number }
   ) {
+    // No longer untouched; see `shouldSpeculate`.
+    this.actedOnBoard = true;
     let relativeX: number;
     let relativeY: number;
 
@@ -4300,6 +4723,8 @@ export class CaptchaKrakenSolver {
     action: { source_bounding_box: [number, number, number, number]; target_bounding_box: [number, number, number, number] },
     elementBox: { x: number, y: number, width: number, height: number }
   ) {
+    // No longer untouched; see `shouldSpeculate`.
+    this.actedOnBoard = true;
     const bboxCenter = (bbox: [number, number, number, number]) => {
       const cx = elementBox.x + ((bbox[0] + bbox[2]) / 2) * elementBox.width;
       const cy = elementBox.y + ((bbox[1] + bbox[3]) / 2) * elementBox.height;
@@ -4326,6 +4751,12 @@ export class CaptchaKrakenSolver {
     scope: Frame | ElementHandle,
     selectors: ReadonlyArray<string>,
   ): Promise<ElementHandle | null> {
+    // NOTHING IS MARKED HERE. This looks the widget up; it does not touch it.
+    // It carried `actedOnBoard = true` (twice), and because it runs during
+    // detection — before round one — `shouldSpeculate` was false on every
+    // solve that went through it. The speculative burst has therefore never
+    // run on those boards: each one answered a still, clicked it, and only
+    // discovered it was animated a round later.
     for (const selector of selectors) {
       try {
         const el = await scope.$(selector);
@@ -4394,6 +4825,8 @@ export class CaptchaKrakenSolver {
     action: TypeAction,
     element?: ElementHandle | null,
   ): Promise<boolean> {
+    // No longer untouched; see `shouldSpeculate`.
+    this.actedOnBoard = true;
     const text = action.text ?? '';
     if (!text) return false;
     const field = await this.answerBox(scope, element);
@@ -4473,6 +4906,8 @@ export class CaptchaKrakenSolver {
     action: DragAction,
     elementBox: { x: number, y: number, width: number, height: number },
   ): Promise<boolean> {
+    // No longer untouched; see `shouldSpeculate`.
+    this.actedOnBoard = true;
     const targetX = ((action.target_bounding_box[0] + action.target_bounding_box[2]) / 2)
       * elementBox.width;
 

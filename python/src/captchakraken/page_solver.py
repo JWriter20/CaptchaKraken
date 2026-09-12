@@ -201,7 +201,8 @@ class _GridSession:
     screenshot_h: int
 
 
-def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int) -> str:
+def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int,
+                   motion_streak: int = 0) -> str:
     """The pixel-settle rule, over `(elapsed_ms, moved)` polls.
 
     Split out of the polling loop so the RULE can be tested against recorded
@@ -212,14 +213,33 @@ def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int) -> st
     `animated_after_ms`, so any `settle_frames` run of stillness before then
     ends the wait as 'settled' first. Every animated puzzle we ship rests
     between screens for longer than that, which is why the caller also probes.
+
+    `motion_streak` is the other way out, and it is free. A board that has moved
+    on `motion_streak` polls IN A ROW, with no stillness at all, is not loading —
+    it is animating, and waiting the rest of `animated_after_ms` only buys the
+    same answer later. `rotating_obj_video` changes every 133-171ms and so moves
+    on every poll: it spent 4.5s proving that, then threw the observation away
+    and filmed a fresh 4s burst.
+
+    This is NOT the "longer window" the module docstring warns against, and it
+    does not touch a static solve: a static board produces still polls and
+    leaves at `settle_frames` (440ms) exactly as before. Only a widget that
+    never once holds still reaches it. The cost of being wrong — an opening
+    animation that runs this long and then settles — is one burst, which slices
+    to a single keyframe and is answered as the still it is.
     """
     still_streak = 0
+    moved_streak = 0
     for elapsed_ms, moved in samples:
         if moved:
             still_streak = 0
+            moved_streak += 1
             if elapsed_ms >= animated_after_ms:
                 return "animated"
+            if motion_streak and moved_streak >= motion_streak:
+                return "animated"
         else:
+            moved_streak = 0
             still_streak += 1
             if still_streak >= settle_frames:
                 return "settled"
@@ -256,6 +276,22 @@ def burst_hang_deadline_ms(cfg) -> float:
 #: both made the guard blind to GeeTest svg, whose screens differ by 0.0056.
 #: Must match MOVED_DURING_INFERENCE_DIFF in the JS port.
 _MOVED_DURING_INFERENCE_DIFF = 0.002
+#: More distinct screens than this inside the floor window and the board is
+#: ANIMATING CONTINUOUSLY — it needs keyframes even though no screen has come
+#: back yet. hCaptcha's odd-animal board fades its sprites on independent
+#: cycles: measured 38 distinct screens in 4s with no exact repeat, so waiting
+#: for one calls a plainly animated board still. The slicer keeps at most
+#: `DEFAULT_MAX_KEYFRAMES` (6) screens, which is the same number: past it there
+#: is already more motion than a keyframe answer can describe.
+#:
+#: Safe to read as "animating" rather than "noise" because the speculative path
+#: deliberately does not wander the cursor — so during THIS burst, a picture
+#: that keeps changing is the board changing, not the pointer moving over it.
+#: A wrong guess self-corrects: a widget that turns out static slices to one
+#: keyframe and is answered as the still it is.
+#:
+#: Must match BURST_ANIMATED_SCREENS in the JS port.
+_BURST_ANIMATED_SCREENS = 6
 _NOT_THIS_BOARD_DIFF = 0.5
 _NOT_THIS_BOARD_POLLS = 3
 
@@ -384,6 +420,19 @@ class PageSolverConfig:
     settle_frames: int = 2
     settle_timeout_ms: int = 9_000
     animated_challenge_after_ms: int = 4_500
+    #: Consecutive MOVED polls, with no stillness between them, that call a
+    #: widget animated without waiting out `animated_challenge_after_ms`. Five
+    #: polls is 1.1s of unbroken motion at `settle_poll_ms`.
+    #:
+    #: Sized off the measured dwell table in tests/test_animated_is_detected.py:
+    #: the two puzzles that move on every poll change every 133-171ms, while the
+    #: two that rest hold a screen 0.4-8.2s and therefore break the streak long
+    #: before it fills. So this reaches `rotating_obj_video` and `tile_flip_video`
+    #: and nothing else — the resting puzzles still leave as 'settled' at 440ms
+    #: and are escalated by the speculative burst instead.
+    #:
+    #: Measured saving on rotating_obj_video: settle 4.56s -> ~1.3s.
+    animated_motion_streak: int = 5
     settle_diff_threshold: float = 0.01
     post_submit_change_timeout_ms: int = 4_000
 
@@ -442,7 +491,20 @@ class PageSolverConfig:
     #: That costs a genuinely animated board one extra round and saves every
     #: still board 4-12s. Turn this back on only with the digest replaced by a
     #: comparison that has a noise floor.
-    speculative_burst_enabled: bool = False
+    #: ON since 2026-09-11. It was off because `len(order) >= 2` called a board
+    #: that transitions once "animated", so every fade and settle lost a correct
+    #: still answer and filmed to the ceiling — tower_stack 12.03s,
+    #: click_blocked_by_lines 11.93s, missing_piece 11.89s, three of them
+    #: scoring 0% for running out of budget being filmed rather than for being
+    #: answered wrongly. The test is now "still producing NEW screens after a
+    #: full floor window", which is the same rule `_record_keyframes` stops on,
+    #: so a settle reads as still and only a real cycle escalates.
+    #:
+    #: What it buys: an animated board no longer pays a WRONG CLICK to discover
+    #: it cycles. The still answer describes a screen that has gone, and with
+    #: this off it was executed anyway — one refused press per animated solve,
+    #: invisible to the solve rate because the retry usually succeeds.
+    speculative_burst_enabled: bool = True
     video_burst_fps: int = 10
     # How long to wait for the widget to return to the keyframe the model chose,
     # before clicking anyway. Bounded because the alternative is worse: these
@@ -786,6 +848,9 @@ class PageSolver:
         #: How many times THIS board has been re-asked. Indexes
         #: `planner.RESAMPLE_TEMPERATURES`; reset by `_fresh_board`.
         self._resample_level = 0
+        #: Has anything been PERFORMED on the board now on screen? Gates the
+        #: speculative burst — see `_should_speculate`.
+        self._acted_on_board = False
         # Per-solve phase accounting; see `_phase`.
         self._budget: Optional[PhaseBudget] = None
 
@@ -898,9 +963,11 @@ class PageSolver:
         if self._resample_level:
             _log("[resample] fresh board — back to greedy")
         self._resample_level = 0
+        self._acted_on_board = False
         self._apply_sampling()
 
     def _reset_animated_state(self) -> None:
+        self._acted_on_board = False
         self._known_animated = False
         self._animated_probe_armed = False
         self._animated_probe_done = False
@@ -1108,6 +1175,7 @@ class PageSolver:
         Moving to a point the pointer already occupies is a no-op, so parking
         early costs nothing.
         """
+        self._acted_on_board = True
         rel = self._click_point_for(action, element_box)
         if rel is None:
             _log("click action without coordinates or bounding box; skipping")
@@ -1125,6 +1193,9 @@ class PageSolver:
     def _execute_click(
         self, page: Any, action: Dict[str, Any], element_box: Dict[str, float]
     ) -> None:
+        # The board is no longer untouched: anything it does from here may be
+        # our own doing. See `_should_speculate`.
+        self._acted_on_board = True
         bbox = action.get("target_bounding_box")
         coords = action.get("target_coordinates")
         if bbox:
@@ -1151,6 +1222,7 @@ class PageSolver:
     def _execute_drag(
         self, page: Any, action: Dict[str, Any], element_box: Dict[str, float]
     ) -> None:
+        self._acted_on_board = True
         def center(bbox: Sequence[float]) -> Tuple[float, float]:
             return (
                 element_box["x"] + ((float(bbox[0]) + float(bbox[2])) / 2) * element_box["width"],
@@ -1231,6 +1303,7 @@ class PageSolver:
 
     def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any],
                       element: Any = None) -> bool:
+        self._acted_on_board = True
         """Put the model's reading of a distorted-text captcha into its box."""
         text = str(action.get("text") or "")
         if not text:
@@ -1280,6 +1353,7 @@ class PageSolver:
         action: Dict[str, Any],
         element_box: Dict[str, float],
     ) -> bool:
+        self._acted_on_board = True
         """Drive a puzzle-piece slider until the PIECE reaches the model's slot.
 
         The model is asked for one thing here — the centre of the gap — because
@@ -1911,6 +1985,7 @@ class PageSolver:
                         samples,
                         settle_frames=cfg.settle_frames,
                         animated_after_ms=cfg.animated_challenge_after_ms,
+                        motion_streak=cfg.animated_motion_streak,
                     )
                     if verdict != "timeout":
                         return verdict
@@ -1999,6 +2074,19 @@ class PageSolver:
         cfg = self.config
         if not cfg.video_solve_enabled:
             return False
+        # ONLY ON A BOARD NOTHING HAS TOUCHED YET.
+        #
+        # The burst asks "is this board moving on its own", and once we have
+        # acted it cannot answer that: a refused answer makes the widget shake,
+        # wash and reset, so a recording started after a click cannot tell the
+        # board's own motion from the feedback to ours.
+        #
+        # Nothing is lost by the restriction. Round one is the only round where
+        # speculating buys anything — the wasted click it exists to prevent is
+        # the first one — and a board discovered to cycle later is covered by
+        # `animated_probe`, which films deliberately instead of guessing.
+        if self._acted_on_board:
+            return False
         if not cfg.speculative_burst_enabled:
             return False
         if puzzle_source == "recaptcha":
@@ -2033,6 +2121,7 @@ class PageSolver:
         cycle_closed = False
         probe = _tmp_png("spec")
 
+        last_new_at = 0
         pool = ThreadPoolExecutor(max_workers=1)
         try:
             # `_get_solution` DIRECTLY, not through the freshness guard.
@@ -2070,22 +2159,103 @@ class PageSolver:
                                 cycle_closed = True
                             elif d not in order:
                                 order.append(d)
+                                last_new_at = len(frames)
                             last_digest = d
-                    moved = len(order) >= 2
-                    # Still, and the answer has landed: nothing more to film.
-                    if not moved and fut.done():
-                        break
-                    # Moving, and the cycle has closed: every screen is in hand.
-                    if moved and cycle_closed and len(frames) >= floor_frames:
+                    # CYCLING, not merely "more than one screen". A board that
+                    # transitions ONCE and then holds has two screens and never
+                    # repeats either — measured, `tower_stack` is exactly that
+                    # (2 distinct sha1, MAD 32.51, moves once). Calling it
+                    # animated discards a correct still answer and films a board
+                    # that has already stopped, which is what a `len(order) >= 2`
+                    # rule did to every fade and settle in the set.
+                    #
+                    # Settled = no NEW screen for a full floor window. The floor
+                    # is safely longer than the worst dwell a real cycle holds a
+                    # screen for (p50 1.5s / p75 2.0s / max 2.7s on the geetest
+                    # svg board), so a board that genuinely cycles always
+                    # produces a new screen inside it and is never mistaken for
+                    # settled. Same rule `_record_keyframes` already stops on.
+                    # A CYCLE IS A SCREEN THAT COMES BACK. Not "more than one
+                    # screen", and not "still changing" — both of those are
+                    # true of things that are not cycles:
+                    #
+                    #   tower_stack      transitions once and holds  (2 screens, no repeat)
+                    #   connect_path     the cursor sits on the widget and every
+                    #   tetris_fit       frame differs, so screens never stop
+                    #                    arriving and nothing ever settles
+                    #   geetest_v4_svg   3 boards, re-deals, screens REPEAT
+                    #
+                    # Only the last of those is a board whose answer depends on
+                    # which screen is up. Requiring a repeat is what separates
+                    # it from a fade, a settle, and a cursor moving over pixels.
+                    # THE RECORDING GETS TO FINISH ITS SENTENCE.
+                    #
+                    # `cycle_closed` cannot be true until a screen has COME
+                    # BACK, which on a slow board is seconds after the still
+                    # answer lands. Stopping the moment inference returned
+                    # therefore answered "not cycling" on exactly the boards
+                    # that cycle slowest: geetest_v4_svg closes its cycle at
+                    # 4.8s and the question was being put at 2.7s, so the film
+                    # was thrown away, a stale answer clicked, and the identical
+                    # burst re-shot a round later.
+                    #
+                    # A board that has shown ONE screen is still and there is
+                    # nothing to wait for — the common case costs exactly what
+                    # it did before. Past that, three ways to be done:
+                    # Nothing new for a whole floor window: it moved once and
+                    # stopped — a fade-in, a settle, tower_stack.
+                    settled = (len(frames) >= floor_frames
+                               and (len(frames) - last_new_at) >= floor_frames)
+                    # NO "enough screens, stop filming" RULE HERE, deliberately.
+                    # Many screens is a fine way to CLASSIFY a board as animated
+                    # and a bad way to end its clip: number_with_highest_value_video
+                    # changes every frame and closes its cycle at 4.1s, so cutting
+                    # at the 4.0s floor lost the recurrence, the slicer reported
+                    # `steady_screens = 0`, and the wait gate turned itself off on
+                    # the one board whose answer IS the frame. Mirrors the same
+                    # note in the JS burst loop.
+                    # Cycling: every screen is in hand.
+                    if cycle_closed and len(frames) >= floor_frames:
                         _log(f"[animated] cycle closed after {len(frames) * interval:.1f}s "
                              f"({len(order)} screens); stopping the burst")
+                        break
+                    # NOT "one screen so far". At the moment inference returns
+                    # that is indistinguishable from "one screen ever" — the
+                    # geetest svg board dwells 1.5-2.7s per screen and answers
+                    # in 0.4s — so the only sound stop is the floor window.
+                    if fut.done() and settled:
                         break
                     wait = interval - (time.monotonic() - start)
                     if wait > 0:
                         time.sleep(wait)
 
-            if len(order) < 2:
+            _log(f"[animated] burst verdict after {len(frames) * interval:.1f}s: "
+                 f"{'CYCLING' if cycle_closed else 'not cycling'} "
+                 f"({len(order)} screens)")
+
+            if not cycle_closed:
+                # Nothing came back, so this is not a cycling board — it is
+                # still, or it moved once, or the cursor changed some pixels.
+                # The answer the model just gave describes the screen that is
+                # on now, so it stands and the frames are dropped.
                 actions, usage = fut.result()
+                if len(order) > 1:
+                    # Except when it moved and then stopped — a fade, a single
+                    # transition, `tower_stack`. Then the answer in hand is for
+                    # the screen BEFORE it, and the developed one is what the
+                    # click will land on. This is the re-read the freshness
+                    # guard would have made; the speculative path does not run
+                    # through it. Mirrors the same branch in the JS caller.
+                    _log("[animated] the board changed once and settled — not a "
+                         "cycle; re-reading the screen it came to rest on.")
+                    try:
+                        self._screenshot(element, shot)
+                        actions, extra = self._get_solution(
+                            shot, puzzle_source, retry_mode, text_mode)
+                        usage = list(usage) + list(extra)
+                    except Exception as exc:  # noqa: BLE001 — a re-read is an
+                        # improvement, not a requirement: keep the answer we have.
+                        _debug(f"settled re-read failed: {exc}")
                 return actions, usage, None
 
             _log("[animated] the widget moved while the model was reading it — "
@@ -2341,6 +2511,41 @@ class PageSolver:
         self._keyframe_steady_screens = kfset.steady_screens
         return [str(p) for p in paths], temp_dir
 
+    def _answer_region_recurs(self, keyframe_path: str, ref: Any, box: Any) -> bool:
+        """Does the chosen keyframe's answer area appear in ANY other keyframe?
+
+        If it does, that appearance recurs within a burst length, so waiting for
+        it on the live widget terminates. Compared with `region_diff_ratio` and
+        `MATCH_REGION_TOLERANCE` — the same metric and threshold the wait itself
+        polls with — so "the same" cannot mean two things either side of the
+        decision. Mirrors `answerRegionRecurs` in the JS port.
+        """
+        import cv2
+
+        from .keyframes import MATCH_REGION_TOLERANCE, region_diff_ratio
+
+        # THE SIBLINGS OF THIS CLIP, not every PNG that shares a folder.
+        # `write_keyframes` emits `frame_NN.png` into the burst's own temp
+        # directory, so that prefix is what names the set.
+        folder = os.path.dirname(keyframe_path)
+        base = os.path.basename(keyframe_path)
+        prefix = re.sub(r"_\d+\.png$", "_", base, flags=re.IGNORECASE)
+        if prefix == base:
+            return False        # not one of a numbered set
+        try:
+            siblings = [os.path.join(folder, f) for f in sorted(os.listdir(folder))
+                        if f.startswith(prefix) and f.lower().endswith(".png")
+                        and os.path.join(folder, f) != keyframe_path]
+        except OSError:
+            return False        # cannot tell — behave as before and do not wait
+        for other in siblings:
+            img = cv2.imread(other)
+            if img is None or img.shape != ref.shape:
+                continue
+            if region_diff_ratio(ref, img, box) <= MATCH_REGION_TOLERANCE:
+                return True
+        return False
+
     def _wait_for_keyframe(self, element: Any, keyframe_path: str,
                            point_norm: Tuple[float, float]) -> bool:
         """Hold until the widget looks like `keyframe_path` around `point_norm`.
@@ -2390,20 +2595,44 @@ class PageSolver:
         # not worth waiting for is a clip with NO steady screens: a rotation, a
         # one-way fade, a sprite crossing. Measured: 0 steady screens for all
         # five continuous hCaptcha video types, 2-3 for every real GeeTest svg.
-        if self._keyframe_steady_screens < 2:
-            _log(f"[animated] clip sits on {self._keyframe_steady_screens} steady "
-                 f"screen(s); nothing to come back to, acting on the model's "
-                 f"frame without waiting")
-            return False
-
+        #
+        # …but that count is about the WHOLE SCREEN, and it reads 0 for every
+        # continuous hCaptcha video type — so the gate refused on exactly the
+        # boards whose answer depends on the moment. On
+        # number_with_highest_value_video the digits fade in and out one at a
+        # time, so which digit sits under the answer point IS the answer (the
+        # fixture resolves the press against the frame through `_with_leeway`),
+        # and clicking without waiting scores 0.81-0.88 where waiting scores
+        # 0.98.
+        #
+        # So ask the LOCAL question when the global one says no — and ask it the
+        # right way round. "Does the answer area change between keyframes" is
+        # true of every animated board and would make the gate wait on clips
+        # that can only time out. The useful question is whether the chosen
+        # keyframe's answer area COMES BACK: if another keyframe of this same
+        # clip already looks like it there, the appearance recurs inside a burst
+        # length and the wait terminates.
         ref = cv2.imread(keyframe_path)
         if ref is None:
             _debug(f"keyframe {keyframe_path} unreadable; not waiting")
             return False
         box = region_box(ref.shape[1::-1], point_norm)
 
+        steady = self._keyframe_steady_screens >= 2
+        if not steady and not self._answer_region_recurs(keyframe_path, ref, box):
+            _log(f"[animated] clip sits on {self._keyframe_steady_screens} steady "
+                 f"screen(s) and the answer area is unique to the chosen frame; "
+                 f"acting on it without waiting")
+            return False
+
         cfg = self.config
-        deadline = (time.monotonic() * 1000.0) + cfg.keyframe_wait_timeout_ms
+        # Bounded by what the local evidence covers: the appearance was seen to
+        # come back inside ONE burst, so one burst length is what it can be
+        # worth waiting. Uncapped, number_with_highest_value_video ran 36s.
+        # Mirrors the same clamp in the JS port.
+        wait_ms = (cfg.keyframe_wait_timeout_ms if steady
+                   else min(cfg.keyframe_wait_timeout_ms, cfg.video_burst_duration_ms))
+        deadline = (time.monotonic() * 1000.0) + wait_ms
         probe = _tmp_png("kfwait")
         best = 1.0
         polls = 0

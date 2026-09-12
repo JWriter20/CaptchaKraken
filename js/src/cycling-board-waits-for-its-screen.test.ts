@@ -38,6 +38,9 @@
  *    measured at 4.5s median and 8.1s worst case, so the worst case could not
  *    fit even in principle.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -68,10 +71,63 @@ test('a clip that sits on steady screens waits, even when sliced `even`', async 
 test('a one-way animation still does not wait', async () => {
   // an hCaptcha rotating-object animation and the other four continuous types: no steady
   // holds, nothing to come back to, and waiting is pure cost. Preserved.
+  //
+  // `/tmp/kf.png` is not a member of a numbered keyframe set, so the local
+  // check below finds no siblings to ask about and the screen count decides —
+  // which is the old rule, unchanged, for every clip that cannot answer the
+  // local question.
   const { solver, element, probes } = gated({ mode: 'even', screens: 0 });
   const matched = await solver.waitForKeyframe(element, '/tmp/kf.png', 0.5, 0.5);
   assert.equal(matched, false);
   assert.equal(probes(), 0, 'a clip with no steady screens must not be polled at all');
+});
+
+test('no steady screens, but the answer AREA comes back — then it waits', async () => {
+  /*
+   * The other half of the rule, and the reason it exists.
+   *
+   * `keyframeSteadyScreens` counts screens the WHOLE CLIP returns to, and it is
+   * 0 for all five continuous hCaptcha video types — so the gate was refusing
+   * on exactly the puzzles whose answer is the moment.
+   * number_with_highest_value_video fades one digit in at a time: measured on
+   * its own keyframes the whole frame differs by 0.0009-0.0099 between them
+   * while the region around the answer differs by up to 0.1143, and three of
+   * the six are identical there. There is plainly something to come back to.
+   *
+   * What must NOT happen is waiting on a clip where the chosen frame is unique —
+   * a rotation, a one-way fade — because the gate could only ever time out. So
+   * the question is whether the chosen keyframe's answer area MATCHES another
+   * keyframe of the same clip, not merely whether it differs from them.
+   */
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kfset_'));
+  for (const n of ['frame_01.png', 'frame_02.png', 'frame_03.png']) {
+    fs.writeFileSync(path.join(dir, n), '');
+  }
+  const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
+  solver.keyframeSteadyScreens = 0;
+  let probes = 0;
+  solver.runCvTool = async (tool: string) => {
+    if (tool === 'match-region') probes += 1;
+    return { match: true, diff: 0.0 };
+  };
+  const element: any = { screenshot: async () => undefined };
+  try {
+    const matched = await solver.waitForKeyframe(
+      element, path.join(dir, 'frame_01.png'), 0.5, 0.5);
+    assert.equal(matched, true, 'an answer area that recurs is worth waiting for');
+    assert.ok(probes >= 2, 'it must compare against the clip, then poll the widget');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the wait is bounded by the evidence that opened it', async () => {
+  // A clip with no steady screens got in on LOCAL evidence — one burst saw the
+  // area come back — so the wait may not outlast a burst. Uncapped,
+  // number_with_highest_value_video ran 36s.
+  const BURST_FLOOR_MS = 4000;   // videoBurstDurationMs' default, in solver.ts
+  assert.ok(BURST_FLOOR_MS < SOLVE_DEFAULTS.keyframeWaitTimeoutMs,
+    'the local-evidence cap must be shorter than the full budget, or it is not a cap');
 });
 
 test('a proven cycle still waits', async () => {
