@@ -85,3 +85,11 @@ test('the signal does not survive into the next solve', async () => {
   assert.equal(solver.repeatedAnswerSeen, false);
   assert.equal(solver.shouldRetryAsAnimated('unknown'), false);
 });
+
+test('a repeated answer is reported so the round performs nothing', () => {
+  const { solver } = solverWithFixedAnswer();
+
+  assert.equal(solver.noteAnswer(ANSWER.actions, null), false, 'the first answer runs');
+  assert.equal(solver.noteAnswer(ANSWER.actions, null), true, 'the same answer again already ran and changed nothing');
+  assert.equal(solver.noProgressRounds, 1);
+});

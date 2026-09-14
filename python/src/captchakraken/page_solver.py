@@ -361,8 +361,8 @@ class PageSolver:
         except Exception:
             return None
 
-    def _note_answer(self, actions: Sequence[Any], retry_mode: Optional[RetryMode]) -> None:
-        """A repeated answer already ran and changed nothing: resample, re-ask, and arm the probe."""
+    def _note_answer(self, actions: Sequence[Any], retry_mode: Optional[RetryMode]) -> bool:
+        """True when this answer already ran and changed nothing: resample, re-ask, and arm the probe."""
         sig = self._answer_signature(actions, retry_mode)
         if sig is not None and sig == self._last_answer_sig:
             self._no_progress_rounds += 1
@@ -372,9 +372,10 @@ class PageSolver:
             self._apply_sampling()
             self._invalidate_animated_answer()
             self._arm_animated_probe()
-        else:
-            self._no_progress_rounds = 0
-            self._last_answer_sig = sig
+            return True
+        self._no_progress_rounds = 0
+        self._last_answer_sig = sig
+        return False
 
     def _apply_sampling(self) -> None:
         target = getattr(self._solver, "planner", None)
@@ -1504,7 +1505,10 @@ class PageSolver:
                 raise CaptchaSolveError("could not get bounding box of captcha element")
 
             _log("[answer] " + json.dumps({"actions": [_as_dict(a) for a in actions]}, default=str))
-            self._note_answer(actions, retry_mode)
+            # A repeated answer is not re-performed: the widget already refused it, and every extra press is
+            # behaviour a vendor scores. Re-asking with a fresh sample or a recording is the round's only move.
+            if self._note_answer(actions, retry_mode):
+                return False, all_usage
             _log(f"executing {len(actions)} action(s)")
 
             for raw_action in actions:
@@ -1719,7 +1723,7 @@ class PageSolver:
 
             if not self.detect_captcha(page):
                 return done()
-            if not did_interact:
+            if not did_interact and not self._no_progress_rounds:
                 raise CaptchaSolveError(
                     "captcha still detected but the solver performed no interactions; aborting to avoid an infinite loop")
 

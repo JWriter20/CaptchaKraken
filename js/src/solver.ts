@@ -374,7 +374,7 @@ export class CaptchaKrakenSolver {
       }
 
       if (!(await this.detectCaptcha(page))) return done();
-      if (!didInteract) {
+      if (!didInteract && !this.noProgressRounds) {
         throw new Error(`Captcha still detected but solver performed no interactions; aborting to avoid an infinite loop. Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
       }
     }
@@ -547,7 +547,9 @@ export class CaptchaKrakenSolver {
 
       // Tier 3 grades this line with Tier 2's grader to split driver bugs from model misses (see TRIBAL_KNOWLEDGE.md).
       console.log('[answer] ' + JSON.stringify({ actions: actionList }));
-      this.noteAnswer(actionList, retryMode);
+      // A repeated answer is not re-performed: the widget already refused it, and every extra press is
+      // behaviour a vendor scores. Re-asking with a fresh sample or a recording is the round's only move.
+      if (this.noteAnswer(actionList, retryMode)) return { didInteract: false, tokenUsage: allTokenUsage };
       console.log(`Executing ${actionList.length} actions.`);
 
       for (const action of actionList) {
@@ -1395,18 +1397,19 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  /** A repeated answer already ran and changed nothing: resample, and let the recording path have a go. */
-  private noteAnswer(actions: any[], retryMode: RetryMode | null): void {
+  /** True when this answer already ran and changed nothing: resample, and let the recording path have a go. */
+  private noteAnswer(actions: any[], retryMode: RetryMode | null): boolean {
     const sig = CaptchaKrakenSolver.answerSignature(actions, retryMode);
     if (sig !== null && sig === this.lastAnswerSig) {
       this.noProgressRounds++;
       console.log(`[no-progress] the model returned the same answer again (${this.noProgressRounds}/${this.config.maxNoProgressRounds ?? 2}) — the previous one already ran and changed nothing`);
       this.resampleLevel++;
       this.repeatedAnswerSeen = true;
-    } else {
-      this.noProgressRounds = 0;
-      this.lastAnswerSig = sig;
+      return true;
     }
+    this.noProgressRounds = 0;
+    this.lastAnswerSig = sig;
+    return false;
   }
 
   /** A cache hit costs no inference, and means the answer already ran: the board cycles. */
