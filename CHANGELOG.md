@@ -7,6 +7,40 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Removed
 
+- **The debug-only CLI subcommands are gone:** `find-move`, `find-movable`,
+  `is-empty-cell`, `is-cell-selected`, `is-cell-changing`, `wait-for-cell-loaded`
+  and `check-movement-batch`. Nothing in either driver called them. The hCaptcha
+  "Move" pill detector (`move_indicator.py`) went with them.
+- **`trajectory.py` / `trajectory.ts` are gone.** Both humanizers call Cursory
+  directly. The drag-overshoot redraw and the finger contact-wobble along a swipe
+  were our own modelling on top of the recordings and are removed; the tap
+  wobble stays.
+- **The `CAPTCHA_DEBUG=1` image dumps are gone** (`latestDebugRun/`,
+  `debug_runs/`, the reCAPTCHA grid trace). The flag still prints diagnostics to
+  stderr. `ImageProcessor` keeps only the frame-diff primitives, `overlay.py`
+  only the numbered-box overlay the model reads.
+
+### Added
+
+- **Every closed set of names is an enum, exported from both packages.**
+  `captchakraken.kinds` (Python, `StrEnum`) and the `kinds` exports of the JS
+  package (`as const` objects) carry `Vendor`, `ActionKind`, `RetryMode`,
+  `PromptFamily`, `HumanizationMode`, `PauseKind`, `Outcome`, `ErrorCode` and
+  the driver's verdicts and phases, mirrored one-for-one. The wire is unchanged:
+  every member serialises as the string it always was, and a plain string still
+  type-checks on the JS side. A value off the wire that is not a member now
+  raises instead of passing through.
+
+### Changed
+
+- **The codebase is about half its former size** with the same public surface
+  and the same behaviour: the five screenshot-poll loops in each driver share
+  one, the two burst recorders share one, and the CLI is a dispatch table.
+  Comments are one or two sentences that say why; every measured constant keeps
+  its measurement beside it, and the longer stories moved to
+  `TRIBAL_KNOWLEDGE.md`. `estimatedCost` on the JS `SolveResult` is now computed
+  from the gateway's usage rows only; the stale per-model price table is gone.
+
 - **Python 3.10 is no longer supported.** `requires-python` is now `>=3.11`.
   This is the breaking half of the mouse change rather than a pinning detail:
   `cursory` declares `Requires-Python >=3.11` and requires `numpy~=2.3.3`, which
@@ -80,6 +114,14 @@ semantic versioning; v2 is a major, **breaking** release.
   browser at it.
 
 ### Fixed
+
+- **The JS mouse no longer guesses a 1920x1080 window under camoufox.** camoufox
+  opens its context with `viewport: null`, so `viewportSize()` is null; the
+  driver now asks the window for `innerWidth`/`innerHeight` and clamps the
+  path only when it knows the edge, exactly as the Python port does. A
+  coordinate pinned to a guessed edge is what deadlocked camoufox's mouse
+  (upstream #225). `PlaywrightPage` gains an optional `evaluate`, forwarded by
+  the Puppeteer adapter.
 
 - **A burst now lasts `videoBurstDurationMs`, not that many frames.** Both
   clients decide "is this board animating?" by watching it for a window long

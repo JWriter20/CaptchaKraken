@@ -1,16 +1,3 @@
-/**
- * Regression: the JS client must not assume a `python` binary exists.
- *
- * Observed on Ubuntu driving the hCaptcha demo through camoufox:
- *
- *   Executing CaptchaKraken CLI: python -m captchakraken.cli ...
- *   /bin/sh: 1: python: not found
- *
- * The Python client solved the same page fine, so the failure read as an
- * endpoint or model problem. It was a missing binary: Debian-family systems
- * ship only `python3`.
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -20,7 +7,6 @@ import {
   resolvePythonCommand,
 } from './python-command';
 
-/** A box that has `python3` but no `python` — i.e. Debian, Ubuntu, and CI. */
 const debianLike = (command: string) => command === 'python3';
 
 test('falls back to python3 on a system with no bare `python`', () => {
@@ -75,7 +61,5 @@ test('the bundled venv interpreter beats a bare PATH lookup', () => {
 });
 
 test('resolves to python3, not python, when nothing can be probed', () => {
-  // No `exists` probe available. Guessing `python` is what broke Debian; guess
-  // the spelling that is actually present there.
   assert.equal(resolvePythonCommand({ env: {} }), 'python3');
 });

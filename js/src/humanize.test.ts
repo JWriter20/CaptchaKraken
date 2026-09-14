@@ -1,17 +1,4 @@
-/**
- * Humanisation is a pluggable INPUT DEVICE, not a realism dial.
- *
- * The Python side is `python/tests/test_humanizer.py`; these cover the same
- * three things, because both drivers ship the same modes and rule 1c says they
- * behave identically:
- *
- *   - **mobile emits touch and NOTHING else.** A mousemove at a touch-only
- *     widget is the wrong event, not a weaker one.
- *   - **the Appium payload is the W3C one**, hand-built so the package imports
- *     no Selenium — a typo in it fails on a real handset and nowhere else.
- *   - **the mouse mode did not change.** It was measured.
- */
-
+// Humanisation is an input device, not a realism dial: the env var must not flip the mode, W3C touch state is per session, and an unmeasurable scale is refused because it fails silently.
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
@@ -26,10 +13,7 @@ import {
   type TouchBackend,
   type TouchSample,
 } from './humanize.js';
-import { generate_swipe } from './trajectory.js';
 import type { Page } from './playwright-types.js';
-
-// ─────────────────────────────────────────────────────────────────── fakes
 
 class RecordingPage {
   events: any[] = [];
@@ -66,8 +50,6 @@ const mobile = () => {
   return { human: new MobileHumanizer([0, 0], { backend }), backend };
 };
 
-// ────────────────────────────────────────────────────────────── resolution
-
 test('an explicit humanizer object wins over everything', () => {
   process.env.CAPTCHA_HUMANIZATION = 'mobile';
   const mine = new NullHumanizer();
@@ -76,9 +58,6 @@ test('an explicit humanizer object wins over everything', () => {
 });
 
 test('code beats the environment', () => {
-  // Deliberate, and the opposite of this package's model-identity vars: which
-  // mode is right is a property of the PAGE, so an env var must not silently
-  // flip a desktop solve to touch dispatch.
   process.env.CAPTCHA_HUMANIZATION = 'mobile';
   assert.equal(resolveHumanizer({ humanization: 'none' }).name, 'none');
   delete process.env.CAPTCHA_HUMANIZATION;
@@ -110,16 +89,12 @@ test('the starting position is honoured', () => {
 });
 
 test('every mode answers the whole pause vocabulary without throwing', async () => {
-  // An unknown kind must yield no wait rather than throw, so adding a pause
-  // site cannot break a humanizer written against an older release.
   for (const h of [new MouseHumanizer(), new MobileHumanizer(), new NullHumanizer()]) {
     for (const kind of [...PAUSE_KINDS, 'a-kind-added-next-year' as any]) {
       await h.pause(kind);
     }
   }
 });
-
-// ─────────────────────────────────────────────────────────────────── mouse
 
 test('a mouse click is a trajectory then a press', async () => {
   const page = new RecordingPage();
@@ -134,19 +109,15 @@ test('the mouse mode still hovers', () => {
   assert.equal(new MouseHumanizer().hovers, true);
 });
 
-// ────────────────────────────────────────────────────────────────── mobile
-
 test('a move with no finger down dispatches nothing', async () => {
   const { human, backend } = mobile();
   await human.move(new RecordingPage().asPage(), [300, 200]);
   assert.deepEqual(backend.events, []);
-  // …but the position is still recorded: the next touch lands there.
+
   assert.deepEqual(human.at, [300, 200]);
 });
 
 test('a tap wobbles between touchstart and touchend', async () => {
-  // A tap with zero movement in between is a synthetic tap. The contact
-  // centroid of a real finger rolls a pixel or two under pressure.
   const { human, backend } = mobile();
   await human.click(new RecordingPage().asPage(), [120, 90]);
   assert.deepEqual(backend.kinds, ['down', 'move', 'up']);
@@ -157,7 +128,7 @@ test('a drag travels while touching', async () => {
   const { human, backend } = mobile();
   await human.drag(new RecordingPage().asPage(), [10, 10], [300, 140]);
   assert.deepEqual(backend.kinds, ['down', 'move', 'up']);
-  assert.ok(backend.events[1][1] > 5); // a whole swipe path, not one jump
+  assert.ok(backend.events[1][1] > 5);
   assert.deepEqual(human.at, [300, 140]);
 });
 
@@ -170,28 +141,21 @@ test('mobile never reaches for the mouse', async () => {
 });
 
 test('mobile does not hover', () => {
-  // There is no cursor to rest anywhere, so every hover-for-realism behaviour
-  // has to switch itself off.
   assert.equal(new MobileHumanizer().hovers, false);
 });
 
 test('reset lifts a finger a previous solve left down', async () => {
-  // W3C input state is per SESSION: a solve that timed out inside the slider
-  // leaves the pointer down, and the next one would start from a finger
-  // already on the glass.
   const { human, backend } = mobile();
   const page = new RecordingPage().asPage();
   await human.press(page);
   backend.events.length = 0;
   await human.reset(page);
   assert.deepEqual(backend.kinds, ['up']);
-  await human.reset(page); // idempotent
+  await human.reset(page);
   assert.deepEqual(backend.kinds, ['up']);
 });
 
 test('mobile typing clears through the element, not Control+A', async () => {
-  // There is no Control key on a phone keyboard, and no page.keyboard at all
-  // on an Appium element.
   const keys: string[] = [];
   let cleared = 0;
   const field = {
@@ -203,8 +167,6 @@ test('mobile typing clears through the element, not Control+A', async () => {
   assert.equal(cleared, 1);
   assert.deepEqual(keys, ['a', 'b', '7']);
 });
-
-// ───────────────────────────────────────────────────────────────────── none
 
 test('none spends one move per gesture and no dwell', async () => {
   const page = new RecordingPage();
@@ -219,8 +181,6 @@ test('none types with one fill', async () => {
   assert.equal(value, 'xyz');
 });
 
-// ─────────────────────────────────────────────────────────────────── appium
-
 test('the Appium chain is a W3C touch pointer', async () => {
   const driver = new RecordingDriver();
   await new AppiumTouchBackend(driver).down(12, 34);
@@ -233,7 +193,6 @@ test('the Appium chain is a W3C touch pointer', async () => {
 });
 
 test('an Appium leg is one chain with per-sample durations', async () => {
-  // Batched on purpose: pacing a 90Hz path over the wire is not pacing.
   const driver = new RecordingDriver();
   await new AppiumTouchBackend(driver).move([[1, 2, 11], [3, 4, 12.6]]);
   assert.equal(driver.chains.length, 1);
@@ -241,8 +200,6 @@ test('an Appium leg is one chain with per-sample durations', async () => {
 });
 
 test('Appium press and release are separate performs', async () => {
-  // W3C input state persists per session, which is what lets the slider press,
-  // screenshot, steer, screenshot and only then release.
   const driver = new RecordingDriver();
   const backend = new AppiumTouchBackend(driver);
   await backend.down(0, 0);
@@ -253,8 +210,6 @@ test('Appium press and release are separate performs', async () => {
 });
 
 test('CSS pixels are mapped onto the device', async () => {
-  // A real handset wants screen pixels; the two differ by devicePixelRatio and
-  // by whatever chrome sits above the webview.
   const driver = new RecordingDriver();
   await new AppiumTouchBackend(driver, { scale: 3, origin: [0, 132] }).down(10, 20);
   const move = driver.chains[0][0].actions[0];
@@ -268,15 +223,6 @@ test('a driver that speaks neither call says so', async () => {
   );
 });
 
-// The transform is the one thing here that fails SILENTLY. A wrong `scale` does
-// not raise on either side of the wire: the chain is valid W3C, the device
-// performs it, and the finger lands somewhere else — the solve then fails
-// looking exactly like a model that cannot read the puzzle. Same shape as the
-// DPR bug in the slider's control loop, one seam over. The Python half is
-// pinned by test_humanizer.py::TestAppiumScaleIsNotGuessed; per CLAUDE.md 1c
-// the two ports must behave the same.
-
-/** A page that answers window.devicePixelRatio, or refuses to. */
 class RatioPage {
   reads = 0;
   constructor(private dpr: number | null) {}
@@ -300,8 +246,6 @@ test('the refusal names the half it cannot measure', async () => {
 });
 
 test("an explicit scale is taken as the caller's word", async () => {
-  // The caller who has already mapped the coordinates says so with an explicit
-  // scale, and is not second-guessed by a ratio we read.
   const driver = new RecordingDriver();
   await new AppiumTouchBackend(driver, { scale: 1 }, new RatioPage(3) as any).down(10, 20);
   const move = driver.chains[0][0].actions[0];
@@ -315,8 +259,6 @@ test('a 1x session needs no transform', async () => {
 });
 
 test('a page that cannot be asked is not refused', async () => {
-  // Absent evidence is not evidence of a mismatch. Failing a solve over an
-  // inability to MEASURE is the mirror of the bug this guards against.
   const driver = new RecordingDriver();
   await new AppiumTouchBackend(driver, {}, new RatioPage(null) as any).down(10, 20);
   assert.equal(driver.chains.length, 1);
@@ -329,7 +271,6 @@ test('no page at all is not refused', async () => {
 });
 
 test('the ratio is read once, not per gesture', async () => {
-  // It is a round trip into the page, and a solve makes hundreds of these.
   const page = new RatioPage(1);
   const backend = new AppiumTouchBackend(new RecordingDriver(), {}, page as any);
   await backend.down(1, 1);
@@ -339,48 +280,45 @@ test('the ratio is read once, not per gesture', async () => {
 });
 
 test('the factory hands the backend its page', async () => {
-  // The check is worthless if the wiring never passes a page through.
   const backend = await touchBackendFor(new RatioPage(3) as any, new RecordingDriver());
   await assert.rejects(() => backend.down(0, 0), /devicePixelRatio/);
 });
 
-// ──────────────────────────────────────────────────────────────────── swipe
 
-test('the swipe honours the trajectory contract', () => {
-  const [points, timings] = generate_swipe([10, 10], [400, 260]);
-  assert.equal(points.length, timings.length);
-  assert.equal(timings[0], 0);
-  for (let i = 1; i < timings.length; i++) assert.ok(timings[i] >= timings[i - 1]);
-  assert.deepEqual(points[points.length - 1], [400, 260]);
-});
 
-test('a finger does not overshoot', () => {
-  // A hand arriving past a target it cannot see under the cursor is the mouse's
-  // most recognisable tell. A finger occludes its own target and commits.
-  //
-  // The path comes from Cursory now, and a recording carries whatever excursion
-  // the person made relative to their OWN endpoints — morphed onto a short
-  // movement, that becomes a swing well past the target and back. Measured: 6
-  // to 25% of raw draws run more than 2px past, with a tail reaching 200px past
-  // a 150px movement. `generate_swipe` therefore REDRAWS rather than reshapes,
-  // because straightening a path would put a hand-drawn curve back in the
-  // middle of a recording. Six redraws leave under 0.03% unclean.
-  //
-  // The bound allows the contact wobble laid over the path afterwards: an AR(1)
-  // walk with sigma 0.55 and decay 0.82 is stationary at about 0.96px, so 3
-  // sigma is ~2.9px on top of the path's own 2px tolerance. That is contact
-  // behaviour rather than aim — a digitizer's reported centroid really does sit
-  // a pixel or two off the finger — and it is 60x short of the excursions this
-  // test exists to catch.
-  for (let i = 0; i < 200; i++) {
-    const [points] = generate_swipe([0, 0], [600, 0]);
-    const past = Math.max(...points.map((p) => p[0])) - 600;
-    assert.ok(past <= 6, `swipe ran ${past.toFixed(1)}px past its endpoint`);
+
+// camoufox opens its context with `viewport: null`, so `viewportSize()` is null and the window must be asked instead.
+// Clamping to a guessed 1920x1080 pinned coordinates to an edge that was not there and deadlocked its juggler (upstream #225).
+class NoViewportPage extends RecordingPage {
+  inner: { width: number; height: number } | null = null;
+  viewportSize() { return null as unknown as { width: number; height: number }; }
+  evaluate<R>(fn: () => R): Promise<R> {
+    if (!this.inner) return Promise.reject(new Error('no window'));
+    return Promise.resolve(this.inner as unknown as R);
   }
+  moves() { return this.events.filter((e) => e[0] === 'move').map((e) => [e[1], e[2]] as [number, number]); }
+}
+
+test('no viewport and no window means no clamp at all', async () => {
+  const page = new NoViewportPage();
+  await new MouseHumanizer([10, 10], 1000).move(page.asPage(), [3000, 50]);
+  const last = page.moves()[page.moves().length - 1];
+  assert.deepEqual(last, [3000, 50], 'the path must reach its target, not a guessed 1920 edge');
 });
 
-test('a zero-length swipe is one sample', () => {
-  const [points, timings] = generate_swipe([5, 5], [5, 5]);
-  assert.deepEqual(points, [[5, 5]]);
-  assert.deepEqual(timings, [0]);
+test('no viewport but a window clamps to the window, like Python', async () => {
+  const page = new NoViewportPage();
+  page.inner = { width: 1366, height: 768 };
+  await new MouseHumanizer([10, 10], 1000).move(page.asPage(), [3000, 50]);
+  for (const [x, y] of page.moves()) {
+    assert.ok(x >= 1 && x <= 1365 && y >= 1 && y <= 767, `(${x}, ${y}) left the 1366x768 window`);
+  }
+  assert.deepEqual(page.moves()[page.moves().length - 1], [1365, 50]);
+});
+
+test('a known viewport clamps to one pixel inside its edge', async () => {
+  const page = new RecordingPage();
+  await new MouseHumanizer([10, 10], 1000).move(page.asPage(), [3000, 50]);
+  const moves = page.events.filter((e) => e[0] === 'move'); const last = moves[moves.length - 1];
+  assert.deepEqual([last[1], last[2]], [799, 50]);
 });

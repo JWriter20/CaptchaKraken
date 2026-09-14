@@ -1,50 +1,20 @@
-/**
- * Where one solve's wall-clock went, by phase.
- *
- * The TypeScript half of `python/src/captchakraken/timing.py`; the two are one
- * implementation in two languages and `test_timing_parity.py` pins that they
- * name the same phases. That parity is the point: without it the ports can only
- * be compared on their totals, and "the JS port is four seconds slower" is not
- * a bug report — "the JS port spends four seconds starting a Python
- * interpreter it did not need to start" is.
- *
- * Always on. It is a few map updates per phase against multi-second waits, and
- * a budget you have to opt into is one nobody has when the slow solve happens.
- * Only PRINTED under `CAPTCHA_TIMINGS=1`; always RETURNED on `SolveResult`.
- */
+import { Phase } from './kinds.js';
 
-/**
- * What a phase's time COUNTS AS, when asking how much of a solve was useful.
- *
- * Only two kinds of second are worth spending: one the model is thinking in,
- * and one the pointer is travelling in (which has to look human, so it cannot
- * be rushed). Everything else is the driver waiting on a clock, and every such
- * wait is a candidate for deletion or for overlapping with something real.
- */
-export const PRODUCTIVE = new Set(['inference', 'mouse']);
+// Always collected, printed only under CAPTCHA_TIMINGS=1: a budget you have to opt into is one nobody has when the slow solve happens.
+export const PRODUCTIVE: ReadonlySet<Phase> = new Set<Phase>([Phase.INFERENCE, Phase.MOUSE]);
 
 export function timingsEnabled(): boolean {
   return process.env.CAPTCHA_TIMINGS === '1';
 }
 
+/** Phases attribute, they do not partition: a nested phase counts under both names, and re-entering an open one counts once. */
 export class PhaseBudget {
-  readonly totals = new Map<string, number>();
-  readonly counts = new Map<string, number>();
-  private readonly open: string[] = [];
+  readonly totals = new Map<Phase, number>();
+  readonly counts = new Map<Phase, number>();
+  private readonly open: Phase[] = [];
   private readonly t0 = Date.now();
 
-  /**
-   * Attribute `fn`'s wall-clock to `name`.
-   *
-   * Phases may nest (a burst contains its screenshots). Only the OUTERMOST of a
-   * given NAME accumulates, so re-entering one cannot double-count it — but a
-   * phase nested inside a differently-named one counts under both, deliberately:
-   * the cursor drifting over the widget WHILE the model generates is genuinely
-   * both `mouse` and `inference`, and hiding either would misreport what the
-   * solve was doing. The totals are therefore an attribution, not a partition,
-   * and can exceed the elapsed time.
-   */
-  async phase<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  async phase<T>(name: Phase, fn: () => Promise<T>): Promise<T> {
     if (this.open.includes(name)) return fn();
     this.open.push(name);
     const t0 = Date.now();
@@ -56,8 +26,7 @@ export class PhaseBudget {
     }
   }
 
-  /** Record a measured span directly, for blocks that would need re-indenting. */
-  add(name: string, ms: number): void {
+  add(name: Phase, ms: number): void {
     this.totals.set(name, (this.totals.get(name) ?? 0) + ms);
     this.counts.set(name, (this.counts.get(name) ?? 0) + 1);
   }
@@ -66,7 +35,6 @@ export class PhaseBudget {
     return Date.now() - this.t0;
   }
 
-  /** Plain object for `SolveResult.phases`, with the solve total folded in. */
   toObject(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const [k, v] of this.totals) out[k] = v;

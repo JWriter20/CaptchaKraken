@@ -1,57 +1,9 @@
-/**
- * An empty answer is an answer, and it still has to be sent.
- *
- * Regression: the submit-control lookup lived INSIDE the loop over the model's
- * actions, while the decision to press it lived outside. A plan with no actions
- * never entered that loop, so `verifyButton` stayed null, and
- *
- *     const shouldClickSubmit = !slid && (answered || !performedAction);
- *     if (shouldClickSubmit && verifyButton) { ... }
- *
- * computed `shouldClickSubmit === true` — the branch that exists precisely for
- * "we had nothing to do and want the round to advance" — and then pressed
- * nothing, because the control it needed had never been resolved.
- * `performedAction` stayed false and the caller aborted the round on
- * "Captcha still detected but solver performed no interactions".
- *
- * WHERE IT BIT, AND WHY IT LOOKED LIKE A MODEL REGRESSION
- *
- * reCAPTCHA's 3x3 has a `none_present` variation: the prompt names a class, no
- * tile contains it, and the widget's control reads SKIP rather than VERIFY. The
- * correct answer is to select nothing and press it. Fixture seed 20260730 is
- * exactly that — target `traffic light`, `target_ids: []`, `submit_label: SKIP`.
- *
- * It surfaced when the training repo fixed font resolution on the macOS
- * Tier 3 runner. Before, the prompt rendered in a fallback bitmap face reading
- * "Selectall images with / traffic lights"; after, real reCAPTCHA chrome with
- * the target term bolded and a legible "If there are none, click skip." This
- * client runs at temperature 0, so the model is a function of the picture: a
- * correct picture got a correct EMPTY answer, and the empty answer was the one
- * shape the driver could not send. a reCAPTCHA 3x3 grid js went 2/3 -> 1/3 and
- * read as the font fix causing a regression.
- *
- * `getVerifyButton` was never the problem — 'Skip' has always been in its list
- * (see geetest-submit-button.test.ts, which pins the finder itself). The finder
- * was simply never called.
- *
- * This is a STRUCTURAL test. What is wrong is where a call sits relative to a
- * loop, and `solveSingle` is 200 lines around a screenshot, a planner
- * round-trip and a live page — mocking all of that observes the nesting far
- * less directly than reading it. The Python half is pinned by
- * `python/tests/test_empty_answer_still_submits.py`; per CLAUDE.md 1c the two
- * ports must behave the same.
- */
-
+// Structural on purpose: `none_present` boards read as SKIP, and the regression surfaced with the macOS font fix and read as that fix's fault.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as path from 'path';
 
-/**
- * `npm test` compiles into `.test-build/`, so `__dirname` is not the source
- * tree. Walk up for `src/solver.ts` and this works under both tsx (run from
- * `src/`) and the compiled runner.
- */
 function findSolverSource(): string {
   let dir = __dirname;
   for (let i = 0; i < 6; i++) {
@@ -67,14 +19,12 @@ function findSolverSource(): string {
 const SOLVER = findSolverSource();
 const LOOKUP = 'getVerifyButton';
 
-/** Brace depth at the START of each line, ignoring braces inside strings. */
 function depths(src: string): number[] {
   const out: number[] = [];
   let depth = 0;
   for (const line of src.split('\n')) {
     out.push(depth);
-    // Strip line comments and string/template literals before counting, so a
-    // brace inside an xpath template does not shift the depth.
+
     const bare = line
       .replace(/\/\/.*$/, '')
       .replace(/'(?:[^'\\]|\\.)*'/g, "''")
@@ -100,7 +50,6 @@ test('the submit control is resolved outside the loop over the model actions', (
 
   const loopDepth = depth[loopIdx];
 
-  // Where the finder is CALLED (not declared, not referenced in a comment).
   const callIdxs = lines
     .map((l, i) => ({ l, i }))
     .filter(({ l }) => new RegExp(`this\\.${LOOKUP}\\s*\\(`).test(l))
@@ -110,8 +59,6 @@ test('the submit control is resolved outside the loop over the model actions', (
     `this.${LOOKUP}(...) is never called in solver.ts — the widget's own submit `
     + 'control would never be pressed by any path');
 
-  // A call belongs to the loop if it sits deeper than the loop's own line and
-  // before the loop closes (the first line back at loopDepth).
   let loopEnd = lines.length;
   for (let i = loopIdx + 1; i < lines.length; i++) {
     if (depth[i] <= loopDepth) { loopEnd = i; break; }

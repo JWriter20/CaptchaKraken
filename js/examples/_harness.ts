@@ -1,12 +1,3 @@
-/**
- * Shared runner for the CaptchaKraken TypeScript demos.
- *
- * Launches a real stealth browser (camoufox, using the binary from your fork —
- * JWriter20/camoufox releases; see README.md), navigates to a captcha demo
- * site, runs the full solver end-to-end, and prints a compact report: token
- * generation speed, total solve time, and whether the solve succeeded (with a
- * best-effort reason when it didn't).
- */
 import { Camoufox } from 'camoufox-js';
 import { CaptchaKrakenSolver } from '../src/index';
 import type { SolveResult } from '../src/types';
@@ -17,19 +8,6 @@ export interface DemoSpec {
   vendor: 'recaptcha' | 'hcaptcha';
 }
 
-/**
- * Let any demo point at an arbitrary page:
- *
- *   npx tsx examples/demoHcaptcha.ts                      # built-in demo page
- *   npx tsx examples/demoHcaptcha.ts https://your.site/   # anything else
- *   npx tsx examples/demoHcaptcha.ts https://your.site/ --vendor recaptcha
- *
- * The vendor stays a default rather than being inferred from the URL: it only
- * selects the wording of a failure explanation, and the solver detects the
- * actual widget itself. Guessing from a hostname would be wrong exactly on the
- * pages worth demoing — your own site, embedding someone else's captcha.
- * Mirrors `spec_from_argv` in the Python harness.
- */
 export function specFromArgv(base: DemoSpec, argv: string[] = process.argv.slice(2)): DemoSpec {
   const spec = { ...base };
   const rest: string[] = [];
@@ -55,7 +33,6 @@ function fmtMs(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
-/** Best-effort human explanation when a solve doesn't succeed. */
 function explain(vendor: string, result: SolveResult | void, err: unknown): string {
   const msg = err instanceof Error ? err.message : err ? String(err) : '';
   const low = msg.toLowerCase();
@@ -113,25 +90,13 @@ export async function runDemo(baseSpec: DemoSpec): Promise<void> {
   try {
     browser = await Camoufox({
       headless,
-      // HUMANIZE defaults OFF — see the Python harness's _launch_kwargs for the
-      // measurement. The solver already walks its own 60-point trajectory;
-      // camoufox's humanize juggler re-humanises each of those 60 micro-moves,
-      // turning one straight line into 60 nested traversals. That is 25-52s per
-      // click round instead of ~5s, which overruns the solve timeout and
-      // reports a solvable captcha as unsolved. HUMANIZE=1 to opt back in.
+
       humanize: process.env.HUMANIZE === '1',
       geoip: false,
-      // Point camoufox at YOUR fork's binary. If unset, camoufox-js uses its
-      // default cached binary (`npx camoufox-js fetch`).
+
       ...(executablePath ? { executable_path: executablePath } : {}),
     });
-    // camoufox sets its own viewport via the fingerprint, so DON'T let playwright
-    // emulate one (viewport: null) — passing a viewport trips camoufox 152's
-    // Juggler on the `isMobile` field.
-    // Record the session when CAPTCHA_DEMO_VIDEO_DIR is set — same env contract
-    // as the Python harness. Only a build whose screencast emits frames
-    // produces anything; stock camoufox writes nothing or a blank file with no
-    // error, so a caller that cares should check the size of what it gets.
+
     const videoDir = process.env.CAPTCHA_DEMO_VIDEO_DIR;
     const [vw, vh] = (process.env.CAPTCHA_DEMO_VIDEO_SIZE || '1280x800').split('x').map(Number);
     context = await (browser as any).newContext({
@@ -140,8 +105,7 @@ export async function runDemo(baseSpec: DemoSpec): Promise<void> {
     });
     const page = await context.newPage();
     await page.goto(spec.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    // Let the captcha widget's iframe inject + render before we look for it
-    // (reCAPTCHA/hCaptcha load async, after DOMContentLoaded).
+
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
     await page.waitForTimeout(3000);
 
@@ -166,9 +130,7 @@ export async function runDemo(baseSpec: DemoSpec): Promise<void> {
     report(spec, { ok: false, totalMs: Date.now() - t0, solveMs: 0, reason: explain(spec.vendor, undefined, err) });
     process.exitCode = 1;
   } finally {
-    // Close the CONTEXT before the browser: playwright finalises the video on
-    // context close, so skipping it leaves a file that never appears.
-    try { await context?.close(); } catch { /* ignore */ }
-    try { await (browser as any)?.close(); } catch { /* ignore */ }
+    try { await context?.close(); } catch {  }
+    try { await (browser as any)?.close(); } catch {  }
   }
 }

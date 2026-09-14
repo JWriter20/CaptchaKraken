@@ -1,13 +1,3 @@
-"""
-Engine demo: run CaptchaKraken on Google's standard reCAPTCHA v2 demo page.
-
-    pip install -e ".[serve]"     # engine + serving stack (or [.] against a remote server)
-    pip install camoufox && python -m camoufox fetch   # or set CAMOUFOX_BINARY to your fork binary
-    source ../captchakraken.env    # VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY
-    python examples/demoRecaptcha.py                     # this demo page
-    python examples/demoRecaptcha.py https://your.site/  # any URL
-"""
-
 from _harness import DemoSpec, run_demo
 
 if __name__ == "__main__":
