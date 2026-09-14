@@ -283,6 +283,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | File | Purpose |
 |---|---|
 | `python/tests/test_a_blank_board_is_not_photographed.py` | The load gate in front of every inference screenshot, and the fences that stop it stalling a legitimately sparse puzzle. |
+| `python/tests/test_a_board_that_never_repeats_is_animated.py` | A continuous animation never repeats and never settles; the burst calls it animated rather than a still. |
 | `python/tests/test_geetest_accept_is_a_signal.py` | GeeTest's accept banner is a solve; its refuse banner, and its closed popup wrapper, are not. |
 | `python/tests/test_a_missing_prompt_is_not_a_reason_to_wait.py` | A readiness gate must not block on an element that is not there — a board with no `.prompt-text` paid the whole timeout, silently, per board. |
 | `python/tests/test_slide_reads_the_piece_off_the_page.py` | The slider prefers the piece element's own box over the pixel diff, and the diff's measured undershoot is pinned as the fallback's known cost. |
@@ -337,6 +338,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_a_slow_model_does_not_extend_the_burst.py` | Filming while the model is asked is only free if the camera stops at the floor rather than waiting for the answer. |
 | `python/tests/test_a_slow_camera_does_not_stretch_the_burst.py` | The burst's windows are budgets in milliseconds, so a camera slower than the interval must not spend more of the solve than a fast one. |
 | `python/tests/test_a_refused_clip_is_not_re_asked.py` | A recording with no steady screen cannot answer differently, so a refusal must throw the frames away rather than re-ask them. |
+| `python/tests/test_a_repeated_answer_is_not_re_performed.py` | An answer the widget already refused is not pressed again; the round re-asks instead. |
 | `python/tests/test_a_burst_cannot_trip_its_own_deadline.py` | The burst plans its frames from the ceiling, so it must not be able to exceed the deadline it was given. |
 | `python/tests/test_cycling_board_waits_for_its_screen.py` | The Python twin of the frame-gate regression: hold until the page shows the keyframe the model chose. |
 | `python/tests/test_every_keyframe_write_names_its_stem.py` | Both entries into the animated path write keyframes the same way; only one of them used to be exercised. |

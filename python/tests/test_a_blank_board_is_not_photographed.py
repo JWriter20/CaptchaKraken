@@ -9,7 +9,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from captchakraken import page_solver
 from captchakraken.page_solver import PageSolver, PageSolverConfig
+from virtual_clock import install
 from captchakraken.tool_calls.board_painted import (
     TEXTURE_FLOOR, board_is_painted, centre_texture,
 )
@@ -85,9 +87,11 @@ def _solver(**cfg):
     return s
 
 
-def test_a_painted_board_is_photographed_at_once():
+# On the virtual clock only sleeps move time, so the wait measures the polling code and not the runner's load.
+def test_a_painted_board_is_photographed_at_once(monkeypatch):
+    install(monkeypatch, page_solver)
     s, el = _solver(), _Element(blank_for=0)
-    assert s._wait_for_board_painted(el) < 80
+    assert s._wait_for_board_painted(el) == 0
     assert el.grabs == 1
 
 
@@ -97,10 +101,11 @@ def test_a_blank_board_is_polled_until_it_paints():
     assert el.grabs == 4, "should have kept looking until there was a puzzle"
 
 
-def test_a_board_that_never_paints_falls_through():
+def test_a_board_that_never_paints_falls_through(monkeypatch):
+    install(monkeypatch, page_solver)
     s, el = _solver(), _Element(blank_for=10_000)
     waited = s._wait_for_board_painted(el)
-    assert waited < 2_000, f"must be bounded by board_paint_timeout_ms, waited {waited}ms"
+    assert 80 <= waited < 2_000, f"must be bounded by board_paint_timeout_ms, waited {waited}ms"
 
 
 def test_a_screenshot_that_throws_is_a_skipped_poll():
