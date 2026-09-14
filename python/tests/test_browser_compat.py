@@ -74,25 +74,27 @@ def page():
 def test_a_real_page_provides_every_member_the_driver_duck_types(page: Any) -> None:
     page.set_content(HTML)
 
-    target = page.query_selector("#target")
-    assert target is not None, "query_selector"
-    assert len(page.query_selector_all("div")) >= 2, "query_selector_all"
+    target = page.locator("#target").element_handle(timeout=1000)
+    assert target is not None, "locator.element_handle"
+    assert page.locator("div").count() >= 2, "locator.count"
+    assert len(page.locator("div").filter(visible=True).all()) == 1, "locator.filter(visible).all excludes display:none"
 
     assert target.get_attribute("data-vendor") == "recaptcha", "get_attribute"
     assert (target.text_content() or "").strip() == "hello captcha", "text_content"
     assert target.is_visible() is True, "is_visible (visible element)"
-    assert page.query_selector("#hidden").is_visible() is False, "is_visible (display:none)"
+    assert page.locator("#hidden").element_handle(timeout=1000).is_visible() is False, "is_visible (display:none)"
     assert target.bounding_box()["width"] > 0, "bounding_box"
     target.scroll_into_view_if_needed()
     assert len(target.screenshot()) > 0, "element screenshot"
 
     assert page.evaluate("() => document.title") == "", "evaluate"
-    assert page.eval_on_selector("#target", "el => el.id") == "target", "eval_on_selector"
+    assert target.evaluate("el => el.id") == "target", "handle.evaluate"
     assert page.viewport_size == {"width": 1280, "height": 720}, "viewport_size"
 
-    frame = page.query_selector("#frame").content_frame()
+    frame = page.locator("#frame").element_handle(timeout=1000).content_frame()
     assert frame is not None, "content_frame"
-    assert frame.query_selector("#inner") is not None, "frame.query_selector"
+    assert frame.locator("#inner").count() == 1, "frame.locator"
+    assert frame.locator("#inner").locator("xpath=ancestor::body[1]").count() == 1, "locator.locator (xpath axis)"
     assert frame.wait_for_selector("#inner", state="visible", timeout=5000), "frame.wait_for_selector"
     frame.wait_for_function("() => !!document.querySelector('#inner')", timeout=5000)
 
@@ -101,10 +103,11 @@ def test_a_real_page_provides_every_member_the_driver_duck_types(page: Any) -> N
     page.mouse.up(button="left")
     page.focus("#field")
     page.keyboard.type("abc", delay=1)
-    assert page.eval_on_selector("#field", "el => el.value") == "abc", "keyboard.type"
+    field = page.locator("#field").element_handle(timeout=1000)
+    assert field.input_value() == "abc", "keyboard.type / handle.input_value"
     page.keyboard.press("Control+A")
     page.keyboard.press("Backspace")
-    assert page.eval_on_selector("#field", "el => el.value") == "", "select-all + delete"
+    assert field.input_value() == "", "select-all + delete"
 
     assert page.is_closed() is False, "is_closed"
 
@@ -115,10 +118,10 @@ def test_the_watcher_solves_a_captcha_that_appears_after_it_is_installed(page: A
 
     class Solver:
         def detect_captcha(self, p: Any) -> Any:
-            return p.query_selector("#late-captcha")
+            return p.locator("#late-captcha").count() > 0
 
         def solve(self, p: Any) -> Any:
-            p.eval_on_selector("#late-captcha", "el => el.remove()")
+            p.locator("#late-captcha").evaluate("el => el.remove()")
             solved.append(True)
             return {"is_solved": True}
 
@@ -142,10 +145,10 @@ def test_poll_once_drives_a_real_page_without_blocking(page: Any) -> None:
 
     class Solver:
         def detect_captcha(self, p: Any) -> Any:
-            return p.query_selector("#late-captcha")
+            return p.locator("#late-captcha").count() > 0
 
         def solve(self, p: Any) -> Any:
-            p.eval_on_selector("#late-captcha", "el => el.remove()")
+            p.locator("#late-captcha").evaluate("el => el.remove()")
             return {"is_solved": True}
 
     watcher = CaptchaWatcher(solver=Solver(), page=page, interval_ms=10_000)
@@ -162,10 +165,10 @@ def test_one_watcher_covers_every_navigation_on_the_page(page: Any) -> None:
 
     class Solver:
         def detect_captcha(self, p: Any) -> Any:
-            return p.query_selector("#c")
+            return p.locator("#c").count() > 0
 
         def solve(self, p: Any) -> Any:
-            p.eval_on_selector("#c", "el => el.remove()")
+            p.locator("#c").evaluate("el => el.remove()")
             solved.append(True)
             return {"is_solved": True}
 

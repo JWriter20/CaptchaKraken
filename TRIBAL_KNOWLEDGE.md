@@ -320,7 +320,7 @@ are sandboxed and invisible, under vanilla Playwright, patchright or Puppeteer
 they are not, and a captcha vendor is exactly the party that looks. Polling
 `detectCaptcha()` lands in Camoufox's isolated Juggler world for free because
 it never opts into the main world. Detection reuses `detectCaptcha` because an
-earlier copied selector union drifted from `VENDOR_WIDGET_LOCATORS` the first
+earlier copied selector union drifted from `SELECTORS` the first
 time a vendor was added. The Python watcher blocks because a sync Playwright
 handle is bound to the greenlet that created it. After a raise it backs off
 (5 s) so a permanently unsupported challenge does not re-attempt and re-bill
@@ -769,8 +769,8 @@ moves the coordinate a little, not the reading. Those clips are now thrown away
 on refusal, which is what lets the next round re-classify a board that has
 stopped moving as the still it now is.
 
-**The piece selector list is a second vendor surface, and it fails silently.**
-`VENDOR_WIDGET_LOCATORS` failing is loud — nothing is detected. The piece list
+**`PIECE_SELECTORS` is a second vendor surface, and it fails silently.**
+The widget selectors failing is loud — nothing is detected. The piece list
 failing is not: the driver falls back to measuring what moved between two
 screenshots and solves anyway, so the pass rate does not move and no gate can
 see it. Re-measured against the live vendor demos 2026-09-13 and it had two
@@ -785,6 +785,25 @@ the geometry path already throws a measurement out on. GeeTest has also started
 stamping a per-build hash alongside the plain class; the plain one still matches
 today, and the day it stops is the day the list goes blind, which is what the
 live check is for.
+
+**Every selector lives in one typed table, and the driver speaks locators.**
+`SELECTORS` (`selectors.ts` / `selectors.py`) is a `Record<Vendor, VendorSelectors>`
+with one row per vendor: hosts on the wire, challenge and checkbox iframes,
+inline widget shapes, the response field, the accepted and checked markers,
+submit controls, text inputs, slider handles and pieces. Detection, the solved
+test, the fresh-round test and the banner read are each one generic pass over
+that table, in table order, so a vendor is added by adding a row and the type
+checker refuses a vendor with no row. Before this the same selectors were
+scattered across a dozen per-vendor branches in each port, the two ports had
+already diverged (Python's "widget in the DOM" test did not count the inline
+vendors; Python's fresh-round test skipped the frame-hash check for reCAPTCHA),
+and the vendor hint was sniffed off the iframe `src` by a second copy of the
+same substrings. The vendor and frame role are now whichever row matched. The
+driver queries with `locator(sel).filter({ visible: true }).all()`, every
+selector of a pass at once, never `page.$()`: the visibility filter is
+Playwright 1.51+, and a stale locator is resolved to a handle with a 1 s timeout
+because `elementHandle()` otherwise waits the default 30 s for a widget that
+has just closed, which blows the solve budget instead of reading as stale.
 
 **The mouse path is not ours and should not be.** It was a Bezier arc with a
 Fitts's-law duration, an ease-in-out velocity profile, speed-scaled jitter and

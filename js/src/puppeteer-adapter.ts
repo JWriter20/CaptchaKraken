@@ -2,6 +2,7 @@ import {
   PlaywrightPage,
   PlaywrightFrame,
   PlaywrightElementHandle,
+  PlaywrightLocator,
   BoundingBoxRect,
   ViewportSize,
 } from './playwright-types';
@@ -17,11 +18,9 @@ interface PuppeteerElementHandle {
   scrollIntoView(): Promise<void>;
   isVisible(): Promise<boolean>;
   evaluate(pageFunction: (el: any, ...args: any[]) => any, ...args: any[]): Promise<any>;
-  $(selector: string): Promise<PuppeteerElementHandle | null>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
 }
 interface PuppeteerFrame {
-  $(selector: string): Promise<PuppeteerElementHandle | null>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   waitForFunction(pageFunction: Function | string, options?: any, ...args: any[]): Promise<unknown>;
@@ -41,10 +40,9 @@ interface PuppeteerPage {
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   viewport(): ViewportSize | null;
   evaluate<R>(pageFunction: () => R): Promise<R>;
-  $(selector: string): Promise<PuppeteerElementHandle | null>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
-  $eval(selector: string, pageFunction: (element: Element) => any, ...args: any[]): Promise<any>;
   isClosed(): boolean;
+  evaluate(pageFunction: () => any): Promise<any>;
 }
 
 function toPuppeteerSelectorOptions(options?: PuppeteerSelectorState): any {
@@ -58,6 +56,21 @@ function toPuppeteerSelectorOptions(options?: PuppeteerSelectorState): any {
   return out;
 }
 
+/** Puppeteer's own Locator has no `all()`, `count()` or visibility filter, so a Playwright-shaped one is built over `$$`. */
+function locatorOver(resolve: () => Promise<PuppeteerElementHandle[]>): PlaywrightLocator {
+  return {
+    locator: (selector) => locatorOver(async () => (await Promise.all((await resolve()).map((h) => h.$$(selector)))).flat()),
+    filter: ({ visible }) => locatorOver(async () => {
+      const found = await resolve();
+      const shown = await Promise.all(found.map((h) => (visible === undefined ? true : h.isVisible().then((v) => v === visible))));
+      return found.filter((_, i) => shown[i]);
+    }),
+    all: async () => (await resolve()).map((h) => locatorOver(async () => [h])),
+    count: async () => (await resolve()).length,
+    elementHandle: async () => wrapHandle((await resolve())[0] ?? null),
+  };
+}
+
 function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle | null {
   if (!h) return null;
   return {
@@ -68,19 +81,15 @@ function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle |
     getAttribute: (name) => h.evaluate((el: Element, n: string) => el.getAttribute(n), name),
     isVisible: () => h.isVisible(),
     textContent: () => h.evaluate((el: Element) => el.textContent),
-    $: async (selector) => wrapHandle(await h.$(selector)),
-
-    $$: async (selector) =>
-      (await h.$$(selector)).map(wrapHandle).filter((x): x is PlaywrightElementHandle => !!x),
+    inputValue: () => h.evaluate((el: any) => (typeof el.value === 'string' ? el.value : '')),
+    evaluate: (pageFunction) => h.evaluate(pageFunction),
   };
 }
 
 function wrapFrame(f: PuppeteerFrame | null): PlaywrightFrame | null {
   if (!f) return null;
   return {
-    $: async (selector) => wrapHandle(await f.$(selector)),
-    $$: async (selector) =>
-      (await f.$$(selector)).map(wrapHandle).filter((x): x is PlaywrightElementHandle => !!x),
+    locator: (selector) => locatorOver(() => f.$$(selector)),
     waitForSelector: async (selector, options) =>
       wrapHandle(await f.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
     waitForFunction: (pageFunction, arg, options) =>
@@ -113,9 +122,7 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
       wrapHandle(await page.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
     viewportSize: () => page.viewport(),
     evaluate: (pageFunction) => page.evaluate(pageFunction),
-    $: async (selector) => wrapHandle(await page.$(selector)),
-    $$: async (selector) => (await page.$$(selector)).map((h) => wrapHandle(h)!).filter(Boolean),
-    $eval: (selector, pageFunction, arg) => page.$eval(selector, pageFunction as any, arg),
+    locator: (selector) => locatorOver(() => page.$$(selector)),
     // Forwarded explicitly: without it the watcher polls a dead page forever.
     isClosed: () => page.isClosed(),
   };

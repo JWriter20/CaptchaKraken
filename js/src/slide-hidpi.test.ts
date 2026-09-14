@@ -3,10 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 
 import { CaptchaKrakenSolver } from './solver';
+import { fakeDom } from './fake-dom.test';
 
 const DPR = 2.625;
 const WIDGET_W = 400;
@@ -33,11 +32,6 @@ function rig(targetPx: number, dpr: number) {
   const excludes: number[][] = [];
   const startX = HANDLE.x + HANDLE.width / 2;
 
-  const handle: any = {
-    boundingBox: async () => ({ ...HANDLE }),
-    scrollIntoViewIfNeeded: async () => {},
-    isVisible: async () => true,
-  };
   const element: any = {
     screenshot: async ({ path: p }: { path: string }) =>
       writePng(p, Math.round(WIDGET_W * dpr), Math.round(WIDGET_H * dpr)),
@@ -49,7 +43,7 @@ function rig(targetPx: number, dpr: number) {
       up: async () => {},
     },
   };
-  const scope: any = { $: async (sel: string) => (sel.includes('slider') ? handle : null) };
+  const scope = fakeDom([{ matches: ['.geetest_slider_button'], box: { ...HANDLE } }]);
 
   const solver: any = new CaptchaKrakenSolver({});
   solver.trackPiece = async (
@@ -101,4 +95,3 @@ test('a 1x screen is unchanged', async () => {
   assert.equal(y2, WIDGET_H, 'the mask must reach the bottom of the widget');
 });
 
-void path; void os;

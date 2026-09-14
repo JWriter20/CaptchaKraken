@@ -18,16 +18,16 @@ function fakeHandle(calls: Call[], name = 'handle') {
     evaluate: async (fn: Function, ...args: any[]) => {
       calls.push({ method: `${name}.evaluate`, args });
 
-      return fn({ getAttribute: (n: string) => `attr:${n}`, textContent: 'text!' }, ...args);
+      return fn({ getAttribute: (n: string) => `attr:${n}`, textContent: 'text!', value: 'typed' }, ...args);
     },
-    $: async (sel: string) => { calls.push({ method: `${name}.$`, args: [sel] }); return fakeHandle(calls, 'child'); },
+    $$: async (sel: string) => { calls.push({ method: `${name}.$$`, args: [sel] }); return [fakeHandle(calls, 'child')]; },
   };
   return handle;
 }
 
 function fakeFrame(calls: Call[]) {
   return {
-    $: async (sel: string) => { calls.push({ method: 'frame.$', args: [sel] }); return fakeHandle(calls); },
+    $$: async (sel: string) => { calls.push({ method: 'frame.$$', args: [sel] }); return [fakeHandle(calls)]; },
     waitForSelector: async (sel: string, o: any) => { calls.push({ method: 'frame.waitForSelector', args: [sel, o] }); return fakeHandle(calls); },
     waitForFunction: async (fn: any, ...rest: any[]) => { calls.push({ method: 'frame.waitForFunction', args: [fn, ...rest] }); return true; },
   };
@@ -48,9 +48,8 @@ function fakePage(calls: Call[], over: Record<string, any> = {}) {
     },
     waitForSelector: async (sel: string, o: any) => { calls.push({ method: 'waitForSelector', args: [sel, o] }); return fakeHandle(calls); },
     viewport: () => { calls.push({ method: 'viewport', args: [] }); return { width: 1280, height: 720 }; },
-    $: async (sel: string) => { calls.push({ method: '$', args: [sel] }); return fakeHandle(calls); },
     $$: async (sel: string) => { calls.push({ method: '$$', args: [sel] }); return [fakeHandle(calls), fakeHandle(calls)]; },
-    $eval: async (sel: string, fn: any, arg: any) => { calls.push({ method: '$eval', args: [sel, arg] }); return 'evaled'; },
+    evaluate: async (fn: any) => { calls.push({ method: 'evaluate', args: [fn] }); return fn(); },
     isClosed: () => false,
     ...over,
   } as any;
@@ -100,7 +99,7 @@ test('no options stays undefined rather than becoming {}', async () => {
 test('getAttribute and textContent go through evaluate()', async () => {
   const calls: Call[] = [];
   const page = fromPuppeteer(fakePage(calls));
-  const handle = (await page.$('#x'))!;
+  const handle = (await page.locator('#x').elementHandle())!;
 
   assert.equal(await handle.getAttribute('src'), 'attr:src');
   assert.equal(last(calls).method, 'handle.evaluate');
@@ -108,12 +107,15 @@ test('getAttribute and textContent go through evaluate()', async () => {
 
   assert.equal(await handle.textContent(), 'text!');
   assert.equal(last(calls).method, 'handle.evaluate');
+
+  assert.equal(await handle.inputValue(), 'typed', 'the live value, not the attribute');
+  assert.equal(last(calls).method, 'handle.evaluate');
 });
 
 test('scrollIntoViewIfNeeded maps to scrollIntoView', async () => {
   const calls: Call[] = [];
   const page = fromPuppeteer(fakePage(calls));
-  await (await page.$('#x'))!.scrollIntoViewIfNeeded();
+  await (await page.locator('#x').elementHandle())!.scrollIntoViewIfNeeded();
   assert.equal(last(calls).method, 'handle.scrollIntoView');
 });
 
@@ -139,7 +141,7 @@ test('a plain key is pressed once, with no modifier traffic', async () => {
 test('waitForFunction swaps Playwright (fn, arg, opts) to Puppeteer (fn, opts, arg)', async () => {
   const calls: Call[] = [];
   const page = fromPuppeteer(fakePage(calls));
-  const frame = await (await page.$('#f'))!.contentFrame();
+  const frame = await (await page.locator('#f').elementHandle())!.contentFrame();
 
   const fn = () => true;
   await frame!.waitForFunction(fn, { some: 'arg' }, { timeout: 99 });
@@ -150,20 +152,33 @@ test('waitForFunction swaps Playwright (fn, arg, opts) to Puppeteer (fn, opts, a
   assert.deepEqual(call.args[2], { some: 'arg' }, 'the arg must come last');
 });
 
-test('$$ wraps every handle it returns', async () => {
+test('a locator is one $$ per query, and all() yields one wrapped handle per match', async () => {
   const calls: Call[] = [];
   const page = fromPuppeteer(fakePage(calls));
-  const handles = await page.$$('iframe');
-  assert.equal(handles.length, 2);
-  for (const h of handles) {
+  const each = await page.locator('iframe').all();
+  assert.equal(each.length, 2);
+  assert.equal(await page.locator('iframe').count(), 2);
+  for (const at of each) {
+    const h = (await at.elementHandle())!;
     assert.equal(typeof h.getAttribute, 'function', 'an unwrapped Puppeteer handle would have no getAttribute');
   }
+  assert.deepEqual(calls.filter((c) => c.method === '$$').map((c) => c.args[0]), ['iframe', 'iframe'], 'all() and count() each queried once');
+});
+
+test('filter({ visible }) asks each handle, and a nested locator goes through the parent handle', async () => {
+  const calls: Call[] = [];
+  const page = fromPuppeteer(fakePage(calls));
+  assert.equal(await page.locator('iframe').filter({ visible: true }).count(), 2);
+  assert.equal(calls.filter((c) => c.method === 'handle.isVisible').length, 2);
+  assert.equal(await page.locator('body').locator('.inner').count(), 2, 'one child per parent handle');
+  assert.deepEqual(last(calls), { method: 'handle.$$', args: ['.inner'] });
 });
 
 test('a missing element stays null instead of becoming a broken wrapper', async () => {
   const calls: Call[] = [];
-  const page = fromPuppeteer(fakePage(calls, { $: async () => null, waitForSelector: async () => null }));
-  assert.equal(await page.$('#nope'), null);
+  const page = fromPuppeteer(fakePage(calls, { $$: async () => [], waitForSelector: async () => null }));
+  assert.equal(await page.locator('#nope').elementHandle(), null);
+  assert.equal(await page.locator('#nope').count(), 0);
   assert.equal(await page.waitForSelector('#nope'), null);
 });
 

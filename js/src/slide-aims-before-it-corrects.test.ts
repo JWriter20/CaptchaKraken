@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import { CaptchaKrakenSolver } from './solver';
+import { fakeDom } from './fake-dom.test';
 
 const WIDGET_W = 400;
 const WIDGET_H = 400;
@@ -29,33 +30,18 @@ async function drive(pieceInDom: boolean): Promise<number[]> {
   const sweeps: number[] = [];
   const state = { offset: 0 };
 
-  const handle: any = {
-    boundingBox: async () => ({ ...HANDLE }),
-    scrollIntoViewIfNeeded: async () => {},
-    isVisible: async () => true,
-  };
-  const piece: any = {
-    isVisible: async () => true,
-    boundingBox: async () => ({
-      x: ELEMENT.x + PIECE_REST + state.offset - PIECE_W / 2,
-      y: 200,
-      width: PIECE_W,
-      height: PIECE_W,
-    }),
+  const handle = { matches: ['.geetest_slider_button'], box: { ...HANDLE } };
+  const piece = {
+    matches: ['.geetest_slice'],
+    get box() {
+      return { x: ELEMENT.x + PIECE_REST + state.offset - PIECE_W / 2, y: 200, width: PIECE_W, height: PIECE_W };
+    },
   };
   const element: any = {
     screenshot: async ({ path: p }: { path: string }) => writePng(p, WIDGET_W, WIDGET_H),
   };
   const page: any = { mouse: { move: async () => {}, down: async () => {}, up: async () => {} } };
-  const scope: any = {
-    $: async (sel: string) => {
-      if (sel.includes('slider') || sel.includes('btn')) return handle;
-      return pieceInDom && sel.includes('slice') ? piece : null;
-    },
-
-    $$: async (sel: string) =>
-      (pieceInDom && sel.includes('slice') ? [piece] : []),
-  };
+  const scope = fakeDom(pieceInDom ? [handle, piece] : [handle]);
 
   const solver: any = new CaptchaKrakenSolver({});
 
@@ -94,17 +80,12 @@ const OVER = { widget: 360, pieceRest: 136, pieceW: 42, startX: 42, target: 288.
 async function driveOvershoot(): Promise<{ sweeps: number[], finalCentre: number }> {
   const sweeps: number[] = [];
   const state = { offset: 0 };
-  const handle: any = {
-    boundingBox: async () => ({ x: 15, y: 297, width: 54, height: 28 }),
-    scrollIntoViewIfNeeded: async () => {},
-    isVisible: async () => true,
-  };
   const element: any = {
     screenshot: async ({ path: p }: { path: string }) =>
       writePng(p, OVER.widget, OVER.widget),
   };
   const page: any = { mouse: { move: async () => {}, down: async () => {}, up: async () => {} } };
-  const scope: any = { $: async (sel: string) => (sel.includes('slider') ? handle : null) };
+  const scope = fakeDom([{ matches: ['.geetest_slider_button'], box: { x: 15, y: 297, width: 54, height: 28 } }]);
 
   const solver: any = new CaptchaKrakenSolver({});
   solver.move = async () => {};

@@ -123,6 +123,12 @@ class Phase(StrEnum):
     POST_SUBMIT_DELAY = "post-submit-delay"
 
 
+class FrameRole(StrEnum):
+    CHECKBOX = "checkbox"
+    CHALLENGE = "challenge"
+    UNKNOWN = "unknown"
+
+
 class LabelPosition(StrEnum):
     TOP_LEFT = "top-left"
     CENTER = "center"

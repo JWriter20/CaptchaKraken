@@ -4,60 +4,47 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CaptchaKrakenSolver } from './solver';
+import { SELECTORS } from './selectors';
+import { Vendor } from './kinds';
+import { fakeDom } from './fake-dom.test';
 
-function pageShowing(nodes: Array<{ cls: string; visible: boolean }>) {
-  const matches = (sel: string, cls: string) =>
-    sel.split(',').map((s) => s.trim()).some((one) =>
-      one.split('.').filter(Boolean).every((c) => cls.split(/\s+/).includes(c)));
-  return {
-    async $$(sel: string) {
-      return nodes.filter((n) => matches(sel, n.cls))
-        .map((n) => ({ isVisible: async () => n.visible }));
-    },
-    async $() { return null; },
-  } as any;
-}
+const ACCEPTED = (SELECTORS[Vendor.GEETEST].accepted as string).split(',').map((s) => s.trim());
 
-const solver = (): any => new CaptchaKrakenSolver({});
+/** Which of the accepted selectors an element with these classes answers to. */
+const byClass = (cls: string, visible: boolean) => ({
+  matches: ACCEPTED.filter((sel) => sel.split('.').filter(Boolean).every((c) => cls.split(/\s+/).includes(c))),
+  visible,
+});
+
+const solved = (nodes: Array<{ cls: string; visible: boolean }>) =>
+  (new CaptchaKrakenSolver({}) as any).isCaptchaSolved(fakeDom(nodes.map((n) => byClass(n.cls, n.visible))));
 
 test('the accept banner inside the open panel is a solve', async () => {
-  const page = pageShowing([
-    { cls: 'geetest_result_tips geetest_success geetest_showResult', visible: true },
-  ]);
-  assert.equal(await solver().isGeetestAccepted(page), true);
+  assert.equal(await solved([{ cls: 'geetest_result_tips geetest_success geetest_showResult', visible: true }]), true);
 });
 
 test('the locked anchor after the panel closes is a solve', async () => {
-  const page = pageShowing([
-    { cls: 'geetest_captcha geetest_customTheme geetest_lock_success', visible: true },
-  ]);
-  assert.equal(await solver().isGeetestAccepted(page), true);
+  assert.equal(await solved([{ cls: 'geetest_captcha geetest_customTheme geetest_lock_success', visible: true }]), true);
 });
 
 test('a REFUSED drag is not a solve', async () => {
-  const page = pageShowing([
+  assert.equal(await solved([
     { cls: 'geetest_result_tips geetest_fail geetest_showResult', visible: true },
     { cls: 'geetest_captcha geetest_customTheme geetest_freeze_wait geetest_fail', visible: true },
-  ]);
-  assert.equal(await solver().isGeetestAccepted(page), false);
+  ]), false);
 });
 
 test('an untouched widget is not a solve', async () => {
-  const page = pageShowing([
+  assert.equal(await solved([
     { cls: 'geetest_result_tips', visible: true },
     { cls: 'geetest_captcha geetest_customTheme', visible: true },
-  ]);
-  assert.equal(await solver().isGeetestAccepted(page), false);
+  ]), false);
 });
 
 test('the closed popup wrapper does not count, class or no class', async () => {
-  const page = pageShowing([
-    { cls: 'geetest_popup_wrap geetest_popup geetest_customTheme geetest_lock_success',
-      visible: false },
-  ]);
-  assert.equal(await solver().isGeetestAccepted(page), false);
+  assert.equal(await solved([{ cls: 'geetest_popup_wrap geetest_popup geetest_customTheme geetest_lock_success', visible: false }]), false);
 });
 
 test('a page with no GeeTest on it is not a solve', async () => {
-  assert.equal(await solver().isGeetestAccepted(pageShowing([])), false);
+  assert.equal(await solved([]), false);
 });

@@ -22,15 +22,15 @@ const HTML =
   '<body style="height:3000px">' +
   '<div id="target" data-vendor="recaptcha">hello captcha</div>' +
   '<div id="hidden" style="display:none">nope</div>' +
-  '<input id="field" />' +
+  '<input id="field" value="typed" />' +
   '<iframe id="frame" srcdoc="<div id=\'inner\'>inner text</div>"></iframe>' +
   '</body>';
 
 async function exerciseSurface(page: PlaywrightPage): Promise<void> {
   assert.deepEqual(page.viewportSize(), { width: 1280, height: 720 }, 'viewportSize');
 
-  const target = await page.$('#target');
-  assert.ok(target, '$ returned nothing');
+  const target = await page.locator('#target').elementHandle();
+  assert.ok(target, 'locator().elementHandle() returned nothing');
   assert.equal(await target!.getAttribute('data-vendor'), 'recaptcha', 'getAttribute');
   assert.equal((await target!.textContent())?.trim(), 'hello captcha', 'textContent');
   assert.equal(await target!.isVisible(), true, 'isVisible (visible element)');
@@ -38,21 +38,25 @@ async function exerciseSurface(page: PlaywrightPage): Promise<void> {
   await target!.scrollIntoViewIfNeeded();
   assert.ok((await target!.screenshot()).length > 0, 'element screenshot');
 
-  const hidden = await page.$('#hidden');
+  const hidden = await page.locator('#hidden').elementHandle();
   assert.equal(await hidden!.isVisible(), false, 'isVisible (display:none)');
 
-  assert.ok((await page.$$('div')).length >= 2, '$$');
-  assert.ok(await (await page.$('body'))!.$('#target'), 'nested handle.$');
+  assert.equal(await page.locator('div').count(), 2, 'count');
+  assert.equal((await page.locator('div').all()).length, 2, 'all');
+  assert.equal((await page.locator('div').filter({ visible: true }).all()).length, 1, 'filter({visible:true})');
+  assert.equal(await page.locator('body').locator('#target').count(), 1, 'nested locator');
+  assert.equal(await page.locator('#missing').filter({ visible: true }).count(), 0, 'an absent selector counts zero, without waiting');
   assert.ok(await page.waitForSelector('#target', { state: 'visible', timeout: 5000 }), 'waitForSelector {state:visible}');
-  assert.equal(await page.$eval('#target', (el) => el.id), 'target', '$eval');
+  assert.equal(await target!.evaluate((el) => el.id), 'target', 'handle.evaluate');
+  assert.equal(await (await page.locator('#field').elementHandle())!.inputValue(), 'typed', 'inputValue reads the live value');
 
   const started = Date.now();
   await page.waitForTimeout(50);
   assert.ok(Date.now() - started >= 45, 'waitForTimeout returned early');
 
-  const frame = await (await page.$('#frame'))!.contentFrame();
+  const frame = await (await page.locator('#frame').elementHandle())!.contentFrame();
   assert.ok(frame, 'contentFrame');
-  assert.ok(await frame!.$('#inner'), 'frame.$');
+  assert.equal(await frame!.locator('#inner').count(), 1, 'frame.locator');
   assert.ok(await frame!.waitForSelector('#inner', { state: 'visible', timeout: 5000 }), 'frame.waitForSelector');
 
   await frame!.waitForFunction((sel: any) => !!document.querySelector(sel), '#inner', { timeout: 5000 });
@@ -107,9 +111,9 @@ test('the watcher solves a captcha that appears after it is installed', { skip: 
 
     let solves = 0;
     const solver = {
-      async detectCaptcha(p: any) { return await p.$('#late-captcha'); },
+      async detectCaptcha(p: any) { return (await p.locator('#late-captcha').count()) > 0 ? {} : null; },
       async solve(p: any) {
-        await p.$eval('#late-captcha', (el: any) => el.remove());
+        await p.locator('#late-captcha').evaluate((el: any) => el.remove());
         solves += 1;
         return { isSolved: true } as any;
       },
@@ -140,9 +144,9 @@ test('one watcher covers every navigation on the page', { skip: !playwright && '
     const page = await browser.newPage();
     let solves = 0;
     const solver = {
-      async detectCaptcha(p: any) { return await p.$('#c'); },
+      async detectCaptcha(p: any) { return (await p.locator('#c').count()) > 0 ? {} : null; },
       async solve(p: any) {
-        await p.$eval('#c', (el: any) => el.remove());
+        await p.locator('#c').evaluate((el: any) => el.remove());
         solves += 1;
         return { isSolved: true } as any;
       },

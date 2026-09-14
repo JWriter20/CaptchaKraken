@@ -6,6 +6,8 @@ import {
   PlaywrightPage as Page,
   PlaywrightElementHandle as ElementHandle,
   PlaywrightFrame as Frame,
+  PlaywrightLocator as Locator,
+  PlaywrightScope as Scope,
 } from './playwright-types';
 import { watchPage, CaptchaWatcher, WatchOptions } from './watcher';
 import { Humanizer, resolveHumanizer } from './humanize.js';
@@ -25,6 +27,8 @@ import { resolvePythonCommand } from './python-command';
 import { buildSolveArgs, redactCommand, solveEnv } from './cli-invocation';
 import { solveSlideGeometry, MIN_PIECE_PX, MAX_PIECE_FRACTION } from './slide-geometry';
 import { getBundledCliRoot, resolveLoraName } from './model-name';
+import { SELECTORS, VENDORS, VendorSelectors, WIDGET_PROBES, WidgetProbe, RESPONSE_SELECTORS, ACCEPTED_SELECTORS, SUBMIT_SELECTORS,
+  TEXT_INPUT_SELECTORS, TEXT_INPUT_VENDOR_SELECTORS, SLIDER_HANDLE_SELECTORS, PIECE_SELECTORS } from './selectors';
 
 const execFileAsync = promisify(execFile);
 const log = (message: string, ...args: any[]) => console.log(`[Solver] ${message}`, ...args);
@@ -100,82 +104,28 @@ interface TrackedPiece {
   piece: { centre: number, width: number } | null;
 }
 
-/** Keyed on the `hcaptcha` substring, not the apex host: challenges are served off newassets.hcaptcha.com. */
-export function vendorFromSrc(src: string | null | undefined): Vendor {
-  const s = src || '';
-  if (s.includes('hcaptcha')) return Vendor.HCAPTCHA;
-  if (s.includes('recaptcha/api2')) return Vendor.RECAPTCHA;
-  return Vendor.UNKNOWN;
+/** What detection found: the handle to photograph, the locator to search inside, and which table entry named it. */
+export interface Widget {
+  el: ElementHandle;
+  at: Locator;
+  vendor: Vendor;
+  role: FrameRole;
 }
-
-// Mirrored in page_solver.py; keep both lists in the same order. Iframe selectors go first: a class that lives
-// inside the frame document (.CheckboxCaptcha, .mtcap) never matches on the host page and stays for inline embeds only.
-const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: Vendor; selectors: string[] }> = [
-  { puzzleSource: Vendor.GEETEST, selectors: ['.geetest_box', '.geetest_panel_box', '.geetest_popup_window', '.geetest_widget'] },
-  // Both in-page and iframe shapes stay (Tencent moved in-host on 2026-08-11; see TRIBAL_KNOWLEDGE.md), and the iframe id
-  // is prefix-anchored: `[id*=tcaptcha]` also matched MTCaptcha's iframe and hid that `.mtcap` matched nothing.
-  { puzzleSource: Vendor.TENCENT, selectors: ['#tcaptcha_transform_dy', '#tCaptchaDyContent', '.tencent-captcha-dy__content', 'iframe#tcaptcha_iframe_dy', 'iframe[id^="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]'] },
-  { puzzleSource: Vendor.YIDUN, selectors: ['.yidun_panel', '.yidun'] },
-  { puzzleSource: Vendor.YANDEX, selectors: ['iframe[src*="smartcaptcha.yandexcloud.net/advanced"]', 'iframe[src*="smartcaptcha.yandexcloud.net"]', '.CheckboxCaptcha'] },
-  { puzzleSource: Vendor.LEMIN, selectors: ['#lemin-cropped-captcha', '.lemin-captcha-popup'] },
-  { puzzleSource: Vendor.PROSOPO, selectors: ['.prosopo-modalInner', '.procaptcha-checkbox'] },
-  { puzzleSource: Vendor.MTCAPTCHA, selectors: ['iframe[src*="service.mtcaptcha.com"]', 'iframe[id^="mtcaptcha-iframe"]', '.mtcaptcha', '.mtcap'] },
-  { puzzleSource: Vendor.BOTDETECT, selectors: ['.BDC_CaptchaDiv'] },
-];
 
 // A named set, not `=== UNKNOWN`: naming a new vendor would otherwise silently switch off typed-challenge
 // detection for MTCaptcha/Yandex/BotDetect and the animated probe for GeeTest/Tencent.
 const VENDORS_WITH_BESPOKE_HANDLING: ReadonlySet<Vendor> = new Set<Vendor>([Vendor.HCAPTCHA, Vendor.RECAPTCHA]);
 
-// A tripwire, not a detector: the host stays on the wire when a vendor renames its markup, which is how a
-// twelve-day Tencent outage read as "no captcha" (see TRIBAL_KNOWLEDGE.md). BotDetect is self-hosted, so absent.
-const VENDOR_URL_MARKERS: ReadonlyArray<{ puzzleSource: Vendor; hosts: string[] }> = [
-  { puzzleSource: Vendor.HCAPTCHA, hosts: ['hcaptcha.com'] },
-  { puzzleSource: Vendor.RECAPTCHA, hosts: ['google.com/recaptcha', 'recaptcha.net'] },
-  { puzzleSource: Vendor.TURNSTILE, hosts: ['challenges.cloudflare.com'] },
-  { puzzleSource: Vendor.GEETEST, hosts: ['geetest.com'] },
-  { puzzleSource: Vendor.TENCENT, hosts: ['captcha.gtimg.com', 'captcha.qcloud.com'] },
-  { puzzleSource: Vendor.YIDUN, hosts: ['dun.163.com', 'cstaticdun.126.net', 'necaptcha.nosdn.127.net'] },
-  { puzzleSource: Vendor.YANDEX, hosts: ['smartcaptcha.yandexcloud.net'] },
-  { puzzleSource: Vendor.LEMIN, hosts: ['leminnow.com'] },
-  { puzzleSource: Vendor.PROSOPO, hosts: ['prosopo.io'] },
-  { puzzleSource: Vendor.MTCAPTCHA, hosts: ['mtcaptcha.com'] },
-];
+// Long enough to resolve a locator `all()` just returned, short enough that a widget gone in between reads as stale, not hung.
+const HANDLE_TIMEOUT_MS = 1000;
 
-// Vendor-named first, generic last: the driver takes the first visible match, and a generic selector
-// reached before the vendor's own is how a captcha's answer ends up in a login form's username box.
-const TEXT_INPUT_VENDOR_SELECTORS: ReadonlyArray<string> = [
-  'input[id*=captchaCode]', 'input#captchaCode', 'input[id*=validateCaptcha]', '.BDC_CaptchaDiv input[type=text]',
-  'input.mtcap-inputtext', '.mtcap input[type=text]',
-  '.AdvancedCaptcha-Input input', 'input.Textinput-Control', 'input[name="rep"]',
-];
-const TEXT_INPUT_GENERIC_SELECTORS: ReadonlyArray<string> = [
-  'input[name*="captcha" i]', 'input[id*="captcha" i]', 'input[aria-label*="captcha" i]',
-  'input[placeholder*="code" i]', 'input[autocomplete="off"][type=text]',
-  'input[type=text]', 'input:not([type])', 'input[type=tel]', 'textarea',
-];
-const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [...TEXT_INPUT_VENDOR_SELECTORS, ...TEXT_INPUT_GENERIC_SELECTORS];
-
-// The drag must start on the handle; the piece is inert decoration and a drag from it moves nothing. Tencent's
-// redesigned knob is a bare div, so it is named. `[draggable=true]` is absent: HTML5 DnD fires dragstart, not pointermove.
-const SLIDER_HANDLE_SELECTORS: ReadonlyArray<string> = [
-  '.geetest_slider_button', '.geetest_btn', '.geetest_slider .geetest_arrow',
-  '.tencent-captcha-dy__slider-block', '#tcaptcha_drag_thumb', '.tc-slider-normal', '[id*=slideBlock]',
-  '.yidun_slider', '.yidun_jigsaw',
-  '.lemin-slider-handle', '#lemin-cropped-captcha .slider',
-  '[role="slider"]', '[aria-valuenow]',
-  '[class*="slider"][class*="btn"]', '[class*="slider"][class*="button"]',
-  '[class*="slide"][class*="handle"]', '[class*="drag"][class*="thumb"]',
-];
-// Fallback for Lemin's trackless "cropped" puzzle, where the piece itself is dragged.
-const DRAGGABLE_PIECE_SELECTORS: ReadonlyArray<string> = [
-  '.lemin-cropped-puzzle-piece', '#lemin-cropped-captcha canvas + canvas',
-  '[class*="puzzle"][class*="piece"]', '[class*="jigsaw"]',
-];
-const SLIDE_PIECE_MEASURE_SELECTORS: ReadonlyArray<string> = [
-  '.geetest_slice', '.tencent-captcha-dy__fg-item', '.yidun_jigsaw', '.lemin-cropped-puzzle-piece',
-  '[class*="puzzle"][class*="piece"]', '[class*="jigsaw"]',
-];
+/** Every visible match of `selectors`, in selector order, queried at once. A selector this adapter can't parse is skipped, not fatal. */
+const visible = async (scope: Scope, selectors: readonly string[]): Promise<Locator[]> =>
+  (await Promise.all(selectors.map((s) => scope.locator(s).filter({ visible: true }).all().catch(() => [])))).flat();
+const handleOf = (at: Locator): Promise<ElementHandle | null> => at.elementHandle({ timeout: HANDLE_TIMEOUT_MS }).catch(() => null);
+const handles = async (ats: Locator[]): Promise<ElementHandle[]> => (await Promise.all(ats.map(handleOf))).filter((h): h is ElementHandle => h !== null);
+const frameOf = async (at: Locator): Promise<Frame | null> => (await (await handleOf(at))?.contentFrame().catch(() => null)) ?? null;
+const hasText = async (el: ElementHandle): Promise<boolean> => !!((await el.textContent().catch(() => null)) ?? '').trim();
 
 const SLIDE_TOLERANCE_PX = 2;
 const SLIDE_MAX_CORRECTIONS = 3;
@@ -209,13 +159,6 @@ export const SOLVE_DEFAULTS = {
 export function burstHangDeadlineMs(cfg: { videoBurstMaxMs?: number }): number {
   return 3 * (cfg.videoBurstMaxMs ?? 12_000) + 5_000;
 }
-
-const GEETEST_ACCEPTED = '.geetest_result_tips.geetest_success, .geetest_captcha.geetest_success, .geetest_captcha.geetest_lock_success';
-const RECAPTCHA_BANNERS: ReadonlyArray<readonly [string, RecaptchaBanner]> = [
-  ['.rc-imageselect-error-select-more', RecaptchaBanner.SELECT_MORE],
-  ['.rc-imageselect-error-dynamic-more', RecaptchaBanner.DYNAMIC_MORE],
-  ['.rc-imageselect-incorrect-response', RecaptchaBanner.REJECTED],
-];
 
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
@@ -342,8 +285,8 @@ export class CaptchaKrakenSolver {
         return done();
       }
 
-      const captchaElement = await this.ph(Phase.DETECT, () => this.detectCaptcha(page));
-      if (!captchaElement) {
+      const widget = await this.ph(Phase.DETECT, () => this.detectCaptcha(page));
+      if (!widget) {
         if (hasInteracted) {
           console.log('No supported captcha found (post-interaction); considering solved.');
           return done();
@@ -364,15 +307,15 @@ export class CaptchaKrakenSolver {
       let didInteract: boolean;
       let tokenUsage: TokenUsage[];
       try {
-        ({ didInteract, tokenUsage } = await this.solveSingle(page, captchaElement, attempt, retryModeThisLoop));
+        ({ didInteract, tokenUsage } = await this.solveSingle(page, widget, attempt, retryModeThisLoop));
       } catch (e: any) {
         if (e?.animated) throw new Error(`Animated challenge could not be solved: ${e.message ?? 'recording failed'}`);
         if (e?.unsupported) {
           // Mid-solve, a transitional blank frame reads as unsupported; settle and retry.
           if (hasInteracted && unsupportedRetries < (cfg.maxUnsupportedReSolves ?? 3)) {
             unsupportedRetries++;
-            const el = await this.detectCaptcha(page);
-            if (el && await this.ph(Phase.SETTLE, () => this.waitForElementSettled(el)) === SettleVerdict.ANIMATED && cfg.videoSolveEnabled === false) {
+            const again = await this.detectCaptcha(page);
+            if (again && await this.ph(Phase.SETTLE, () => this.waitForElementSettled(again.el)) === SettleVerdict.ANIMATED && cfg.videoSolveEnabled === false) {
               throw new Error('Animated/video challenge detected — the puzzle never settles and videoSolveEnabled is off.');
             }
             console.log(`"unsupported" mid-solve; settled and retrying (${unsupportedRetries}/${cfg.maxUnsupportedReSolves ?? 3}).`);
@@ -421,7 +364,7 @@ export class CaptchaKrakenSolver {
         return done();
       }
 
-      if (this.bannerIsFatalAfterRetry(await this.recaptchaBannerKind(page))) {
+      if (this.bannerIsFatalAfterRetry(await this.bannerKind(page))) {
         if (alreadyRetriedRecaptchaError) {
           throw new Error(`reCAPTCHA still showing the under-selection error after retry; aborting (model unable to identify the missed tile). Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
         }
@@ -460,43 +403,41 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: RetryMode | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
+  private async solveSingle(page: Page, widget: Widget, attempt: number, retryMode: RetryMode | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
     const cfg = this.config;
-    const src = await captchaElement.getAttribute('src').catch(() => null);
-    const puzzleSource = vendorFromSrc(src);
-    const frameRole: FrameRole =
-      !src ? FrameRole.UNKNOWN
-        : src.includes('recaptcha/api2/bframe') || src.includes('frame=challenge') ? FrameRole.CHALLENGE
-          : src.includes('recaptcha/api2/anchor') || src.includes('frame=checkbox') ? FrameRole.CHECKBOX : FrameRole.UNKNOWN;
-    const scope: Frame | ElementHandle = (await captchaElement.contentFrame()) ?? captchaElement;
+    const { el: captchaElement, vendor: puzzleSource, role: frameRole } = widget;
+    const frame = await captchaElement.contentFrame();
+    const scope: Scope = frame ?? widget.at;
 
     // Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
-    const textMode = !VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && (await this.answerBox(scope, captchaElement)) !== null;
+    const textMode = !VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && (await this.answerBox(scope, widget.at)) !== null;
     if (textMode) console.log('Widget has a text box; solving as a distorted-text captcha.');
 
-    let isAnimated = false;
-    if (puzzleSource === Vendor.HCAPTCHA && src && src.includes('frame=challenge')) {
+    if (frame && frameRole === FrameRole.CHALLENGE && SELECTORS[puzzleSource].images) {
       if (this.lastSubmitFrameHash) {
         await this.ph(Phase.AWAIT_NEXT_ROUND, () => this.waitForChangeSince(captchaElement, this.lastSubmitFrameHash as string));
         this.lastSubmitFrameHash = null;
       }
-      await this.ph(Phase.HCAPTCHA_IMAGES, () => this.waitForHcaptchaChallengeImages(captchaElement));
-      if (cfg.videoSolveEnabled === false) {
-        if (await this.ph(Phase.SETTLE, () => this.waitForElementSettled(captchaElement)) === SettleVerdict.ANIMATED) {
-          const e: any = new Error('ANIMATED_CHALLENGE: the challenge never settles and videoSolveEnabled is off.');
-          e.animated = true;
-          throw e;
-        }
-      } else if (!textMode) {
-        isAnimated = await this.classifyByRecording(captchaElement) === SettleVerdict.ANIMATED;
+      await this.ph(Phase.HCAPTCHA_IMAGES, () => this.waitForBoardImages(frame, SELECTORS[puzzleSource]));
+    }
+
+    // A checkbox is clicked, not filmed, and a reCAPTCHA board is read by its grid below.
+    const filmable = frameRole !== FrameRole.CHECKBOX && puzzleSource !== Vendor.RECAPTCHA && !textMode;
+    let isAnimated = false;
+    if (filmable && cfg.videoSolveEnabled === false) {
+      if (await this.ph(Phase.SETTLE, () => this.waitForElementSettled(captchaElement)) === SettleVerdict.ANIMATED) {
+        const e: any = new Error('ANIMATED_CHALLENGE: the challenge never settles and videoSolveEnabled is off.');
+        e.animated = true;
+        throw e;
       }
-      if (await this.isCaptchaSolved(page)) {
-        console.log('[captchakraken] solved while waiting for the next round; skipping inference.');
-        await this.releasePendingBurst();
-        return { didInteract: false, tokenUsage: [] };
-      }
-    } else if (!VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && cfg.videoSolveEnabled !== false && !textMode) {
+    } else if (filmable) {
       isAnimated = await this.classifyByRecording(captchaElement) === SettleVerdict.ANIMATED;
+    }
+    // hCaptcha keeps its challenge iframe visible ~2s after the final submit; read as a fresh puzzle it burned ~18s.
+    if (frameRole === FrameRole.CHALLENGE && await this.isCaptchaSolved(page)) {
+      console.log('[captchakraken] solved while waiting for the next round; skipping inference.');
+      await this.releasePendingBurst();
+      return { didInteract: false, tokenUsage: [] };
     }
 
     if (!isAnimated && this.shouldRetryAsAnimated(puzzleSource)) {
@@ -505,8 +446,8 @@ export class CaptchaKrakenSolver {
     }
 
     let establishedGridSize: number | null = null;
-    // bframe only: on the anchor this wasted an 8s grid-load timeout plus a find-grid subprocess.
-    if (puzzleSource === Vendor.RECAPTCHA && !!src && src.includes('recaptcha/api2/bframe')) {
+    // The challenge frame only: on the anchor this wasted an 8s grid-load timeout plus a find-grid subprocess.
+    if (puzzleSource === Vendor.RECAPTCHA && frameRole === FrameRole.CHALLENGE) {
       await this.ph(Phase.GRID_LOAD, () => this.waitForGridCellsLoaded(captchaElement));
       const grid = await this.getGridBoxes(captchaElement);
       if (grid && grid.size === 3) {
@@ -608,7 +549,6 @@ export class CaptchaKrakenSolver {
       console.log('[answer] ' + JSON.stringify({ actions: actionList }));
       this.noteAnswer(actionList, retryMode);
       console.log(`Executing ${actionList.length} actions.`);
-      const frame = await captchaElement.contentFrame();
 
       for (const action of actionList) {
         if (action.action === ActionKind.CLICK) {
@@ -642,7 +582,7 @@ export class CaptchaKrakenSolver {
           performedAction = answered = true;
           await this.emitStep(captchaElement, SolveStage.DRAG, 'drag', puzzleSource, frameRole, attempt, { action });
         } else if (action.action === ActionKind.TYPE) {
-          if (await this.executeType(page, scope, action as TypeAction, captchaElement)) {
+          if (await this.executeType(page, scope, action as TypeAction, widget.at)) {
             performedAction = answered = true;
             await this.emitStep(captchaElement, SolveStage.TYPE, 'typed the code', puzzleSource, frameRole, attempt, { action });
           }
@@ -655,8 +595,7 @@ export class CaptchaKrakenSolver {
 
       // A slide submits itself on release, and any Verify found afterwards belongs to the host page and would
       // submit the guarded form mid-verdict. An empty or `done` plan still presses Verify/Skip.
-      const lookup = frame ?? (slid ? null : scope);
-      const verifyButton = lookup ? await this.getVerifyButton(lookup) : null;
+      const verifyButton = frame || !slid ? await this.getVerifyButton(scope) : null;
       if (!slid && (answered || !performedAction) && verifyButton) {
         console.log(`Clicking Verify to submit (${puzzleSource}).`);
         await this.moveAndClick(page, verifyButton);
@@ -673,143 +612,94 @@ export class CaptchaKrakenSolver {
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
   }
 
-  private async getVerifyButton(frame: Frame | ElementHandle): Promise<ElementHandle | null> {
-    // `.//` keeps the xpath relative so a host-page widget cannot reach the form's own submit.
-    const lower = "translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
-    for (const text of ['verify', 'next', 'submit', 'skip']) {
-      try {
-        const btn = await frame.$(`xpath=.//button[contains(${lower}, '${text}')] | .//div[@role="button" and contains(${lower}, '${text}')]`);
-        if (btn && await btn.isVisible()) return btn;
-      } catch { /* a selector this adapter can't parse must not end the search */ }
-    }
-    for (const selector of ['#recaptcha-verify-button', '.button-submit', '.geetest_submit']) {
-      const btn = await frame.$(selector);
-      if (btn && await btn.isVisible()) return btn;
-    }
-    return null;
+  private getVerifyButton(scope: Scope): Promise<ElementHandle | null> {
+    return this.findControl(scope, SUBMIT_SELECTORS);
   }
 
-  private async hasNonEmptyFieldValue(page: Page, selector: string): Promise<boolean> {
-    try {
-      if (!(await page.$(selector))) return false;
-      const value = await page.$eval(selector, node => (typeof (node as any).value === 'string' ? (node as any).value : ''));
-      return typeof value === 'string' && value.trim().length > 0;
-    } catch {
-      return false;
-    }
+  /** Any element at `selector` carrying a non-blank value; response fields are hidden, so no visibility filter. */
+  private async hasValue(page: Page, selector: string): Promise<boolean> {
+    const fields = await handles(await page.locator(selector).all().catch(() => []));
+    return (await Promise.all(fields.map((f) => f.inputValue().catch(() => '')))).some((v) => v.trim().length > 0);
+  }
+
+  /** A visible match carrying text; an empty banner or prompt is a placeholder, not a signal. */
+  private async visibleWithText(scope: Scope, selector: string): Promise<boolean> {
+    return (await Promise.all((await handles(await visible(scope, [selector]))).map(hasText))).some(Boolean);
+  }
+
+  private async checkedIn(checkbox: Locator, checked: string): Promise<boolean> {
+    const frame = await frameOf(checkbox);
+    return !!frame && (await visible(frame, [checked])).length > 0;
   }
 
   private bannerIsFatalAfterRetry(kind: RecaptchaBanner | null): boolean {
     return kind === RecaptchaBanner.SELECT_MORE || kind === RecaptchaBanner.REJECTED;
   }
 
-  /** Which reCAPTCHA banner shows; `dynamic-more` is the dynamic board's normal flow, not an error. */
-  private async recaptchaBannerKind(page: Page): Promise<RecaptchaBanner | null> {
-    try {
-      const bframe = await page.$('iframe[src*="recaptcha/api2/bframe"]');
-      const frame = bframe && await bframe.contentFrame();
+  /** Which verdict banner the open challenge shows; `dynamic-more` is the dynamic board's normal flow, not an error. */
+  private async bannerKind(page: Page): Promise<RecaptchaBanner | null> {
+    const probes = WIDGET_PROBES.filter((p) => p.role === FrameRole.CHALLENGE && SELECTORS[p.vendor].banners);
+    const kinds = await Promise.all(probes.map(async (p) => {
+      const [at] = await visible(page, [p.selector]);
+      const frame = at && await frameOf(at);
       if (!frame) return null;
-      for (const [sel, kind] of RECAPTCHA_BANNERS) {
-        const el = await frame.$(sel);
-        if (el && await el.isVisible().catch(() => false) && ((await el.textContent().catch(() => null)) ?? '').trim()) return kind;
-      }
-    } catch { /* unreadable is not a banner */ }
-    return null;
+      const shown = await Promise.all((SELECTORS[p.vendor].banners ?? []).map(async ([sel, kind]) => (await this.visibleWithText(frame, sel)) ? kind : null));
+      return shown.find((k) => k !== null) ?? null;
+    }));
+    return kinds.find((k) => k !== null) ?? null;
   }
 
-  private async anchorChecked(anchorIframe: ElementHandle, selector: string): Promise<boolean> {
+  /** The vendor's own done signal: a response token, a painted success state, or a checked box. */
+  private async isCaptchaSolved(page: Page): Promise<boolean> {
     try {
-      const frame = await anchorIframe.contentFrame();
-      const el = frame && await frame.$(selector);
-      return !!(el && await el.isVisible());
+      const checkboxes = WIDGET_PROBES.filter((p) => p.role === FrameRole.CHECKBOX && SELECTORS[p.vendor].checked);
+      const signals = await Promise.all([
+        ...RESPONSE_SELECTORS.map((s) => this.hasValue(page, s)),
+        visible(page, ACCEPTED_SELECTORS).then((found) => found.length > 0),
+        ...checkboxes.map(async (p) => {
+          const [at] = await visible(page, [p.selector]);
+          return !!at && this.checkedIn(at, SELECTORS[p.vendor].checked as string);
+        }),
+      ]);
+      return signals.some(Boolean);
     } catch {
       return false;
     }
   }
 
-  private isRecaptchaAnchorChecked(anchorIframe: ElementHandle): Promise<boolean> {
-    return this.anchorChecked(anchorIframe, '.recaptcha-checkbox-checked');
-  }
-
-  private isHcaptchaAnchorChecked(anchorIframe: ElementHandle): Promise<boolean> {
-    return this.anchorChecked(anchorIframe, '#checkbox[aria-checked="true"]');
-  }
-
-  /** GeeTest paints its verdict inside the still-open panel; a bare class match would hit the closed wrapper too. */
-  private async isGeetestAccepted(page: Page): Promise<boolean> {
-    try {
-      for (const el of await page.$$(GEETEST_ACCEPTED)) {
-        if (await el.isVisible().catch(() => false)) return true;
-      }
-    } catch { /* a signal we could not read is not a failed solve */ }
-    return false;
-  }
-
-  /**
-   * The vendor's own done signal: a response token, GeeTest's banner, or a checked anchor. The token is read first and
-   * unconditionally: it is on the page when hCaptcha's overlay hides the anchor. The anchor's aria-checked stays
-   * because demo pages do not always populate the token.
-   */
-  private async isCaptchaSolved(page: Page): Promise<boolean> {
-    try {
-      for (const name of ['h-captcha-response', 'g-recaptcha-response', 'cf-turnstile-response']) {
-        if (await this.hasNonEmptyFieldValue(page, `[name="${name}"]`)) return true;
-      }
-      if (await this.isGeetestAccepted(page)) return true;
-      const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
-      if (hc && await hc.isVisible().catch(() => false) && await this.isHcaptchaAnchorChecked(hc)) return true;
-      const rc = await page.$('iframe[src*="recaptcha/api2/anchor"]');
-      if (rc && await rc.isVisible().catch(() => false) && await this.isRecaptchaAnchorChecked(rc)) return true;
-    } catch { /* fall through */ }
-    return false;
-  }
-
   /** A next round has painted, as opposed to the answered frame animating closed. */
   private async isChallengeFreshlyRendered(page: Page): Promise<boolean> {
     try {
-      const hc = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
-      if (hc && await hc.isVisible().catch(() => false)) {
-        if (this.lastSubmitFrameHash && (await this.elementFrameHash(hc).catch(() => null)) === this.lastSubmitFrameHash) return false;
-        const frame = await hc.contentFrame();
-        const prompt = frame && await frame.$('.prompt-text');
-        if (prompt && await prompt.isVisible().catch(() => false) && ((await prompt.textContent().catch(() => '')) ?? '').trim()) return true;
-      }
-      const rc = await page.$('iframe[src*="recaptcha/api2/bframe"]');
-      if (rc && await rc.isVisible().catch(() => false)) {
-        if (this.lastSubmitFrameHash && (await this.elementFrameHash(rc).catch(() => null)) === this.lastSubmitFrameHash) return false;
-        const frame = await rc.contentFrame();
-        const instr = frame && await frame.$('.rc-imageselect-instructions, #rc-imageselect');
-        if (instr && await instr.isVisible().catch(() => false)) return true;
-      }
-    } catch { /* fall through */ }
-    return false;
+      const probes = WIDGET_PROBES.filter((p) => p.role === FrameRole.CHALLENGE && SELECTORS[p.vendor].fresh);
+      const fresh = await Promise.all(probes.map(async (p) => {
+        const [at] = await visible(page, [p.selector]);
+        const el = at && await handleOf(at);
+        if (!el || (this.lastSubmitFrameHash && (await this.elementFrameHash(el)) === this.lastSubmitFrameHash)) return false;
+        const frame = await el.contentFrame();
+        return !!frame && this.visibleWithText(frame, SELECTORS[p.vendor].fresh as string);
+      }));
+      return fresh.some(Boolean);
+    } catch {
+      return false;
+    }
   }
 
   /**
-   * Best-effort: hold until hCaptcha's tiles, canvas or example image have painted. Nothing to wait for is ready, and
-   * so is no prompt: waiting on `.prompt-text` as a selector rejects when absent and paid the whole timeout per board.
+   * Best-effort: hold until the board's pictures have painted. Nothing to wait for is ready, and so is no prompt: waiting
+   * on the prompt as a selector rejects when absent and paid the whole timeout per board.
    */
-  private async waitForHcaptchaChallengeImages(challengeIframe: ElementHandle): Promise<void> {
+  private async waitForBoardImages(frame: Frame, s: VendorSelectors): Promise<void> {
     try {
-      const frame = await challengeIframe.contentFrame();
-      if (!frame) return;
-      await frame.waitForFunction(() => {
+      await frame.waitForFunction(({ prompt, images }: { prompt: string; images: string }) => {
         const vis = (el: Element | null) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
-        const prompt = document.querySelector('.prompt-text');
-        if (prompt && !vis(prompt)) return false;
-        const tiles = Array.from(document.querySelectorAll('.task-image .image, .task .image')) as HTMLElement[];
-        if (tiles.length > 0) {
-          return tiles.every((el) => {
-            const bg = getComputedStyle(el).backgroundImage;
-            return bg && bg !== 'none' && !/url\(["']?["']?\)/.test(bg);
-          });
-        }
-        const canvas = document.querySelector('canvas');
-        if (canvas instanceof HTMLCanvasElement && canvas.width > 0 && canvas.height > 0) return true;
-        const example = document.querySelector('.challenge-example img, .image-wrapper img') as HTMLImageElement | null;
-        if (example) return example.complete && example.naturalWidth > 0;
-        return true;
-      }, { timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000 });
+        const p = prompt && document.querySelector(prompt);
+        if (p && !vis(p)) return false;
+        return Array.from(document.querySelectorAll(images)).every((el) => {
+          if (el instanceof HTMLImageElement) return el.complete && el.naturalWidth > 0;
+          const bg = getComputedStyle(el).backgroundImage;
+          return !!bg && bg !== 'none' && !/url\(["']?["']?\)/.test(bg);
+        });
+      }, { prompt: s.fresh ?? '', images: (s.images ?? []).join(',') }, { timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000 });
     } catch { /* timed out or detached mid-load; screenshot anyway */ }
   }
 
@@ -817,20 +707,20 @@ export class CaptchaKrakenSolver {
   public async vendorsOnTheWire(page: Page): Promise<Vendor[]> {
     let names: string[] = [];
     try {
-      // $eval rather than evaluate, so PlaywrightPage need not widen for every adapter.
-      names = await page.$eval('html', () => {
+      const html = await handleOf(page.locator('html'));
+      names = html ? await html.evaluate(() => {
         const out: string[] = [];
         try { for (const e of performance.getEntriesByType('resource')) out.push(e.name); } catch (err) { /* buffer unavailable */ }
         for (const el of Array.from(document.querySelectorAll('script[src],iframe[src],link[href],img[src]'))) {
           out.push(el.getAttribute('src') || el.getAttribute('href') || '');
         }
         return out;
-      });
+      }) : [];
     } catch {
       return [];
     }
-    const blob = (names ?? []).join(' ');
-    return VENDOR_URL_MARKERS.filter(({ hosts }) => hosts.some((h) => blob.includes(h))).map(({ puzzleSource }) => puzzleSource);
+    const blob = names.join(' ');
+    return VENDORS.filter(([, s]) => s.hosts.some((h) => blob.includes(h))).map(([vendor]) => vendor);
   }
 
   private async noWidgetMessage(page: Page): Promise<string> {
@@ -839,50 +729,34 @@ export class CaptchaKrakenSolver {
     if (!loaded.length) {
       return `${base} (no vendor captcha code loaded on this page — likely reCAPTCHA v3 / invisible, or a click-triggered challenge that has not been triggered). Failing fast.`;
     }
-    return `${base}, BUT ${loaded.join('/')} code IS loaded and running on this page. The vendor's markup no longer matches anything in VENDOR_WIDGET_LOCATORS — the selector list needs re-measuring against the vendor's current markup, in both solver ports.`;
+    return `${base}, BUT ${loaded.join('/')} code IS loaded and running on this page. The vendor's markup no longer matches anything in SELECTORS — the table needs re-measuring against the vendor's current markup, in both solver ports.`;
   }
 
   /**
-   * Is a widget in the DOM at all, rendered or not? Invisible reCAPTCHA is excluded. The inline vendors count:
-   * without them this port failed fast in under a second on every GeeTest/Yidun page and disagreed with Python in Tier 3.
+   * Is a widget in the DOM at all, rendered or not? Invisible reCAPTCHA is excluded by its selector. The inline vendors
+   * count: without them this port failed fast in under a second on every GeeTest/Yidun page and disagreed with Python in Tier 3.
    */
   public async hasInteractiveWidgetInDom(page: Page): Promise<boolean> {
-    for (const a of await page.$$('iframe[src*="recaptcha/api2/anchor"]')) {
-      if (!/[?&]size=invisible/.test((await a.getAttribute('src')) ?? '')) return true;
-    }
-    for (const sel of ['iframe[src*="recaptcha/api2/bframe"]', 'iframe[src*="hcaptcha"][src*="frame=checkbox"]', 'iframe[src*="hcaptcha"][src*="frame=challenge"]']) {
-      if (await page.$(sel)) return true;
-    }
-    for (const { selectors } of VENDOR_WIDGET_LOCATORS) {
-      for (const selector of selectors) {
-        if (await page.$(selector)) return true;
-      }
-    }
-    return false;
+    return (await Promise.all(WIDGET_PROBES.map((p) => page.locator(p.selector).count().catch(() => 0)))).some((n) => n > 0);
   }
 
-  /** Open challenges first, then unsolved checkboxes, then the inline vendors. */
-  public async detectCaptcha(page: Page): Promise<ElementHandle | null> {
-    const visible = async (el: ElementHandle | null) => !!el && await el.isVisible();
-    let el = await page.$('iframe[src*="recaptcha/api2/bframe"]');
-    if (await visible(el)) return el;
-    el = await page.$('iframe[src*="hcaptcha"][src*="frame=challenge"]');
-    if (await visible(el)) return el;
-    el = await page.$('iframe[src*="recaptcha/api2/anchor"]');
-    if (await visible(el) && !(await this.isRecaptchaAnchorChecked(el!))) return el;
-    el = await page.$('iframe[src*="hcaptcha"][src*="frame=checkbox"]');
-    if (await visible(el) && !(await this.hasNonEmptyFieldValue(page, '[name="h-captcha-response"]')) && !(await this.isHcaptchaAnchorChecked(el!))) return el;
-    for (const sel of ['iframe[src*="challenges.cloudflare.com"]', '.cf-turnstile']) {
-      el = await page.$(sel);
-      if (await visible(el) && !(await this.hasNonEmptyFieldValue(page, '[name="cf-turnstile-response"]'))) return el;
-    }
-    for (const { selectors } of VENDOR_WIDGET_LOCATORS) {
-      for (const selector of selectors) {
-        el = await page.$(selector);
-        if (await visible(el)) return el;
-      }
-    }
-    return null;
+  /** Open challenges first, then unsolved checkboxes, then the inline vendors; every probe is queried at once. */
+  public async detectCaptcha(page: Page): Promise<Widget | null> {
+    const found = await Promise.all(WIDGET_PROBES.map(async (p) => {
+      const [at] = await visible(page, [p.selector]);
+      return at && !(await this.alreadyAccepted(page, at, p)) ? { ...p, at } : null;
+    }));
+    const hit = found.find((h) => h !== null);
+    const el = hit && await handleOf(hit.at);
+    return hit && el ? { el, at: hit.at, vendor: hit.vendor, role: hit.role } : null;
+  }
+
+  /** A checkbox the vendor has already accepted is not a captcha to solve. */
+  private async alreadyAccepted(page: Page, at: Locator, { role, vendor }: WidgetProbe): Promise<boolean> {
+    const { response, checked } = SELECTORS[vendor];
+    if (role !== FrameRole.CHECKBOX) return false;
+    const [token, box] = await Promise.all([!!response && this.hasValue(page, response), !!checked && this.checkedIn(at, checked)]);
+    return token || box;
   }
 
   private loraName(cliRoot: string): string {
@@ -1272,6 +1146,7 @@ export class CaptchaKrakenSolver {
     const ceilingMs = Math.max(floorMs, cfg.videoBurstMaxMs ?? 12_000);
     const intervalMs = 1000 / fps;
     const t0 = Date.now();
+    let nextAt = t0;
     const elapsed = () => Date.now() - t0;
     const hangDeadline = Date.now() + burstHangDeadlineMs(cfg);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_burst_'));
@@ -1291,7 +1166,6 @@ export class CaptchaKrakenSolver {
           console.warn(`[animated] the recording stalled: ${captured} frames in ${burstHangDeadlineMs(cfg)}ms — the widget is not screenshotting`);
           break;
         }
-        const started = Date.now();
         const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`); // zero-padded: the slicer sorts by name
         try {
           await this.shot(captchaElement, frame, cfg.elementScreenshotTimeoutMs ?? 8000, 'allow');
@@ -1316,8 +1190,11 @@ export class CaptchaKrakenSolver {
           console.log(`[animated] cycle closed after ${(elapsedMs / 1000).toFixed(1)}s (${order.length} screens); stopping the burst`);
           break;
         }
-        const wait = intervalMs - (Date.now() - started);
-        if (wait > 0 && elapsedMs + wait < ceilingMs) await delay(wait);
+        // Sleep to a fixed grid, not `interval - work`: per-frame overshoot would otherwise accumulate and a
+        // loaded runner films fewer frames than the floor window holds. A stalled frame skips, not bunches.
+        nextAt = Math.max(nextAt + intervalMs, Date.now());
+        const wait = nextAt - Date.now();
+        if (wait > 0 && nextAt - t0 < ceilingMs) await delay(wait);
       }
     })();
     let ended = false;
@@ -1866,29 +1743,14 @@ export class CaptchaKrakenSolver {
    * The slider piece's box: the first visible match small enough to be a piece. Runs during detection, so it must
    * not set `actedOnBoard`: marking there disabled `shouldSpeculate` on every slide solve.
    */
-  private async measurePieceBox(scope: Frame | ElementHandle, widgetWidth: number): Promise<Box | null> {
-    for (const selector of SLIDE_PIECE_MEASURE_SELECTORS) {
-      let found: ElementHandle[] = [];
-      try { found = await scope.$$(selector); } catch { continue; }
-      for (const candidate of found) {
-        try {
-          if (!(await candidate.isVisible())) continue;
-          const b = await candidate.boundingBox();
-          if (b && b.width >= MIN_PIECE_PX && b.width <= widgetWidth * MAX_PIECE_FRACTION) return b;
-        } catch { /* a candidate that vanished mid-read is not the piece */ }
-      }
-    }
-    return null;
+  private async measurePieceBox(scope: Scope, widgetWidth: number): Promise<Box | null> {
+    const boxes = await Promise.all((await handles(await visible(scope, PIECE_SELECTORS))).map((h) => h.boundingBox().catch(() => null)));
+    return boxes.find((b): b is Box => !!b && b.width >= MIN_PIECE_PX && b.width <= widgetWidth * MAX_PIECE_FRACTION) ?? null;
   }
 
-  private async findControl(scope: Frame | ElementHandle, selectors: ReadonlyArray<string>): Promise<ElementHandle | null> {
-    for (const selector of selectors) {
-      try {
-        const el = await scope.$(selector);
-        if (el && await el.isVisible()) return el;
-      } catch { /* a selector this adapter can't parse must not end the search */ }
-    }
-    return null;
+  private async findControl(scope: Scope, selectors: readonly string[]): Promise<ElementHandle | null> {
+    const [first] = await visible(scope, selectors);
+    return first ? handleOf(first) : null;
   }
 
   /**
@@ -1896,22 +1758,17 @@ export class CaptchaKrakenSolver {
    * tail outside the widget is how a captcha's answer lands in a login form's username box. The widening exists for
    * BotDetect, whose 280x50 `.BDC_CaptchaDiv` holds only the image while `#captchaCode` sits in a sibling div.
    */
-  private async answerBox(scope: Frame | ElementHandle, element?: ElementHandle | null): Promise<ElementHandle | null> {
+  private async answerBox(scope: Scope, at?: Locator | null): Promise<ElementHandle | null> {
     const inside = await this.findControl(scope, TEXT_INPUT_SELECTORS);
-    if (inside !== null || !element) return inside;
-    for (const axis of ['ancestor::fieldset[1]', 'ancestor::form[1]']) {
-      let host: ElementHandle | null = null;
-      try { host = await element.$(`xpath=${axis}`); } catch { continue; }
-      const found = host && await this.findControl(host, TEXT_INPUT_VENDOR_SELECTORS);
-      if (found) return found;
-    }
-    return null;
+    if (inside !== null || !at) return inside;
+    const around = await Promise.all(['ancestor::fieldset[1]', 'ancestor::form[1]'].map((axis) => this.findControl(at.locator(`xpath=${axis}`), TEXT_INPUT_VENDOR_SELECTORS)));
+    return around.find((h) => h !== null) ?? null;
   }
 
-  private async executeType(page: Page, scope: Frame | ElementHandle, action: TypeAction, element?: ElementHandle | null): Promise<boolean> {
+  private async executeType(page: Page, scope: Scope, action: TypeAction, at?: Locator | null): Promise<boolean> {
     this.actedOnBoard = true;
     const text = action.text ?? '';
-    const field = text ? await this.answerBox(scope, element) : null;
+    const field = text ? await this.answerBox(scope, at) : null;
     if (!field) {
       console.warn('Type action, but no text box in the widget; skipping.');
       return false;
@@ -1940,14 +1797,14 @@ export class CaptchaKrakenSolver {
   }
 
   /** Aim the handle at the slot once, then look and correct until the piece is home. Release is the submit. */
-  private async executeSlide(page: Page, element: ElementHandle, scope: Frame | ElementHandle, action: DragAction, elementBox: Box): Promise<boolean> {
+  private async executeSlide(page: Page, element: ElementHandle, scope: Scope, action: DragAction, elementBox: Box): Promise<boolean> {
     this.actedOnBoard = true;
     const tb = action.target_bounding_box;
     const targetX = ((tb[0] + tb[2]) / 2) * elementBox.width;
 
     const handle = await this.findControl(scope, SLIDER_HANDLE_SELECTORS);
     if (!handle) {
-      const piece = await this.findControl(scope, DRAGGABLE_PIECE_SELECTORS);
+      const piece = await this.findControl(scope, PIECE_SELECTORS);
       const box = piece ? await piece.boundingBox() : null;
       if (!box) {
         console.warn('Slide action, but the widget has neither a slider nor a draggable piece.');

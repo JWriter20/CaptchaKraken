@@ -25,16 +25,30 @@ export interface PlaywrightElementHandle {
 
   textContent(): Promise<string | null>;
 
-  $(selector: string): Promise<PlaywrightElementHandle | null>;
+  inputValue(): Promise<string>;
 
-  $$(selector: string): Promise<PlaywrightElementHandle[]>;
+  evaluate<R>(pageFunction: (element: Element) => R): Promise<R>;
 }
 
-export interface PlaywrightFrame {
-  $(selector: string): Promise<PlaywrightElementHandle | null>;
+/** The subset of Playwright's Locator the driver needs. `filter({ visible })` is Playwright 1.51+. */
+export interface PlaywrightLocator {
+  locator(selector: string): PlaywrightLocator;
 
-  $$(selector: string): Promise<PlaywrightElementHandle[]>;
+  filter(options: { visible?: boolean }): PlaywrightLocator;
 
+  all(): Promise<PlaywrightLocator[]>;
+
+  count(): Promise<number>;
+
+  elementHandle(options?: { timeout?: number }): Promise<PlaywrightElementHandle | null>;
+}
+
+/** Anything selectors can be run inside: a page, a frame, or the locator of an inline widget. */
+export interface PlaywrightScope {
+  locator(selector: string): PlaywrightLocator;
+}
+
+export interface PlaywrightFrame extends PlaywrightScope {
   waitForSelector(
     selector: string,
     options?: { state?: 'attached' | 'detached' | 'visible' | 'hidden'; timeout?: number },
@@ -51,7 +65,7 @@ export interface PlaywrightFrame {
  * Structural on purpose: the package depends on no browser library, and the version skew between
  * playwright, patchright and camoufox-js makes a nominal import the wrong one for someone.
  */
-export interface PlaywrightPage {
+export interface PlaywrightPage extends PlaywrightScope {
   mouse: {
     move(x: number, y: number, options?: { steps?: number }): Promise<void>;
     down(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
@@ -82,17 +96,7 @@ export interface PlaywrightPage {
     tap(x: number, y: number): Promise<void>;
   };
 
-  $(selector: string): Promise<PlaywrightElementHandle | null>;
-
-  $$(selector: string): Promise<PlaywrightElementHandle[]>;
-
   isClosed?(): boolean;
-
-  $eval<R>(
-    selector: string,
-    pageFunction: (element: Element) => R,
-    arg?: any,
-  ): Promise<R>;
 }
 
 export type Page = PlaywrightPage;

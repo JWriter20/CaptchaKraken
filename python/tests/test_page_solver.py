@@ -12,8 +12,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from fake_dom import FakeLocator
 from captchakraken.humanize import MobileHumanizer, MouseHumanizer
+from captchakraken.kinds import FrameRole, Vendor
 from captchakraken.page_solver import (
+    Widget,
     AnimatedChallengeError,
     CaptchaSolveError,
     NoCaptchaFoundError,
@@ -24,6 +27,7 @@ from captchakraken.page_solver import (
     _as_dict,
     _read_png_dimensions,
 )
+from captchakraken.selectors import submit_by_text
 from captchakraken.solver import UnsupportedCaptchaError
 from captchakraken.humanize import trajectory as generate_trajectory
 
@@ -59,6 +63,9 @@ class FakeElement:
     def text_content(self) -> str:
         return self._text
 
+    def input_value(self) -> str:
+        return ""
+
     def scroll_into_view_if_needed(self) -> None:
         pass
 
@@ -71,11 +78,8 @@ class FakeFrame:
     def __init__(self, elements: Optional[Dict[str, FakeElement]] = None) -> None:
         self._elements = elements or {}
 
-    def query_selector(self, selector: str) -> Optional[FakeElement]:
-        for key, element in self._elements.items():
-            if key in selector or selector in key:
-                return element
-        return None
+    def locator(self, selector: str) -> FakeLocator:
+        return FakeLocator(lambda: [el for key, el in self._elements.items() if key in selector or selector in key])
 
     def wait_for_selector(self, *_: Any, **__: Any) -> None:
         pass
@@ -106,15 +110,12 @@ class FakePage:
         self.mouse = FakeMouse()
         self.viewport_size = {"width": 1280, "height": 800}
 
-    def query_selector(self, selector: str) -> Optional[FakeElement]:
-        return self._elements.get(selector)
-
-    def query_selector_all(self, selector: str) -> List[FakeElement]:
-        element = self._elements.get(selector)
-        return [element] if element else []
-
-    def eval_on_selector(self, *_: Any, **__: Any) -> str:
-        return ""
+    def locator(self, selector: str) -> FakeLocator:
+        # Honours one pseudo-class, `:not([src*=...])`, so the invisible-reCAPTCHA selector can be exercised.
+        base, _, negated = selector.partition(':not([src*="')
+        element = self._elements.get(base)
+        excluded = bool(element and negated and negated.rstrip('"])') in (element.get_attribute("src") or ""))
+        return FakeLocator(lambda: [element] if element and not excluded else [])
 
     inner_size: Optional[Dict[str, float]] = None
 
@@ -138,6 +139,11 @@ HCAPTCHA_CHECKBOX = 'iframe[src*="hcaptcha"][src*="frame=checkbox"]'
 _NO_MODEL = object()
 
 
+def _widget(element: FakeElement, vendor: Vendor = Vendor.UNKNOWN, role: FrameRole = FrameRole.UNKNOWN,
+            at: Optional[Any] = None) -> Widget:
+    return Widget(element, at if at is not None else _Scope({}), vendor, role)
+
+
 def _solver(**overrides: Any) -> PageSolver:
     solver = PageSolver(config=PageSolverConfig(**overrides), solver=_NO_MODEL)
     solver._solver = None
@@ -151,7 +157,7 @@ class TestDetection:
         challenge = FakeElement(src="https://google.com/recaptcha/api2/bframe?k=x")
         anchor = FakeElement(src="https://google.com/recaptcha/api2/anchor?k=x")
         page = FakePage({RECAPTCHA_BFRAME: challenge, RECAPTCHA_ANCHOR: anchor})
-        assert _solver().detect_captcha(page) is challenge
+        assert _solver().detect_captcha(page).element is challenge
 
     def test_ignores_an_already_checked_recaptcha_anchor(self):
         frame = FakeFrame({".recaptcha-checkbox-checked": FakeElement()})
@@ -187,7 +193,7 @@ class TestSolveLoop:
         page = FakePage()
         solver._has_interacted_probe = True
         challenge = FakeElement(src="recaptcha/api2/bframe")
-        pages = [challenge, None]
+        pages = [_widget(challenge), None]
 
         def fake_detect(_page):
             return pages.pop(0) if pages else None
@@ -203,7 +209,7 @@ class TestSolveLoop:
 
     def test_no_interaction_with_captcha_still_present_aborts(self):
         solver = _solver()
-        solver.detect_captcha = lambda _page: FakeElement(src="recaptcha/api2/bframe")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="recaptcha/api2/bframe"))
         solver._solve_single = lambda *_: (False, [])
         solver.is_captcha_solved = lambda _page: False
         solver._has_recaptcha_underselect_error = lambda _page: False
@@ -212,7 +218,7 @@ class TestSolveLoop:
 
     def test_unsupported_on_the_first_frame_is_definitive(self):
         solver = _solver()
-        solver.detect_captcha = lambda _page: FakeElement(src="https://hcaptcha.com/?frame=challenge")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="https://hcaptcha.com/?frame=challenge"))
 
         def raise_unsupported(*_):
             raise UnsupportedCaptchaError("nope")
@@ -223,7 +229,7 @@ class TestSolveLoop:
 
     def test_unsupported_mid_solve_retries_instead_of_aborting(self):
         solver = _solver(max_unsupported_resolves=2)
-        solver.detect_captcha = lambda _page: FakeElement(src="https://hcaptcha.com/?frame=challenge")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="https://hcaptcha.com/?frame=challenge"))
         solver._wait_for_element_settled = lambda _el: "settled"
         solver.is_captcha_solved = lambda _page: False
         solver._is_challenge_freshly_rendered = lambda _page: False
@@ -244,7 +250,7 @@ class TestSolveLoop:
 
     def test_stale_handle_after_submit_is_retried_not_fatal(self):
         solver = _solver(max_stale_element_retries=2, stale_element_backoff_ms=1)
-        solver.detect_captcha = lambda _page: FakeElement(src="https://hcaptcha.com/?frame=challenge")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="https://hcaptcha.com/?frame=challenge"))
         solver.is_captcha_solved = lambda _page: False
         solver._is_challenge_freshly_rendered = lambda _page: False
         solver._has_recaptcha_underselect_error = lambda _page: False
@@ -264,7 +270,7 @@ class TestSolveLoop:
 
     def test_stale_handle_before_any_interaction_is_surfaced(self):
         solver = _solver()
-        solver.detect_captcha = lambda _page: FakeElement(src="https://hcaptcha.com/?frame=challenge")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="https://hcaptcha.com/?frame=challenge"))
 
         def raise_detached(*_):
             raise RuntimeError("Element is not attached to the DOM")
@@ -275,10 +281,10 @@ class TestSolveLoop:
 
     def test_underselect_error_retries_once_then_aborts(self):
         solver = _solver()
-        solver.detect_captcha = lambda _page: FakeElement(src="recaptcha/api2/bframe")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="recaptcha/api2/bframe"))
         solver.is_captcha_solved = lambda _page: False
         solver._is_challenge_freshly_rendered = lambda _page: False
-        solver._recaptcha_banner_kind = lambda _page: "select-more"
+        solver._banner_kind = lambda _page: "select-more"
 
         seen_retry_modes: List[Optional[str]] = []
 
@@ -294,7 +300,7 @@ class TestSolveLoop:
 
     def test_solved_signal_short_circuits_the_loop(self):
         solver = _solver()
-        solver.detect_captcha = lambda _page: FakeElement(src="recaptcha/api2/bframe")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="recaptcha/api2/bframe"))
         solver._solve_single = lambda *_: (True, [])
         solver.is_captcha_solved = lambda _page: True
         assert solver.solve(FakePage()).is_solved is True
@@ -309,7 +315,7 @@ class TestHumanizationMode:
         solver = _solver(**cfg)
         element = FakeElement(src="recaptcha/api2/bframe")
         page = FakePage({RECAPTCHA_BFRAME: element})
-        solver.detect_captcha = lambda _page: element
+        solver.detect_captcha = lambda _page: _widget(element)
         solver._solve_single = lambda *_: (
             solver._execute_click(
                 page,
@@ -508,7 +514,7 @@ class TestDeadline:
             solver._check_deadline("test")
             return True, []
 
-        solver.detect_captcha = lambda _page: FakeElement(src="recaptcha/api2/bframe")
+        solver.detect_captcha = lambda _page: _widget(FakeElement(src="recaptcha/api2/bframe"))
         solver._solve_single = slow_single
         solver.is_captcha_solved = lambda _page: False
         with pytest.raises(CaptchaSolveError, match="exceeded overall_solve_timeout_ms"):
@@ -559,14 +565,9 @@ class _Scope:
         self._mapping = mapping
         self.asked: List[str] = []
 
-    def query_selector(self, selector: str) -> Optional["FakeElement"]:
+    def locator(self, selector: str) -> FakeLocator:
         self.asked.append(selector)
-        return self._mapping.get(selector)
-
-    def query_selector_all(self, selector: str) -> List["FakeElement"]:
-        self.asked.append(selector)
-        found = self._mapping.get(selector)
-        return [found] if found is not None else []
+        return FakeLocator(lambda: [self._mapping[selector]] if selector in self._mapping else [])
 
 
 class _Keyboard:
@@ -608,7 +609,7 @@ def _typing_page() -> "FakePage":
 
 class TestTextCaptchas:
     def test_the_vendor_box_wins_over_the_generic_one(self):
-        from captchakraken.page_solver import TEXT_INPUT_SELECTORS
+        from captchakraken.selectors import TEXT_INPUT_SELECTORS
 
         vendor = FakeElement(box={"x": 10.0, "y": 10.0, "width": 100.0, "height": 20.0})
         generic = FakeElement(box={"x": 10.0, "y": 60.0, "width": 100.0, "height": 20.0})
@@ -616,14 +617,14 @@ class TestTextCaptchas:
         assert _solver()._find_control(scope, TEXT_INPUT_SELECTORS) is vendor
 
     def test_the_generic_fallback_still_finds_an_unnamed_box(self):
-        from captchakraken.page_solver import TEXT_INPUT_SELECTORS
+        from captchakraken.selectors import TEXT_INPUT_SELECTORS
 
         box = FakeElement()
         scope = _Scope({"input[type=text]": box})
         assert _solver()._find_control(scope, TEXT_INPUT_SELECTORS) is box
 
     def test_an_invisible_box_is_not_the_box(self):
-        from captchakraken.page_solver import TEXT_INPUT_SELECTORS
+        from captchakraken.selectors import TEXT_INPUT_SELECTORS
 
         hidden = FakeElement(visible=False)
         real = FakeElement()
@@ -924,7 +925,7 @@ class TestSlideSubmitPolicy:
         solver._track_piece = (
             lambda *_a, **_k: {"bbox": [10, 0, 200, 20], "piece": None})
 
-        performed, _ = solver._solve_single(page, element, None)
+        performed, _ = solver._solve_single(page, _widget(element, Vendor.GEETEST), None)
         return performed, [k for k, _, _ in page.mouse.log]
 
     def test_a_slide_is_not_followed_by_a_verify_click(self):
@@ -1108,7 +1109,7 @@ class TestTypedAnswerIsSubmitted:
             lambda _el, shot, fn: fn(shot))
         solver._get_solution = lambda *_a, **_k: (actions, [])
 
-        performed, _ = solver._solve_single(page, element, None)
+        performed, _ = solver._solve_single(page, _widget(element), None)
         return performed, [k for k, _, _ in page.mouse.log], page
 
     def test_typing_is_followed_by_a_verify_click(self):
@@ -1137,7 +1138,6 @@ class TestTypedAnswerIsSubmitted:
             box={"x": 600.0, "y": 700.0, "width": 80.0, "height": 30.0}, text="Submit")
         element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
         element._frame = None
-        element.query_selector = lambda _sel: None
 
         solver._settle_or_animated = lambda _e: False
         solver._solve_frame_freshness_guarded = (
@@ -1145,7 +1145,7 @@ class TestTypedAnswerIsSubmitted:
         solver._get_solution = lambda *_a, **_k: (
             [ClickAction(action="click", target_bounding_boxes=[[0.4, 0.4, 0.5, 0.5]])], [])
 
-        solver._solve_single(page, element, None)
+        solver._solve_single(page, _widget(element), None)
         kinds = [k for k, _, _ in page.mouse.log]
         assert kinds.count("down") == 1, (
             "pressed a Submit that belongs to the page, not to the captcha"
@@ -1161,9 +1161,7 @@ class TestTypedAnswerIsSubmitted:
                              text="Verify")
         element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
         element._frame = None
-        element._children = {"input[type=text]": field}
-        element.query_selector = lambda sel: (
-            field if "input" in sel else (verify if "button" in sel else None))
+        at = _Scope({"input[type=text]": field, submit_by_text("verify"): verify})
 
         solver._settle_or_animated = lambda _e: False
         solver._solve_frame_freshness_guarded = (
@@ -1171,7 +1169,7 @@ class TestTypedAnswerIsSubmitted:
         solver._get_solution = lambda *_a, **_k: (
             [TypeAction(action="type", text="5T63")], [])
 
-        performed, _ = solver._solve_single(page, element, None)
+        performed, _ = solver._solve_single(page, _widget(element, at=at), None)
         kinds = [k for k, _, _ in page.mouse.log]
         assert performed is True
         assert kinds.count("down") == 2, (
@@ -1212,8 +1210,7 @@ class TestInlineWidgetSubmit:
                              text=verify_named)
         element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
         element._frame = None
-        element.query_selector = lambda sel: (
-            verify if "button" in sel else None)
+        at = _Scope({submit_by_text(verify_named.lower()): verify})
 
         solver = _solver()
         page = _typing_page()
@@ -1222,7 +1219,7 @@ class TestInlineWidgetSubmit:
             lambda _el, shot, fn: fn(shot))
         solver._get_solution = lambda *_a, **_k: (actions, [])
 
-        performed, _ = solver._solve_single(page, element, None)
+        performed, _ = solver._solve_single(page, _widget(element, at=at), None)
         return performed, [k for k, _, _ in page.mouse.log]
 
     def test_done_on_an_inline_widget_presses_verify(self):

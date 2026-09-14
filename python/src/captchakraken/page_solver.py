@@ -16,13 +16,16 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from . import planner
 from .action_types import CaptchaAction
 from .humanize import Humanizer, resolve as resolve_humanizer
-from .kinds import (ActionKind, HumanizationMode, KeyframeMode, PauseKind, Phase, PromptFamily,
+from .kinds import (ActionKind, FrameRole, HumanizationMode, KeyframeMode, PauseKind, Phase, PromptFamily,
                     RecaptchaBanner, RetryMode, SettleVerdict, Vendor)
+from .selectors import (ACCEPTED_SELECTORS, PIECE_SELECTORS, RESPONSE_SELECTORS, SELECTORS, SLIDER_HANDLE_SELECTORS,
+                        SUBMIT_SELECTORS, TEXT_INPUT_SELECTORS, TEXT_INPUT_VENDOR_SELECTORS, VENDORS, WIDGET_PROBES,
+                        VendorSelectors, WidgetProbe)
 from .solver import CaptchaSolver, UnsupportedCaptchaError
 from .timing import PhaseBudget, timings_enabled
 
@@ -211,118 +214,82 @@ class PageSolverConfig:
                 + self.video_extra_inference_ms)
 
 
-def vendor_from_src(src: Optional[str]) -> Vendor:
-    """Keyed on the `hcaptcha` substring, not the apex host: challenges load from newassets.hcaptcha.com."""
-    src = src or ""
-    if "hcaptcha" in src:
-        return Vendor.HCAPTCHA
-    if "recaptcha/api2" in src:
-        return Vendor.RECAPTCHA
-    return Vendor.UNKNOWN
+class Widget(NamedTuple):
+    """What detection found: the handle to photograph, the locator to search inside, and which table entry named it."""
 
+    element: Any
+    at: Any
+    vendor: Vendor
+    role: FrameRole
 
-# Mirrored in solver.ts; keep both lists in the same order.
-# Tencent: `iframe[id^="tcaptcha"]` stays prefix-anchored, since `[id*=]` also matched MTCaptcha's iframe and hid
-# that `.mtcap` matched nothing. Both its in-page and iframe shapes stay: it moved in-host on 2026-08-11 and
-# the driver was blind for twelve days (TRIBAL_KNOWLEDGE.md).
-# Yandex and MTCaptcha: iframe selectors first; `.CheckboxCaptcha` and `.mtcap` live inside the frame document,
-# so on the host page they only ever match an inline embed.
-VENDOR_WIDGET_LOCATORS: List[Dict[str, Any]] = [
-    {"puzzle_source": Vendor.GEETEST, "selectors": [".geetest_box", ".geetest_panel_box", ".geetest_popup_window", ".geetest_widget"]},
-    {"puzzle_source": Vendor.TENCENT, "selectors": ['#tcaptcha_transform_dy', '#tCaptchaDyContent', '.tencent-captcha-dy__content', 'iframe#tcaptcha_iframe_dy', 'iframe[id^="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]']},
-    {"puzzle_source": Vendor.YIDUN, "selectors": [".yidun_panel", ".yidun"]},
-    {"puzzle_source": Vendor.YANDEX, "selectors": ['iframe[src*="smartcaptcha.yandexcloud.net/advanced"]', 'iframe[src*="smartcaptcha.yandexcloud.net"]', ".CheckboxCaptcha"]},
-    {"puzzle_source": Vendor.LEMIN, "selectors": ["#lemin-cropped-captcha", ".lemin-captcha-popup"]},
-    {"puzzle_source": Vendor.PROSOPO, "selectors": [".prosopo-modalInner", ".procaptcha-checkbox"]},
-    {"puzzle_source": Vendor.MTCAPTCHA, "selectors": ['iframe[src*="service.mtcaptcha.com"]', 'iframe[id^="mtcaptcha-iframe"]', ".mtcaptcha", ".mtcap"]},
-    {"puzzle_source": Vendor.BOTDETECT, "selectors": [".BDC_CaptchaDiv"]},
-]
 
 # A named set rather than `== UNKNOWN`: naming a new vendor must not silently switch off typed-challenge
 # detection for the text vendors and the animated probe for GeeTest and Tencent.
 VENDORS_WITH_BESPOKE_HANDLING: frozenset[Vendor] = frozenset({Vendor.HCAPTCHA, Vendor.RECAPTCHA})
 
-# A tripwire, not detection: a vendor host on the wire with no selector match means the markup moved.
-# Tencent did on 2026-08-11 and "no captcha found" hid it for twelve days (TRIBAL_KNOWLEDGE.md).
-# BotDetect is self-hosted and has no vendor host, so it is deliberately absent.
-VENDOR_URL_MARKERS: List[Dict[str, Any]] = [
-    {"puzzle_source": Vendor.HCAPTCHA, "hosts": ["hcaptcha.com"]},
-    {"puzzle_source": Vendor.RECAPTCHA, "hosts": ["google.com/recaptcha", "recaptcha.net"]},
-    {"puzzle_source": Vendor.TURNSTILE, "hosts": ["challenges.cloudflare.com"]},
-    {"puzzle_source": Vendor.GEETEST, "hosts": ["geetest.com"]},
-    {"puzzle_source": Vendor.TENCENT, "hosts": ["captcha.gtimg.com", "captcha.qcloud.com"]},
-    {"puzzle_source": Vendor.YIDUN, "hosts": ["dun.163.com", "cstaticdun.126.net", "necaptcha.nosdn.127.net"]},
-    {"puzzle_source": Vendor.YANDEX, "hosts": ["smartcaptcha.yandexcloud.net"]},
-    {"puzzle_source": Vendor.LEMIN, "hosts": ["leminnow.com"]},
-    {"puzzle_source": Vendor.PROSOPO, "hosts": ["prosopo.io"]},
-    {"puzzle_source": Vendor.MTCAPTCHA, "hosts": ["mtcaptcha.com"]},
-]
+# Long enough to resolve a locator `all()` just returned, short enough that a widget gone in between reads as stale, not hung.
+HANDLE_TIMEOUT_MS = 1000
 
-# Vendor-named first, generic last: the driver takes the first visible match. The generic tail is only ever
-# searched inside the widget; on the host page it would match a login form's username box.
-TEXT_INPUT_VENDOR_SELECTORS = [
-    "input[id*=captchaCode]", "input#captchaCode", "input[id*=validateCaptcha]",
-    ".BDC_CaptchaDiv input[type=text]",
-    "input.mtcap-inputtext", ".mtcap input[type=text]",
-    ".AdvancedCaptcha-Input input", "input.Textinput-Control", 'input[name="rep"]',
-]
-TEXT_INPUT_GENERIC_SELECTORS = [
-    'input[name*="captcha" i]', 'input[id*="captcha" i]', 'input[aria-label*="captcha" i]',
-    'input[placeholder*="code" i]', 'input[autocomplete="off"][type=text]',
-    "input[type=text]", "input:not([type])", "input[type=tel]", "textarea",
-]
-TEXT_INPUT_SELECTORS = TEXT_INPUT_VENDOR_SELECTORS + TEXT_INPUT_GENERIC_SELECTORS
 
-# The handle, not the piece: a drag that starts on the piece moves nothing. Tencent's redesigned knob is a bare
-# div, so it is named. `[draggable=true]` is absent on purpose: HTML5 DnD fires dragstart, not pointermove.
-SLIDER_HANDLE_SELECTORS = [
-    ".geetest_slider_button", ".geetest_btn", ".geetest_slider .geetest_arrow",
-    ".tencent-captcha-dy__slider-block", "#tcaptcha_drag_thumb", ".tc-slider-normal", "[id*=slideBlock]",
-    ".yidun_slider", ".yidun_jigsaw",
-    ".lemin-slider-handle", "#lemin-cropped-captcha .slider",
-    '[role="slider"]', "[aria-valuenow]",
-    '[class*="slider"][class*="btn"]', '[class*="slider"][class*="button"]',
-    '[class*="slide"][class*="handle"]', '[class*="drag"][class*="thumb"]',
-]
-# Fallback for Lemin's trackless "cropped" puzzle, where the piece itself is what gets dragged.
-DRAGGABLE_PIECE_SELECTORS = [
-    ".lemin-cropped-puzzle-piece", "#lemin-cropped-captcha canvas + canvas",
-    '[class*="puzzle"][class*="piece"]', '[class*="jigsaw"]',
-]
-SLIDE_PIECE_MEASURE_SELECTORS = (
-    ".geetest_slice", ".tencent-captcha-dy__fg-item", ".yidun_jigsaw", ".lemin-cropped-puzzle-piece",
-    '[class*="puzzle"][class*="piece"]', '[class*="jigsaw"]',
-)
+def _visible(scope: Any, selectors: Sequence[str]) -> List[Any]:
+    """Every visible match of `selectors`, in selector order. A selector this adapter can't parse is skipped, not fatal."""
+    found: List[Any] = []
+    for selector in selectors:
+        try:
+            found.extend(scope.locator(selector).filter(visible=True).all())
+        except Exception:
+            continue
+    return found
+
+
+def _handle_of(at: Any) -> Optional[Any]:
+    try:
+        return at.element_handle(timeout=HANDLE_TIMEOUT_MS)
+    except Exception:
+        return None
+
+
+def _handles(ats: Sequence[Any]) -> List[Any]:
+    return [h for h in map(_handle_of, ats) if h is not None]
+
+
+def _frame_of(at: Any) -> Optional[Any]:
+    handle = _handle_of(at)
+    try:
+        return handle.content_frame() if handle else None
+    except Exception:
+        return None
+
+
+def _input_value(handle: Any) -> str:
+    try:
+        return str(handle.input_value() or "")
+    except Exception:
+        return ""
+
+
+def _has_text(handle: Any) -> bool:
+    try:
+        return bool((handle.text_content() or "").strip())
+    except Exception:
+        return False
+
+
 SLIDE_PIECE_MIN_PX = 3.0
 SLIDE_PIECE_MAX_FRACTION = 0.6
 
-_GEETEST_ACCEPTED_SELECTOR = (
-    ".geetest_result_tips.geetest_success, .geetest_captcha.geetest_success, "
-    ".geetest_captcha.geetest_lock_success")
-_RECAPTCHA_BANNERS = (
-    (".rc-imageselect-error-select-more", RecaptchaBanner.SELECT_MORE),
-    (".rc-imageselect-error-dynamic-more", RecaptchaBanner.DYNAMIC_MORE),
-    (".rc-imageselect-incorrect-response", RecaptchaBanner.REJECTED),
-)
-# No prompt and no tiles both read as ready: waiting for `.prompt-text` to exist once paid the whole timeout
+# No prompt and no pictures both read as ready: waiting for `.prompt-text` to exist once paid the whole timeout
 # before every board of a challenge that draws none (tower_stack: 18s a round, 2/2 -> 0/2).
-_HCAPTCHA_IMAGES_READY_JS = """() => {
+_BOARD_IMAGES_READY_JS = """({ prompt, images }) => {
     const vis = (el) => !!el && el.getClientRects().length > 0
         && getComputedStyle(el).visibility !== 'hidden';
-    const prompt = document.querySelector('.prompt-text');
-    if (prompt && !vis(prompt)) return false;
-    const tiles = Array.from(document.querySelectorAll('.task-image .image, .task .image'));
-    if (tiles.length > 0) {
-        return tiles.every((el) => {
-            const bg = getComputedStyle(el).backgroundImage;
-            return bg && bg !== 'none' && !/url\\(["']?["']?\\)/.test(bg);
-        });
-    }
-    const canvas = document.querySelector('canvas');
-    if (canvas && canvas.width > 0 && canvas.height > 0) return true;
-    const example = document.querySelector('.challenge-example img, .image-wrapper img');
-    if (example) return example.complete && example.naturalWidth > 0;
-    return true;
+    const p = prompt && document.querySelector(prompt);
+    if (p && !vis(p)) return false;
+    return Array.from(document.querySelectorAll(images)).every((el) => {
+        if (el instanceof HTMLImageElement) return el.complete && el.naturalWidth > 0;
+        const bg = getComputedStyle(el).backgroundImage;
+        return !!bg && bg !== 'none' && !/url\\(["']?["']?\\)/.test(bg);
+    });
 }"""
 _RESOURCES_JS = """() => {
   const out = [];
@@ -573,14 +540,8 @@ class PageSolver:
             self._human.drag(page, center(action["source_bounding_box"]), center(action["target_bounding_box"]))
 
     def _find_control(self, scope: Any, selectors: Sequence[str]) -> Optional[Any]:
-        for selector in selectors:
-            try:
-                element = scope.query_selector(selector)
-            except Exception:
-                continue
-            if self._visible(element):
-                return element
-        return None
+        first = next(iter(_visible(scope, selectors)), None)
+        return _handle_of(first) if first is not None else None
 
     def _measure_piece_box(self, scope: Any, widget_width: float) -> Optional[Dict[str, float]]:
         """The slider piece's box: the first visible match small enough to be a piece.
@@ -588,43 +549,32 @@ class PageSolver:
         Runs during detection, so it must not mark the board acted on: doing so once disabled the
         speculative burst on every slide solve.
         """
-        for selector in SLIDE_PIECE_MEASURE_SELECTORS:
+        for candidate in _handles(_visible(scope, PIECE_SELECTORS)):
             try:
-                found = scope.query_selector_all(selector)
+                b = candidate.bounding_box()
             except Exception:
                 continue
-            for candidate in found or ():
-                try:
-                    b = self._visible(candidate) and candidate.bounding_box()
-                except Exception:
-                    continue
-                if b and SLIDE_PIECE_MIN_PX <= b["width"] <= widget_width * SLIDE_PIECE_MAX_FRACTION:
-                    return b
+            if b and SLIDE_PIECE_MIN_PX <= b["width"] <= widget_width * SLIDE_PIECE_MAX_FRACTION:
+                return b
         return None
 
-    def _answer_box(self, scope: Any, element: Any = None) -> Optional[Any]:
+    def _answer_box(self, scope: Any, at: Any = None) -> Optional[Any]:
         """The text box inside the widget, else a vendor-named one in its enclosing fieldset/form.
 
         Only vendor-named selectors widen: BotDetect's `.BDC_CaptchaDiv` is 280x50 and holds only the image,
         with `#captchaCode` in a sibling div. The generic tail there would take a login form's own box.
         """
         inside = self._find_control(scope, TEXT_INPUT_SELECTORS)
-        if inside is not None or element is None:
+        if inside is not None or at is None:
             return inside
-        for axis in ("ancestor::fieldset[1]", "ancestor::form[1]"):
-            try:
-                host = element.query_selector(f"xpath={axis}")
-            except Exception:
-                continue
-            found = host and self._find_control(host, TEXT_INPUT_VENDOR_SELECTORS)
-            if found:
-                return found
-        return None
+        around = (self._find_control(at.locator(f"xpath={axis}"), TEXT_INPUT_VENDOR_SELECTORS)
+                  for axis in ("ancestor::fieldset[1]", "ancestor::form[1]"))
+        return next((found for found in around if found is not None), None)
 
-    def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any], element: Any = None) -> bool:
+    def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any], at: Any = None) -> bool:
         self._acted_on_board = True
         text = str(action.get("text") or "")
-        field_el = text and self._answer_box(scope, element)
+        field_el = text and self._answer_box(scope, at)
         if not field_el:
             _log("type action, but no text box in the widget; skipping")
             return False
@@ -662,7 +612,7 @@ class PageSolver:
 
         handle = self._find_control(scope, SLIDER_HANDLE_SELECTORS)
         if handle is None:
-            piece = self._find_control(scope, DRAGGABLE_PIECE_SELECTORS)
+            piece = self._find_control(scope, PIECE_SELECTORS)
             box = piece and piece.bounding_box()
             if not box:
                 _log("slide action, but the widget has neither a slider nor a draggable piece")
@@ -761,80 +711,51 @@ class PageSolver:
 
     # ── detection ────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _visible(element: Any) -> bool:
+    def _has_value(self, page: Any, selector: str) -> bool:
+        """Any element at `selector` carrying a non-blank value; response fields are hidden, so no visibility filter."""
         try:
-            return bool(element and element.is_visible())
+            fields = _handles(page.locator(selector).all())
         except Exception:
             return False
+        return any(_input_value(f).strip() for f in fields)
 
-    def _has_non_empty_field_value(self, page: Any, selector: str) -> bool:
-        try:
-            element = page.query_selector(selector)
-            if not element:
-                return False
-            value = element.get_attribute("value")
-            if value is None:
-                value = page.eval_on_selector(
-                    selector, "node => (typeof node.value === 'string' ? node.value : '')")
-            return bool(value and str(value).strip())
-        except Exception:
-            return False
+    def _visible_with_text(self, scope: Any, selector: str) -> bool:
+        """A visible match carrying text; an empty banner or prompt is a placeholder, not a signal."""
+        return any(map(_has_text, _handles(_visible(scope, (selector,)))))
 
-    def _anchor_checked(self, anchor_iframe: Any, selector: str) -> bool:
-        try:
-            frame = anchor_iframe.content_frame()
-            return bool(frame) and self._visible(frame.query_selector(selector))
-        except Exception:
-            return False
-
-    def _is_recaptcha_anchor_checked(self, anchor_iframe: Any) -> bool:
-        return self._anchor_checked(anchor_iframe, ".recaptcha-checkbox-checked")
-
-    def _is_hcaptcha_anchor_checked(self, anchor_iframe: Any) -> bool:
-        return self._anchor_checked(anchor_iframe, '#checkbox[aria-checked="true"]')
+    def _checked_in(self, checkbox: Any, checked: str) -> bool:
+        frame = _frame_of(checkbox)
+        return bool(frame) and bool(_visible(frame, (checked,)))
 
     def has_interactive_widget_in_dom(self, page: Any) -> bool:
-        """Is a widget in the DOM at all, rendered or not? Invisible reCAPTCHA is excluded."""
-        try:
-            for anchor in page.query_selector_all('iframe[src*="recaptcha/api2/anchor"]'):
-                if not re.search(r"[?&]size=invisible", anchor.get_attribute("src") or ""):
-                    return True
-            for sel in ('iframe[src*="recaptcha/api2/bframe"]',
-                        'iframe[src*="hcaptcha"][src*="frame=checkbox"]',
-                        'iframe[src*="hcaptcha"][src*="frame=challenge"]'):
-                if page.query_selector(sel):
-                    return True
-        except Exception:
-            pass
-        return False
+        """Is a widget in the DOM at all, rendered or not? Invisible reCAPTCHA is excluded by its selector.
 
-    def detect_captcha(self, page: Any) -> Optional[Any]:
+        The inline vendors count: without them the JS port failed fast in under a second on every GeeTest/Yidun page.
+        """
+        def count(selector: str) -> int:
+            try:
+                return page.locator(selector).count()
+            except Exception:
+                return 0
+
+        return any(count(p.selector) > 0 for p in WIDGET_PROBES)
+
+    def detect_captcha(self, page: Any) -> Optional[Widget]:
         """Open challenges first, then unsolved checkboxes, then the inline vendors."""
-        q = page.query_selector
-        el = q('iframe[src*="recaptcha/api2/bframe"]')
-        if self._visible(el):
-            return el
-        el = q('iframe[src*="hcaptcha"][src*="frame=challenge"]')
-        if self._visible(el):
-            return el
-        el = q('iframe[src*="recaptcha/api2/anchor"]')
-        if self._visible(el) and not self._is_recaptcha_anchor_checked(el):
-            return el
-        el = q('iframe[src*="hcaptcha"][src*="frame=checkbox"]')
-        if self._visible(el) and not self._has_non_empty_field_value(page, '[name="h-captcha-response"]') \
-                and not self._is_hcaptcha_anchor_checked(el):
-            return el
-        for sel in ('iframe[src*="challenges.cloudflare.com"]', ".cf-turnstile"):
-            el = q(sel)
-            if self._visible(el) and not self._has_non_empty_field_value(page, '[name="cf-turnstile-response"]'):
-                return el
-        for entry in VENDOR_WIDGET_LOCATORS:
-            for selector in entry["selectors"]:
-                el = q(selector)
-                if self._visible(el):
-                    return el
+        for probe in WIDGET_PROBES:
+            at = next(iter(_visible(page, (probe.selector,))), None)
+            if at is None or self._already_accepted(page, at, probe):
+                continue
+            element = _handle_of(at)
+            return Widget(element, at, probe.vendor, probe.role) if element is not None else None
         return None
+
+    def _already_accepted(self, page: Any, at: Any, probe: WidgetProbe) -> bool:
+        """A checkbox the vendor has already accepted is not a captcha to solve."""
+        s = SELECTORS[probe.vendor]
+        if probe.role != FrameRole.CHECKBOX:
+            return False
+        return bool(s.response and self._has_value(page, s.response)) or bool(s.checked and self._checked_in(at, s.checked))
 
     def vendors_on_the_wire(self, page: Any) -> List[Vendor]:
         """Which vendors' code the page loaded. Resource timing, because a request listener would have to have been attached before navigation."""
@@ -843,7 +764,7 @@ class PageSolver:
         except Exception:
             return []
         blob = " ".join(str(n) for n in (names or []))
-        return [e["puzzle_source"] for e in VENDOR_URL_MARKERS if any(h in blob for h in e["hosts"])]
+        return [vendor for vendor, s in VENDORS if any(h in blob for h in s.hosts)]
 
     def _no_widget_message(self, page: Any) -> str:
         base = "no interactive captcha widget detected"
@@ -852,55 +773,40 @@ class PageSolver:
             return (f"{base} (no vendor captcha code loaded on this page — likely reCAPTCHA v3 / "
                     "invisible, or a click-triggered challenge that has not been triggered)")
         return (f"{base}, BUT {'/'.join(loaded)} code IS loaded and running on this page. The "
-                "vendor's markup no longer matches anything in VENDOR_WIDGET_LOCATORS — the selector "
-                "list needs re-measuring against the vendor's current markup, in both solver ports")
+                "vendor's markup no longer matches anything in SELECTORS — the table needs "
+                "re-measuring against the vendor's current markup, in both solver ports")
 
     def is_captcha_solved(self, page: Any) -> bool:
-        """The vendor's own done signal: a response token, GeeTest's banner, or a checked anchor.
-
-        The token first, unconditionally: it lives on the host page and matters most when hCaptcha's overlay
-        hides the anchor. hCaptcha's `aria-checked` is also read because demo pages do not always fill the token.
-        """
+        """The vendor's own done signal: a response token, a painted success state, or a checked box."""
         try:
-            for name in ("h-captcha-response", "g-recaptcha-response", "cf-turnstile-response"):
-                if self._has_non_empty_field_value(page, f'[name="{name}"]'):
+            if any(self._has_value(page, s) for s in RESPONSE_SELECTORS) or _visible(page, ACCEPTED_SELECTORS):
+                return True
+            for probe in WIDGET_PROBES:
+                checked = SELECTORS[probe.vendor].checked
+                if probe.role != FrameRole.CHECKBOX or not checked:
+                    continue
+                at = next(iter(_visible(page, (probe.selector,))), None)
+                if at is not None and self._checked_in(at, checked):
                     return True
-            if self._is_geetest_accepted(page):
-                return True
-            hc = page.query_selector('iframe[src*="hcaptcha"][src*="frame=checkbox"]')
-            if self._visible(hc) and self._is_hcaptcha_anchor_checked(hc):
-                return True
-            rc = page.query_selector('iframe[src*="recaptcha/api2/anchor"]')
-            if self._visible(rc) and self._is_recaptcha_anchor_checked(rc):
-                return True
         except Exception:
             pass
         return False
 
-    def _is_geetest_accepted(self, page: Any) -> bool:
-        # Visibility is part of the test: `geetest_popup_wrap` carries the success class at zero height while the
-        # panel is shut. Before that check, 20 drags cost 34 model calls.
-        try:
-            return any(self._visible(el) for el in page.query_selector_all(_GEETEST_ACCEPTED_SELECTOR))
-        except Exception:
-            return False
-
     def _is_challenge_freshly_rendered(self, page: Any) -> bool:
         """A next round has painted, as opposed to the answered frame animating closed."""
         try:
-            hc = page.query_selector('iframe[src*="hcaptcha"][src*="frame=challenge"]')
-            if self._visible(hc):
-                if self._last_submit_frame_hash and self._element_frame_hash(hc) == self._last_submit_frame_hash:
-                    return False
-                frame = hc.content_frame()
-                prompt = frame.query_selector(".prompt-text") if frame else None
-                if self._visible(prompt) and (prompt.text_content() or "").strip():
-                    return True
-            rc = page.query_selector('iframe[src*="recaptcha/api2/bframe"]')
-            if self._visible(rc):
-                frame = rc.content_frame()
-                instructions = frame.query_selector(".rc-imageselect-instructions, #rc-imageselect") if frame else None
-                if self._visible(instructions):
+            for probe in WIDGET_PROBES:
+                fresh = SELECTORS[probe.vendor].fresh
+                if probe.role != FrameRole.CHALLENGE or not fresh:
+                    continue
+                at = next(iter(_visible(page, (probe.selector,))), None)
+                element = _handle_of(at) if at is not None else None
+                if element is None:
+                    continue
+                if self._last_submit_frame_hash and self._element_frame_hash(element) == self._last_submit_frame_hash:
+                    continue
+                frame = element.content_frame()
+                if frame and self._visible_with_text(frame, fresh):
                     return True
         except Exception:
             pass
@@ -910,40 +816,26 @@ class PageSolver:
     def _banner_is_fatal_after_retry(kind: Optional[RecaptchaBanner]) -> bool:
         return kind in (RecaptchaBanner.SELECT_MORE, RecaptchaBanner.REJECTED)
 
-    def _recaptcha_banner_kind(self, page: Any) -> Optional[RecaptchaBanner]:
-        """Which reCAPTCHA banner shows; `dynamic-more` is the dynamic board's normal flow, not an error."""
+    def _banner_kind(self, page: Any) -> Optional[RecaptchaBanner]:
+        """Which verdict banner the open challenge shows; `dynamic-more` is the dynamic board's normal flow, not an error."""
         try:
-            bframe = page.query_selector('iframe[src*="recaptcha/api2/bframe"]')
-            frame = bframe and bframe.content_frame()
-            if not frame:
-                return None
-            for selector, kind in _RECAPTCHA_BANNERS:
-                element = frame.query_selector(selector)
-                if self._visible(element) and (element.text_content() or "").strip():
-                    return kind
+            for probe in WIDGET_PROBES:
+                banners = SELECTORS[probe.vendor].banners
+                if probe.role != FrameRole.CHALLENGE or not banners:
+                    continue
+                at = next(iter(_visible(page, (probe.selector,))), None)
+                frame = _frame_of(at) if at is not None else None
+                if not frame:
+                    continue
+                shown = next((kind for selector, kind in banners if self._visible_with_text(frame, selector)), None)
+                if shown is not None:
+                    return shown
         except Exception:
             pass
         return None
 
-    def _get_verify_button(self, frame: Any) -> Optional[Any]:
-        # `.//` keeps the xpath relative so a host-page widget cannot reach the form's own submit.
-        lower = "translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
-        for text in ("verify", "next", "submit", "skip"):
-            try:
-                button = frame.query_selector(
-                    f"xpath=.//button[contains({lower}, '{text}')] | .//div[@role='button' and contains({lower}, '{text}')]")
-                if self._visible(button):
-                    return button
-            except Exception:
-                pass
-        for selector in ("#recaptcha-verify-button", ".button-submit", ".geetest_submit"):
-            try:
-                button = frame.query_selector(selector)
-                if self._visible(button):
-                    return button
-            except Exception:
-                pass
-        return None
+    def _get_verify_button(self, scope: Any) -> Optional[Any]:
+        return self._find_control(scope, SUBMIT_SELECTORS)
 
     # ── frames and polling ───────────────────────────────────────────────
 
@@ -1046,11 +938,11 @@ class PageSolver:
             _delay(self.config.settle_poll_ms)
         return False
 
-    def _wait_for_hcaptcha_challenge_images(self, challenge_iframe: Any) -> None:
+    def _wait_for_board_images(self, frame: Any, selectors: VendorSelectors) -> None:
+        """Best-effort: hold until the board's pictures have painted."""
         try:
-            frame = challenge_iframe.content_frame()
-            if frame:
-                frame.wait_for_function(_HCAPTCHA_IMAGES_READY_JS, timeout=self.config.hcaptcha_images_timeout_ms)
+            frame.wait_for_function(_BOARD_IMAGES_READY_JS, arg={"prompt": selectors.fresh or "", "images": ",".join(selectors.images)},
+                                    timeout=self.config.hcaptcha_images_timeout_ms)
         except Exception:
             pass
 
@@ -1171,6 +1063,7 @@ class PageSolver:
         last_new_ms = 0.0
         shot = _tmp_png("burst")
         t0 = time.monotonic()
+        next_at = t0
         hang_deadline = t0 * 1000.0 + burst_hang_deadline_ms(cfg)
         try:
             while (time.monotonic() - t0) * 1000.0 < max_ms:
@@ -1178,7 +1071,6 @@ class PageSolver:
                     raise CaptchaSolveError(
                         f"the animated recording stalled: {len(frames)} frames in "
                         f"{burst_hang_deadline_ms(cfg):.0f}ms. The widget is not screenshotting.")
-                start = time.monotonic()
                 try:
                     self._screenshot(element, shot, animations="allow")
                     img = cv2.imread(shot)
@@ -1202,8 +1094,11 @@ class PageSolver:
                 if elapsed_ms >= floor_ms and elapsed_ms - last_new_ms >= floor_ms:
                     _log(f"[animated] no new screen for {floor_ms / 1000:.1f}s ({len(order)} seen) — settled")
                     break
-                wait = interval - (time.monotonic() - start)
-                if wait > 0 and elapsed_ms + wait * 1000.0 < max_ms:
+                # Sleep to a fixed grid, not `interval - work`: per-frame overshoot would otherwise accumulate and a
+                # loaded runner films fewer frames than the floor window holds. A stalled frame skips, not bunches.
+                next_at = max(next_at + interval, time.monotonic())
+                wait = next_at - time.monotonic()
+                if wait > 0 and (next_at - t0) * 1000.0 < max_ms:
                     time.sleep(wait)
         finally:
             _unlink(shot)
@@ -1526,36 +1421,32 @@ class PageSolver:
 
     # ── one pass over a rendered challenge ───────────────────────────────
 
-    def _solve_single(self, page: Any, element: Any, retry_mode: Optional[RetryMode]) -> Tuple[bool, List[Dict[str, Any]]]:
-        try:
-            src = element.get_attribute("src") or ""
-        except Exception:
-            src = ""
-        puzzle_source = vendor_from_src(src)
-        scope = element.content_frame() or element
+    def _solve_single(self, page: Any, widget: Widget, retry_mode: Optional[RetryMode]) -> Tuple[bool, List[Dict[str, Any]]]:
+        element, puzzle_source, role = widget.element, widget.vendor, widget.role
+        frame = element.content_frame()
+        scope = frame or widget.at
         # Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
-        text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, element) is not None
+        text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, widget.at) is not None
         if text_mode:
             _log("widget has a text box; solving as a distorted-text captcha")
 
-        is_animated = False
-        if puzzle_source == Vendor.HCAPTCHA and "frame=challenge" in src:
+        if frame and role == FrameRole.CHALLENGE and SELECTORS[puzzle_source].images:
             if self._last_submit_frame_hash:
                 with self._phase(Phase.AWAIT_NEXT_ROUND):
                     self._wait_for_change_since(element, self._last_submit_frame_hash)
                 self._last_submit_frame_hash = None
             with self._phase(Phase.HCAPTCHA_IMAGES):
-                self._wait_for_hcaptcha_challenge_images(element)
-            is_animated = self._settle_or_animated(element)
-            # hCaptcha keeps the challenge iframe visible for a couple of seconds after the final submit;
-            # treating it as a fresh puzzle burned ~18s.
-            if self.is_captcha_solved(page):
-                _log("solved while waiting for the next round; skipping inference.")
-                return False, []
-        elif puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING:
-            is_animated = self._settle_or_animated(element)
+                self._wait_for_board_images(frame, SELECTORS[puzzle_source])
 
-        if puzzle_source == Vendor.RECAPTCHA and "recaptcha/api2/bframe" in src:
+        # A checkbox is clicked, not filmed, and a reCAPTCHA board is read by its grid below.
+        filmable = role != FrameRole.CHECKBOX and puzzle_source != Vendor.RECAPTCHA and not text_mode
+        is_animated = filmable and self._settle_or_animated(element)
+        # hCaptcha keeps its challenge iframe visible ~2s after the final submit; read as a fresh puzzle it burned ~18s.
+        if role == FrameRole.CHALLENGE and self.is_captcha_solved(page):
+            _log("solved while waiting for the next round; skipping inference.")
+            return False, []
+
+        if puzzle_source == Vendor.RECAPTCHA and role == FrameRole.CHALLENGE:
             with self._phase(Phase.GRID_LOAD):
                 self._wait_for_grid_cells_loaded(element)
             grid = self._get_grid_boxes(element)
@@ -1615,7 +1506,6 @@ class PageSolver:
             _log("[answer] " + json.dumps({"actions": [_as_dict(a) for a in actions]}, default=str))
             self._note_answer(actions, retry_mode)
             _log(f"executing {len(actions)} action(s)")
-            frame = element.content_frame()
 
             for raw_action in actions:
                 self._check_deadline("action execution")
@@ -1643,7 +1533,7 @@ class PageSolver:
                     self._execute_drag(page, action, element_box)
                     performed = answered = True
                 elif kind == ActionKind.TYPE:
-                    if self._execute_type(page, scope, action, element):
+                    if self._execute_type(page, scope, action, widget.at):
                         performed = answered = True
                 elif kind == ActionKind.WAIT:
                     duration = int(action.get("duration_ms") or 0)
@@ -1653,8 +1543,7 @@ class PageSolver:
 
             # A slide submits itself on release, and any Verify found afterwards belongs to the host page and would
             # submit the guarded form while the verdict is in flight. An empty or `done` plan still presses Verify/Skip.
-            lookup = frame or (scope if not slid else None)
-            verify_button = lookup and self._get_verify_button(lookup)
+            verify_button = self._get_verify_button(scope) if frame or not slid else None
             if not slid and (answered or not performed) and verify_button:
                 _log(f"clicking Verify to submit ({puzzle_source}).")
                 self._move_and_click(page, verify_button)
@@ -1729,8 +1618,8 @@ class PageSolver:
                 return done()
 
             with self._phase(Phase.DETECT):
-                element = self.detect_captcha(page)
-            if not element:
+                widget = self.detect_captcha(page)
+            if not widget:
                 if has_interacted:
                     _log("no supported captcha remains after interaction; considering solved.")
                     return done()
@@ -1747,17 +1636,17 @@ class PageSolver:
             _log(f"--- captcha solve loop {attempt}/{cfg.max_solve_loops} ---")
             retry_mode, pending_retry_mode = pending_retry_mode, None
             try:
-                did_interact, round_usage = self._solve_single(page, element, retry_mode)
+                did_interact, round_usage = self._solve_single(page, widget, retry_mode)
             except AnimatedChallengeError:
                 raise
             except UnsupportedCaptchaError as unsupported:
                 # Mid-solve, a transitional blank frame reads as unsupported; settle and retry.
                 if has_interacted and unsupported_retries < cfg.max_unsupported_resolves:
                     unsupported_retries += 1
-                    current = self.detect_captcha(page)
+                    again = self.detect_captcha(page)
                     with self._phase(Phase.SETTLE):
-                        settled = self._wait_for_element_settled(current)
-                    if current and settled == SettleVerdict.ANIMATED and not cfg.video_solve_enabled:
+                        settled = again and self._wait_for_element_settled(again.element)
+                    if settled == SettleVerdict.ANIMATED and not cfg.video_solve_enabled:
                         raise AnimatedChallengeError("the challenge never settles and video_solve_enabled is off")
                     _log(f'"unsupported" mid-solve; retrying ({unsupported_retries}/{cfg.max_unsupported_resolves}).')
                     continue
@@ -1820,7 +1709,7 @@ class PageSolver:
                 _log(f"[verdict] success signal arrived after {verdict_ms:.0f}ms")
                 return done()
 
-            if self._banner_is_fatal_after_retry(self._recaptcha_banner_kind(page)):
+            if self._banner_is_fatal_after_retry(self._banner_kind(page)):
                 if retried_underselect:
                     raise CaptchaSolveError(
                         "reCAPTCHA still showing the under-selection error after retry; aborting "

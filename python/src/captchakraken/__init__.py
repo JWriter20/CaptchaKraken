@@ -48,12 +48,15 @@ try:
     from .solver import CaptchaSolver, solve_captcha
 
     from .page_solver import PageSolver, SolveResult, solve_captcha_on_page
+    from .selectors import SELECTORS, VendorSelectors
     from .watcher import CaptchaWatcher
 except ModuleNotFoundError:
     ActionPlanner = None
     CaptchaSolver = None
     solve_captcha = None
     PageSolver = None
+    SELECTORS = None
+    VendorSelectors = None
     CaptchaWatcher = None
     SolveResult = None
     solve_captcha_on_page = None
@@ -62,6 +65,8 @@ __all__ = [
     "CaptchaSolver",
     "solve_captcha",
     "PageSolver",
+    "SELECTORS",
+    "VendorSelectors",
     "CaptchaWatcher",
     "SolveResult",
     "solve_captcha_on_page",

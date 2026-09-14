@@ -1,6 +1,7 @@
 export * from './types';
 export * from './kinds';
 export { CaptchaKrakenSolver } from './solver';
+export type { Widget } from './solver';
 
 export { resolveLoraName } from './model-name';
 
@@ -9,7 +10,9 @@ export type { CaptchaKrakenErrorCode } from './errors';
 
 export { fromPuppeteer } from './puppeteer-adapter';
 
-export type { Page, PlaywrightPage, PlaywrightFrame, PlaywrightElementHandle } from './playwright-types';
+export type { Page, PlaywrightPage, PlaywrightFrame, PlaywrightElementHandle, PlaywrightLocator, PlaywrightScope } from './playwright-types';
+export { SELECTORS } from './selectors';
+export type { VendorSelectors } from './selectors';
 
 export { watchPage } from './watcher';
 export type { CaptchaWatcher, WatchOptions, WatchableSolver } from './watcher';

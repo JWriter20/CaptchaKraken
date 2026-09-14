@@ -357,7 +357,7 @@ def main():
                         help="Kept for argv compatibility.")
     parser.add_argument("api_key", nargs="?", default=None, help="Bearer token (or CAPTCHA_KRAKEN_API_KEY).")
     parser.add_argument("--puzzle-source", default=Vendor.UNKNOWN, type=Vendor,
-                        choices=[Vendor.HCAPTCHA, Vendor.RECAPTCHA, Vendor.UNKNOWN],
+                        choices=list(Vendor),
                         help="Vendor hint; restricts which grid shapes a detection may be solved as.")
     parser.add_argument("--retry-mode", default=None, type=RetryMode, choices=list(RetryMode),
                         help="The vendor rejected the previous selection as incomplete.")
