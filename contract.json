@@ -137,27 +137,20 @@
     "subcommands": [
       "board-painted",
       "check-movement",
-      "check-movement-batch",
       "detect-selected",
       "fetch",
       "find-checkbox",
       "find-grid",
-      "find-movable",
-      "find-move",
       "get-numbered-grid",
       "grid-cell-states",
       "grid-cell-states-fixed",
-      "is-cell-changing",
-      "is-cell-selected",
-      "is-empty-cell",
       "match-region",
       "report-outcome",
       "serve",
       "server",
       "solve-animated",
       "track-piece",
-      "update",
-      "wait-for-cell-loaded"
+      "update"
     ],
     "solve_parser": [
       "--expert",
@@ -187,7 +180,6 @@
       "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_DEBUG": [
-      "js/src/solver.ts",
       "python/src/captchakraken/page_solver.py",
       "python/src/captchakraken/planner.py",
       "python/src/captchakraken/server_manager.py",

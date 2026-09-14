@@ -1,28 +1,3 @@
-/**
- * A still board is not a loaded board.
- *
- * Every gate in front of the inference screenshot asks whether the widget has
- * stopped CHANGING. The blank panel a vendor shows while it rebuilds the board
- * answers that with a confident yes — it is the stillest the widget ever is —
- * so the solver photographs the hole and asks the model to solve it. The model
- * answers the only way it can, with the middle of the image.
- *
- * MEASURED on gt4.geetest.com's slide demo, 2026-09-12, ten live attempts with
- * every request banked through a proxy in front of vLLM:
- *
- *     52 requests, 6 of them a panel with no puzzle in it
- *     every one of the 6 came back `to:[480,310]`-ish — dead centre
- *     attempt 1  the driver EXECUTED one: a drag to 48.5%, round burnt
- *     attempt 2  ended "solver performed no interactions" on a blank board
- *
- * The pairing that catches this today is `waitForHcaptchaChallengeImages`,
- * which asks the DOM and only knows hCaptcha. `waitForBoardPainted` asks the
- * picture, so it holds for GeeTest and everything else.
- *
- * The Python half is python/tests/test_a_blank_board_is_not_photographed.py;
- * both ports drive the same fixtures under Tier 3 and must answer alike.
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -30,12 +5,10 @@ import { resolve } from 'node:path';
 
 import { CaptchaKrakenSolver } from './solver';
 
-/** An element whose screenshot always succeeds, writing a byte to the path. */
 const el = () => ({
   async screenshot({ path }: { path: string }) { fs.writeFileSync(path, 'x'); },
 });
 
-/** A solver whose CV tool returns the given verdicts in order, then the last. */
 function solverSeeing(verdicts: Array<boolean | null>, config: Record<string, unknown> = {}) {
   const s: any = new CaptchaKrakenSolver({ boardPaintPollMs: 1, boardPaintTimeoutMs: 60, ...config });
   let i = 0;
@@ -64,8 +37,6 @@ test('a blank board is polled until it paints, and is not photographed blank', a
 });
 
 test('a board that never paints falls through rather than stalling the solve', async () => {
-  // The whole point of the budget: a gate that can refuse to ever take a
-  // picture turns one wasted round into a dead solve.
   const s = solverSeeing([false]);
   const started = Date.now();
   const { verdict } = await s.waitForBoardPainted(el());
@@ -74,8 +45,6 @@ test('a board that never paints falls through rather than stalling the solve', a
 });
 
 test('an unreadable image is not treated as a blank one', async () => {
-  // `painted: null` means the CV tool could not open the file. Looping on it
-  // would spend the whole budget every round on a box that never opens.
   const s = solverSeeing([null]);
   const { verdict } = await s.waitForBoardPainted(el());
   assert.equal(verdict, 'unknown');
@@ -96,17 +65,6 @@ test('a screenshot that throws is a skipped poll, not a verdict', async () => {
 });
 
 test('the freshness re-solve waits for paint before it re-photographs', async () => {
-  /*
-   * The path that most needs the gate, and the one it was missing.
-   *
-   * `solveFrameFreshnessGuarded` re-queries when the frame changed during
-   * inference — which is exactly the moment a vendor that rebuilds its panel
-   * between rounds is showing the blank. MEASURED 2026-09-12, gate on the main
-   * screenshot only: 2 of 12 live requests still carried a board with no puzzle
-   * in it, and both were `freshsolve_*` frames.
-   */
-  // `__dirname` is src/ under tsx and .test-build/ when compiled; both are one
-  // level under js/, which is the idiom contract.test.ts already uses.
   const src = fs.readFileSync(resolve(__dirname, '..', 'src', 'solver.ts'), 'utf8');
   const at = src.indexOf('`freshsolve_${Date.now()}');
   assert.notEqual(at, -1, 'could not find the freshness re-solve frame');

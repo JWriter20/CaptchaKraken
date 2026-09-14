@@ -1,15 +1,3 @@
-"""
-Hermetic tests for the stale-frame ("image changed during inference") guard's
-Python half: the `check-movement` frame-diff the JS solver calls after every
-model query to decide whether the captcha frame changed while the model was
-generating. Covers both entry points the solver uses:
-
-  * ImageProcessor.detect_movement — the primitive.
-  * the persistent CV worker's `check-movement` command — the warm path the
-    solver actually drives (one long-lived process, cv2 imported once).
-
-Synthesizes frames in memory, so it runs anywhere (no GPU, no network).
-"""
 import json
 import os
 import subprocess
@@ -21,7 +9,7 @@ import pytest
 
 cv2 = pytest.importorskip("cv2")
 
-from captchakraken.image_processor import ImageProcessor  # noqa: E402
+from captchakraken.image_processor import ImageProcessor
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -34,7 +22,7 @@ def _write(path: Path, arr: np.ndarray) -> str:
 def _frames(tmp_path):
     base = np.zeros((80, 80, 3), np.uint8)
     changed = base.copy()
-    changed[:50, :50] = 255  # ~39% of pixels flip — a clear "tile faded in"
+    changed[:50, :50] = 255
     a = _write(tmp_path / "a.png", base)
     b = _write(tmp_path / "b.png", base.copy())
     c = _write(tmp_path / "c.png", changed)
@@ -54,9 +42,6 @@ def test_detect_movement_resolution_change_is_movement(tmp_path):
 
 
 def test_serve_worker_check_movement(tmp_path):
-    """Drive the exact worker protocol the JS solver uses for its freshness
-    check: start `captchakraken serve`, send check-movement requests over stdin,
-    read one JSON response line each."""
     a, b, c = _frames(tmp_path)
     env = {**os.environ, "PYTHONPATH": SRC}
     proc = subprocess.Popen(

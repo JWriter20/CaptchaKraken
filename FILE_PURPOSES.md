@@ -41,7 +41,7 @@ your Page  ──>  driver (js/src/solver.ts  or  python/.../page_solver.py)
                   │                             prompts.py picks the generation
                   │                             models.json says which, per model
                   ├─<  an action plan (action_types.py)
-                  ├─>  humanize.py / trajectory.py perform it as mouse or touch
+                  ├─>  humanize.py performs it as mouse or touch
                   └─>  verify, or go round again
 ```
 
@@ -139,7 +139,6 @@ answers with a frame number the driver then waits for on screen.
 | `js/src/limits.ts` | The round and billing ceilings that must agree with the hosted gateway, stated once. |
 | `js/src/model-name.ts` | Which served adapter name this client asks for — the same answer the Python port gives, because the name selects the prompt generation. |
 | `js/src/humanize.ts` | How the driver moves: one pluggable object per input device — mouse, mobile touch (over CDP, Appium or a Playwright touchscreen), or none. |
-| `js/src/trajectory.ts` | Mouse paths from Cursory's recorded-human database; the touch model here is still ours. |
 | `js/src/slide-geometry.ts` | The algebra behind a puzzle-piece slider: where to drag the handle so the piece lands in the gap, at any device pixel ratio. |
 | `js/src/playwright-types.ts` | Minimal structural `Page`, `Frame` and `ElementHandle` types, defined here rather than imported, so the package depends on no browser library and accepts any Playwright-compatible one. |
 | `js/src/puppeteer-adapter.ts` | `fromPuppeteer()`: translates the handful of methods Puppeteer names differently onto that structural surface. |
@@ -260,14 +259,12 @@ something every browser-driver install should pay for.
 | `python/src/captchakraken/keyframes.py` | Reduces a recorded clip to the few frames the model is shown. A verbatim port of the extractor the model was trained with — if this copy sliced differently, the frame number the model answers with would name a picture that does not exist. Its region-diff metric is also the driver's wait-for-state gate. |
 | `python/src/captchakraken/humanize.py` | The Python mirror of `js/src/humanize.ts`: one pluggable object per input device. |
 | `NOTICE` | Third-party licence notices — currently Cursory (LGPL), used as an installed dependency and never vendored. |
-| `python/src/captchakraken/trajectory.py` | Mouse paths from Cursory's recorded-human database; the touch model here is still ours. |
 | `python/src/captchakraken/server_manager.py` | Hands-off local vLLM lifecycle: start in the background and wait until healthy, run in the foreground, stop, report status, and auto-start on the first solve unless told not to. |
 | `python/src/captchakraken/updater.py` | `captchakraken fetch`: pull newer weights, upgrade the serving stack, and restart a running local server so the change takes effect. |
 | `python/src/captchakraken/errors.py` | `CaptchaKrakenAPIError` and its stable codes: the endpoint may be a local vLLM or the hosted API, and a refusal from the latter has to arrive as something a caller can branch on. |
 | `python/src/captchakraken/timing.py` | Lightweight timing helpers used to account for a solve by phase. |
 | `python/src/captchakraken/tool_calls/find_grid.py` | The OpenCV lattice finder. Pure computer vision, no model, and the foundation every grid solve rests on — which is why it is the most heavily tested file here. |
 | `python/src/captchakraken/tool_calls/find_checkbox.py` | Finds the "I'm not a robot" checkbox by contour, before any model is involved. |
-| `python/src/captchakraken/tool_calls/move_indicator.py` | Finds hCaptcha's draggable "Move" pills, and the card or object each one carries. |
 | `python/src/captchakraken/tool_calls/board_painted.py` | Answers whether the widget has PAINTED its puzzle or is showing the blank panel it rebuilds behind, so a hole is never sent to the model. |
 | `python/src/captchakraken/tool_calls/track_piece.py` | Finds a slider's puzzle piece by what moved, telling it apart from the ground it vacated, so the driver can steer by where the piece IS rather than by where the arithmetic says it should be. |
 
@@ -307,10 +304,8 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_humanizer.py` | Humanisation is an input device, not a realism dial: the mobile device never emits a mouse event. |
 | `python/tests/test_grid_detection_ci.py` | The hermetic grid-detection smoke tests: the checks that need no corpus of real captures. |
 | `python/tests/test_grid_geometry_gates.py` | Every geometry gate `find_grid` applies, one test per bug that happened while they were written. |
-| `python/tests/test_the_two_ports_share_one_mouse.py` | The mouse is a port, not a rewrite, so the two drivers agree on a seed exactly rather than statistically. |
 | `python/tests/test_the_notice_travels_with_the_package.py` | The LGPL notice for Cursory has to reach both published packages, and three copies are three chances to drift. |
 | `python/tests/test_a_grid_is_a_regular_lattice.py` | Every other grid check asks what is inside the cells; a click board over a photo passes those and is not a lattice. |
-| `python/tests/fixtures/cursory_cross_port.json` | The recorded JS-port trajectory `test_the_two_ports_share_one_mouse.py` checks the Python port against — seed 42 over (120, 80) -> (940, 560), points and timings. |
 | `python/tests/test_grid_dims_must_be_possible.py` | `find_grid` proposes lattices; a shape no vendor actually ships is a false positive. |
 | `python/tests/test_grid_flank_contrast.py` | A chosen lattice must separate something — gutters running across a smooth background separate nothing. |
 | `python/tests/test_grid_noisy_gutter.py` | A traced gutter line must survive noise instead of ending at the first pixel that fails the step test. |

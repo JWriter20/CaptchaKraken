@@ -1,18 +1,3 @@
-/**
- * The Puppeteer adapter's translation layer, pinned delta by delta.
- *
- * This file exists because the adapter's own header claimed it was "verified
- * against Puppeteer 24.x" while nothing verified it: the package had no test
- * that touched it, and Tier 3 drives Camoufox only, on both ports. Every
- * assertion below is one of the API differences that header lists, so a
- * Puppeteer release that moves one of them fails here instead of failing as a
- * mysteriously unsolvable captcha in a user's automation.
- *
- * A recording fake rather than a real browser: what is being tested is the
- * TRANSLATION — that Playwright-shaped calls arrive at Puppeteer-shaped ones —
- * and that is a property of the wrapper, observable without launching Chrome.
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -20,8 +5,6 @@ import { fromPuppeteer } from './puppeteer-adapter';
 
 interface Call { method: string; args: any[]; }
 
-// Not `calls.at(-1)`: the package targets ES2020, where Array.prototype.at
-// does not exist. Tests compile under the same target as the shipped code.
 const last = (calls: Call[]): Call => calls[calls.length - 1];
 
 function fakeHandle(calls: Call[], name = 'handle') {
@@ -33,7 +16,7 @@ function fakeHandle(calls: Call[], name = 'handle') {
     isVisible: async () => { calls.push({ method: `${name}.isVisible`, args: [] }); return true; },
     evaluate: async (fn: Function, ...args: any[]) => {
       calls.push({ method: `${name}.evaluate`, args });
-      // Run against a stub element so the wrapper's own closure is exercised.
+
       return fn({ getAttribute: (n: string) => `attr:${n}`, textContent: 'text!' }, ...args);
     },
     $: async (sel: string) => { calls.push({ method: `${name}.$`, args: [sel] }); return fakeHandle(calls, 'child'); },

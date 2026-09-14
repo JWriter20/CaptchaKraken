@@ -1,23 +1,3 @@
-/**
- * Ask and watch at the same time.
- *
- * The screenshot goes to the model and the recording starts in the same breath,
- * because the burst is the only thing that can tell a cycling board from a
- * still one AND is also the recording that answers it. Whichever the board
- * turns out to be, the answer arrives about one inference from now:
- *
- *   still  — one picture seen, the still answer stands, frames dropped. Costs
- *            nothing: the burst happened inside a wait we were already making.
- *   moving — the still answer is discarded UNREAD (it describes a screen that
- *            has gone), the burst runs to the end of the cycle, and the
- *            multi-image answer is used. Two inference CALLS, about one
- *            inference of wall-clock.
- *
- * The shape before this learned the same thing in whole ROUNDS — answer a
- * still, act on it, notice nothing moved, answer another still, then record.
- * Measured at ~15s of a 40.3s solve, and three inference calls for a puzzle
- * whose entire task is one click.
- */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -26,7 +6,6 @@ import { CaptchaKrakenSolver } from './solver';
 const STILL = { actions: [{ action: 'click', target_bounding_boxes: [[0.1, 0.1, 0.2, 0.2]] }], token_usage: [] };
 const VIDEO = { actions: [{ action: 'click', target_bounding_boxes: [[0.4, 0.4, 0.5, 0.5]], frame: 2 }], token_usage: [] };
 
-/** A solver whose recording either sees movement or does not. */
 function speculating(moved: boolean) {
   const solver: any = new CaptchaKrakenSolver({});
   const calls: string[] = [];
@@ -71,8 +50,6 @@ test('a moving board drops the still answer and finishes the recording', async (
 });
 
 test('reCAPTCHA never speculates', () => {
-  // Its dynamic 3x3 replaces tiles in place and has its own fade gates; a burst
-  // there would film a fade and call it a cycle.
   const on: any = new CaptchaKrakenSolver({ speculativeBurstEnabled: true });
   assert.equal(on.shouldSpeculate('recaptcha', false), false);
   assert.equal(on.shouldSpeculate('hcaptcha', false), true);
@@ -80,22 +57,12 @@ test('reCAPTCHA never speculates', () => {
 });
 
 test('speculating is ON when unset', () => {
-  // It was opt-in while `moved()` read a board that transitions ONCE as
-  // animated: a fade or a settle lost its correct still answer and filmed to
-  // the ceiling — 12s of recording a picture, on the types cheapest to solve
-  // without it. `moved()` now also requires a NEW screen inside a floor window,
-  // so a settle reads as still and only a real cycle escalates.
-  //
-  // Unset therefore means ON, and `=== false` is the line that decides it:
-  // `!== true` would make unset off, which is what it used to be. Being on is
-  // what stops an animated board paying a WRONG CLICK to discover it cycles.
   const unset: any = new CaptchaKrakenSolver({});
   assert.equal(unset.shouldSpeculate('hcaptcha', false), true);
   assert.equal(unset.shouldSpeculate('unknown', false), true);
 });
 
 test('a distorted-text round never speculates', () => {
-  // The answer is a string, not a place. Nothing in a recording helps read one.
   const solver: any = new CaptchaKrakenSolver({ speculativeBurstEnabled: true });
   assert.equal(solver.shouldSpeculate('unknown', true), false);
 });
@@ -108,9 +75,6 @@ test('it can be turned off, and off is the old behaviour', () => {
 });
 
 test('the speculative round does not wander the cursor over what it is filming', () => {
-  // withIdleWander drifts the pointer across the widget during inference. Every
-  // frame would then have a mouse in a different place, which reads as a board
-  // with a dozen screens — and one live burst reported exactly that.
   const fs = require('node:fs') as typeof import('fs');
   const path = require('node:path') as typeof import('path');
   const src = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'solver.ts'), 'utf8');

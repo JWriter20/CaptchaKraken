@@ -1,27 +1,3 @@
-"""
-Shared runner for the CaptchaKraken Python demos.
-
-Launches a real stealth browser (camoufox, using the binary from your fork —
-JWriter20/camoufox releases; see README.md), navigates to a page with a captcha
-on it, and solves it THE WAY PRODUCTION DOES: `PageSolver` finds the widget,
-opens the challenge, clicks, submits, and decides whether the vendor accepted.
-It reports token-generation speed, total time, and whether the solve succeeded,
-plus a best-effort reason when it didn't.
-
-Point it at any URL:
-
-    python examples/demoHcaptcha.py                       # the built-in demo page
-    python examples/demoHcaptcha.py https://your.site/    # anything else
-    python examples/demoHcaptcha.py https://your.site/ --headed
-
-This used to be image-in / actions-out — screenshot the challenge, ask the
-engine for a click plan, print how many tiles it would have clicked, and stop.
-That measured the model but never the driver, and a recording of it showed a
-captcha nobody touched. `captchakraken.page_solver` is the Python mirror of the
-TypeScript driver, so both ports now demo the same end-to-end path, which is
-what CLAUDE.md rule 1c asks for.
-"""
-
 import argparse
 import json
 import os
@@ -38,17 +14,10 @@ from captchakraken.page_solver import CaptchaSolveError, PageSolver
 class DemoSpec:
     name: str
     url: str
-    vendor: str  # "recaptcha" | "hcaptcha" — advisory; PageSolver auto-detects
+    vendor: str
 
 
 def spec_from_argv(default: DemoSpec, argv=None) -> DemoSpec:
-    """Let any demo point at an arbitrary page.
-
-    The vendor stays a default rather than being inferred from the URL: it only
-    selects the wording of a failure explanation, and PageSolver detects the
-    actual widget itself. Guessing it from a hostname would be wrong exactly on
-    the pages worth demoing — your own site, embedding someone else's captcha.
-    """
     ap = argparse.ArgumentParser(
         description=f"CaptchaKraken demo — {default.name}",
         epilog="With no URL, runs against the built-in demo page.")
@@ -69,21 +38,8 @@ def spec_from_argv(default: DemoSpec, argv=None) -> DemoSpec:
 
 
 def _launch_kwargs() -> dict:
-    # HUMANIZE defaults OFF, same as tests/live-solve/solve_fixture.py, and for
-    # the same measured reason. The solver already moves the mouse along its own
-    # 60-point trajectory (`_smooth_move` -> `generate_trajectory`); camoufox's
-    # humanize juggler then expands EACH of those 60 micro-moves into its own
-    # humanised sub-trajectory — 60 nested traversals to cover one straight
-    # line. On this demo page that is 25-52s per click round instead of ~5s,
-    # which does not merely look slow: it blows the 120s overall_solve_timeout
-    # and reports a solvable captcha as "not solved". What a vendor scores is
-    # the trajectory SHAPE, and that comes from generate_trajectory either way.
-    # Set HUMANIZE=1 to drive it the other way against a vendor that
-    # fingerprints motion.
     kw = dict(headless=os.getenv("HEADLESS", "1") != "0",
               humanize=os.getenv("HUMANIZE", "0") != "0", geoip=False)
-    # Point camoufox at YOUR fork's binary. If unset, camoufox uses its default
-    # cached binary (`python -m camoufox fetch`).
     binary = os.getenv("CAMOUFOX_BINARY") or os.getenv("CAMOUFOX_EXECUTABLE_PATH")
     if binary:
         kw["executable_path"] = binary
@@ -91,13 +47,6 @@ def _launch_kwargs() -> dict:
 
 
 def _page_kwargs() -> dict:
-    """Record the session when CAPTCHA_DEMO_VIDEO_DIR is set.
-
-    Plain Playwright options, but they only produce a video on a build whose
-    screencast actually emits frames. Stock camoufox accepts every one of them
-    and writes either nothing or a blank 0.96s file — no error anywhere — so a
-    caller that cares should check the size of what it gets back.
-    """
     out = os.getenv("CAPTCHA_DEMO_VIDEO_DIR")
     if not out:
         return {}
@@ -107,27 +56,17 @@ def _page_kwargs() -> dict:
 
 
 def _finish_video(page):
-    """Close the context so the container is finalised; return the file path.
-
-    Playwright writes the video on CONTEXT close, not page close — reading
-    video.path() before that names a file which may never appear.
-    """
     video = getattr(page, "video", None)
     if video is None:
         return None
     try:
         page.context.close()
         return video.path()
-    except Exception:  # noqa: BLE001 — a missing video must not fail the demo
+    except Exception:
         return None
 
 
 def _tokens(usage) -> tuple[int, int]:
-    """(input, output) over a SolveResult's usage log.
-
-    Accepts both spellings because the two ports report different ones and this
-    is a demo, not a place to discover a key mismatch as a zero.
-    """
     inp = out = 0
     for u in usage or []:
         inp += int(u.get("prompt_tokens", u.get("inputTokens", 0)) or 0)
@@ -175,11 +114,9 @@ def run_demo(spec: DemoSpec) -> None:
             page = browser.new_page(**_page_kwargs())
             try:
                 page.goto(spec.url, wait_until="domcontentloaded", timeout=60_000)
-                # The widget's iframe injects after DOMContentLoaded on every
-                # vendor; the TS harness waits the same way.
                 try:
                     page.wait_for_load_state("networkidle", timeout=15_000)
-                except Exception:  # noqa: BLE001 — a busy page is still solvable
+                except Exception:
                     pass
                 page.wait_for_timeout(3000)
 
@@ -196,10 +133,8 @@ def run_demo(spec: DemoSpec) -> None:
                 err = e
                 reason = _explain(spec.vendor, False, e)
             finally:
-                # In the finally so a failed run still yields its recording —
-                # that is the run you most want to watch back.
                 video_path = _finish_video(page)
-    except Exception as e:  # noqa: BLE001 — demo: report, don't traceback
+    except Exception as e:
         err = e
         reason = _explain(spec.vendor, False, e)
 
@@ -228,10 +163,6 @@ def _report(spec, *, ok, total_s, solve_s, inp, out, tps, reason, video=None):
         print(f"  reason        : {reason}")
     print(f"{line}\n")
 
-    # Optional machine-readable copy of the same report, appended as one JSON
-    # line. The printed block is for a human reading a terminal; anything that
-    # wants to keep the result — compare two adapters, chart tok/s over a
-    # week — should not have to scrape it back out of that text.
     record = os.getenv("CAPTCHA_DEMO_RECORD")
     if record:
         with open(record, "a", encoding="utf-8") as fh:

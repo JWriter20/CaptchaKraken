@@ -1,38 +1,8 @@
-/**
- * Watching a solve must not slow it down.
- *
- * `onStep` hands the caller a screenshot at each stage. That snapshot was taken
- * with `elementScreenshotTimeoutMs` — the budget sized for the picture the
- * MODEL reads, 8s — and with `animations: 'disabled'`, which makes Playwright
- * wait for the element to STOP MOVING before it will take it. A captcha widget
- * that is still animating never stops, so the wait ran to the full budget, per
- * step.
- *
- * MEASURED on an MTCaptcha distorted-text puzzle, the fixture, with the timestamps
- * printed from inside the round:
- *
- *     detect-done       59ms
- *     screenshot-done  818ms
- *     inference-done  2554ms
- *     answerBox         12ms
- *     moveAndClick     315ms
- *     typeText         465ms
- *     actions-done   11351ms      <- 8s of nothing, after the code was typed
- *
- * Eight seconds photographing a text box for a trace, on a solve whose actual
- * work was three and a half. An observer must never cost more than the action
- * it observes, and a missed frame in a trace costs nothing.
- *
- * The Python port has no onStep, so this was also a difference between the two
- * ports that only showed up as latency (CLAUDE.md 1c).
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CaptchaKrakenSolver } from './solver';
 
-/** The longest an observability snapshot may block a solve. */
 const MAX_STEP_SNAPSHOT_MS = 3000;
 
 function seen(config: Record<string, any> = {}) {
@@ -61,7 +31,6 @@ test('the caller can still size it', async () => {
 });
 
 test('no observer, no snapshot', async () => {
-  // The whole cost is skipped for the ordinary caller, and must stay skipped.
   const solver: any = new CaptchaKrakenSolver({});
   const shots: any[] = [];
   await solver.emitStep({ screenshot: async (o: any) => { shots.push(o); } },

@@ -1,27 +1,3 @@
-"""Regression: "Please also check the new images." is PROGRESS, not a rejection.
-
-reCAPTCHA writes three different sentences into the same corner of the bframe:
-
-    .rc-imageselect-incorrect-response   "Please try again."
-        the answer was WRONG; a fresh board follows.
-    .rc-imageselect-error-select-more    "Please select all matching images."
-        UNDER-SELECTED, and the tiles do NOT refresh — so a driver that
-        re-submits the same answer loops until it times out. The one-retry
-        abort exists for this case and is correct here.
-    .rc-imageselect-error-dynamic-more   "Please also check the new images."
-        RIGHT SO FAR. The dynamic 3x3's normal flow: cleared tiles fade out,
-        replacements fade in, and the widget says so — on essentially every
-        round of that variant.
-
-Both ports used to read all three through one boolean, so the third armed the
-abort latch and every dynamic board died at round two. Measured 2026-09-06 on
-google.com/recaptcha/api2/demo with the loop budget raised to 12: three of three
-`recaptcha_3x3_fade` attempts ended at exactly boards=2, while `recaptcha_4x4`
-on the same run passed at 2, 3 and 5 boards. The vendor was still dealing.
-
-Pinned identically in `js/src/recaptcha-dynamic-more-is-not-an-error.test.ts`
-(rule 1c). If one moves, move both.
-"""
 from __future__ import annotations
 
 import pytest
@@ -88,7 +64,6 @@ def test_each_banner_is_named_separately(solver, selector, text, expected):
 
 
 def test_dynamic_more_never_arms_the_abort():
-    """The one that cost us the variant. Two in a row is an ordinary solve."""
     assert PageSolver._banner_is_fatal_after_retry("dynamic-more") is False
 
 

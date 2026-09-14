@@ -1,32 +1,3 @@
-"""
-The Python driver's compatibility claim, checked against a REAL browser.
-
-Twin of `js/src/browser-compat.test.ts`, and it exists for the same reason:
-`test_page_solver.py` drives a fake page, which cannot catch Playwright
-CHANGING one of the methods the driver calls. A fake happily keeps agreeing
-with a driver that no longer matches the library.
-
-The driver duck-types the Playwright surface and imports no browser package
-(see page_solver.py's module docstring), so what is verified here is that a
-real `sync_playwright` page actually provides every member that duck-typing
-assumes — and that the watcher drives one end to end.
-
-RUNS WHEREVER A BROWSER EXISTS. Playwright pins one exact Chromium build and
-refuses to launch any other, so `chromium.launch()` with no path fails on a box
-that HAS Chromium — just not the pinned one — and this file used to report that
-as four ERRORS. Four broken tests, in the one place that checks the
-compatibility claim against something real. So the launch walks every installed
-build and passes `executable_path`, the same resolution
-the training repo's fixture suite uses.
-
-Skipping is reserved for a box with NO browser at all, because the package
-ships with no browser dependency and an end user is not required to have one.
-Skipping because the pinned BUILD NUMBER moved is not that, and hid a browser
-that launches fine. To install one:
-
-    pip install playwright && playwright install chromium
-"""
-
 from __future__ import annotations
 
 import sys
@@ -42,7 +13,7 @@ sync_playwright = pytest.importorskip(
     "playwright.sync_api", reason="playwright not installed"
 ).sync_playwright
 
-from captchakraken.watcher import CaptchaWatcher  # noqa: E402
+from captchakraken.watcher import CaptchaWatcher
 
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
@@ -57,12 +28,6 @@ HTML = """
 
 
 def _installed_chromiums() -> List[str]:
-    """Every Chromium build on the box, newest first.
-
-    Playwright resolves ONE pinned build and errors if it is missing, which is
-    a version check dressed as an availability check: `playwright install`
-    fetching build N+1 does not make build N stop working.
-    """
     cache = Path.home() / ".cache" / "ms-playwright"
     rels = ("chrome-linux64/chrome", "chrome-linux/chrome",
             "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
@@ -79,9 +44,6 @@ def _installed_chromiums() -> List[str]:
 @pytest.fixture(scope="module")
 def page():
     with sync_playwright() as p:
-        # The pinned build first — on a correctly provisioned box that is the
-        # right answer and needs no path. Then every build actually present.
-        # Only when none of them launches is there genuinely no browser here.
         attempts: List[dict] = [{}]
         attempts += [{"executable_path": exe} for exe in _installed_chromiums()]
         browser = None
@@ -90,7 +52,7 @@ def page():
             try:
                 browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS, **kwargs)
                 break
-            except Exception as exc:                  # noqa: BLE001
+            except Exception as exc:
                 failures.append(f"{kwargs.get('executable_path', 'pinned build')}: "
                                 f"{str(exc).splitlines()[0]}")
         if browser is None:
@@ -106,12 +68,10 @@ def page():
 def test_a_real_page_provides_every_member_the_driver_duck_types(page: Any) -> None:
     page.set_content(HTML)
 
-    # Element lookup — by far the most-used call in the driver.
     target = page.query_selector("#target")
     assert target is not None, "query_selector"
     assert len(page.query_selector_all("div")) >= 2, "query_selector_all"
 
-    # Element reads.
     assert target.get_attribute("data-vendor") == "recaptcha", "get_attribute"
     assert (target.text_content() or "").strip() == "hello captcha", "text_content"
     assert target.is_visible() is True, "is_visible (visible element)"
@@ -120,19 +80,16 @@ def test_a_real_page_provides_every_member_the_driver_duck_types(page: Any) -> N
     target.scroll_into_view_if_needed()
     assert len(target.screenshot()) > 0, "element screenshot"
 
-    # Page-level evaluation.
     assert page.evaluate("() => document.title") == "", "evaluate"
     assert page.eval_on_selector("#target", "el => el.id") == "target", "eval_on_selector"
     assert page.viewport_size == {"width": 1280, "height": 720}, "viewport_size"
 
-    # The iframe path — how every real captcha is reached.
     frame = page.query_selector("#frame").content_frame()
     assert frame is not None, "content_frame"
     assert frame.query_selector("#inner") is not None, "frame.query_selector"
     assert frame.wait_for_selector("#inner", state="visible", timeout=5000), "frame.wait_for_selector"
     frame.wait_for_function("() => !!document.querySelector('#inner')", timeout=5000)
 
-    # Input.
     page.mouse.move(100, 100, steps=4)
     page.mouse.down(button="left")
     page.mouse.up(button="left")
@@ -155,8 +112,6 @@ def test_the_watcher_solves_a_captcha_that_appears_after_it_is_installed(page: A
             return p.query_selector("#late-captcha")
 
         def solve(self, p: Any) -> Any:
-            # Removing it is what a real solve does to the challenge; the next
-            # probe must then find nothing, or the watcher re-solves forever.
             p.eval_on_selector("#late-captcha", "el => el.remove()")
             solved.append(True)
             return {"is_solved": True}
@@ -177,7 +132,6 @@ def test_the_watcher_solves_a_captcha_that_appears_after_it_is_installed(page: A
 
 
 def test_poll_once_drives_a_real_page_without_blocking(page: Any) -> None:
-    """The cooperative shape: a caller with their own loop calls poll_once()."""
     page.set_content('<body><div id="late-captcha"></div></body>')
 
     class Solver:
@@ -197,17 +151,6 @@ def test_poll_once_drives_a_real_page_without_blocking(page: Any) -> None:
 
 
 def test_one_watcher_covers_every_navigation_on_the_page(page: Any) -> None:
-    """The claim the whole per-page design rests on.
-
-    `watch(page)` is installed ONCE and must keep working as the page navigates
-    — which is what makes a browser-wide installer unnecessary for the case
-    people actually hit: a challenge appearing on request 40 of a scrape, on the
-    same page object the run started with. If a watcher stopped at the first
-    navigation, every caller would have to re-install after each `goto` and the
-    API would be the wrong shape.
-
-    Twin of the same case in js/src/browser-compat.test.ts.
-    """
     solved: List[Any] = []
 
     class Solver:
@@ -221,19 +164,16 @@ def test_one_watcher_covers_every_navigation_on_the_page(page: Any) -> None:
 
     watcher = CaptchaWatcher(solver=Solver(), page=page, interval_ms=25)
 
-    # Two clean navigations: the watcher must stay quiet, not error out.
     page.goto("data:text/html,<body>one</body>")
     watcher.run(timeout_ms=200)
     page.goto("data:text/html,<body>two</body>")
     watcher.run(timeout_ms=200)
     assert solved == [], "solved something on a page with no captcha"
 
-    # A challenge appears on a later navigation.
     page.goto("data:text/html,<body><div id='c'></div>three</body>")
     watcher.run(timeout_ms=800)
     assert len(solved) == 1, "the watcher did not survive navigation"
 
-    # And again, to prove it is still armed rather than having fired once.
     page.goto("data:text/html,<body><div id='c'></div>four</body>")
     watcher.run(timeout_ms=800)
     assert len(solved) == 2, "the watcher stopped arming after its first solve"

@@ -1,27 +1,3 @@
-"""Two round trips per solve that bought nothing.
-
-1. NO CONNECTION WAS EVER REUSED. Every inference went through a bare
-   `requests.post`, which opens a new TCP connection — and, to a hosted HTTPS
-   endpoint, does a new TLS handshake on top. Measured against this project's
-   own endpoint, 8 requests each way:
-
-       fresh connection   p50 258ms
-       pooled reuse       p50 144ms
-
-   ~110ms per inference, paid again on every round of a multi-round grid, for
-   a server the process had finished talking to a second earlier.
-
-2. `ensure_server` ASKED A REMOTE SERVER FOR /health BEFORE DECIDING IT WAS
-   REMOTE. The function's whole job is to boot a LOCAL vLLM if one is not up;
-   for an endpoint we do not manage there is nothing to ensure and the very
-   next line returns. So the health GET was a round trip spent to reach a
-   `return` — and up to its 2s timeout against a hosted gateway that serves no
-   /health at all. Paid once per ActionPlanner, which for a caller using
-   `solve_captcha_on_page` is once per solve.
-
-Neither could show up as a failure: both are latency on a path that works.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -32,8 +8,8 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from captchakraken import server_manager  # noqa: E402
-from captchakraken.planner import ActionPlanner  # noqa: E402
+from captchakraken import server_manager
+from captchakraken.planner import ActionPlanner
 
 
 def _planner() -> ActionPlanner:
@@ -48,7 +24,6 @@ def test_the_planner_holds_one_session_for_every_request():
 
 
 def test_the_planner_never_posts_outside_that_session():
-    """The pool is inert if one call site still uses the module function."""
     source = (Path(__file__).resolve().parents[1]
               / "src" / "captchakraken" / "planner.py").read_text()
     assert "requests.post(" not in source, (
@@ -68,7 +43,6 @@ def test_a_remote_endpoint_is_not_health_checked(monkeypatch):
 
 
 def test_a_local_endpoint_is_still_health_checked(monkeypatch):
-    """The guard against 'just return early'."""
     called = []
     monkeypatch.setattr(server_manager, "is_healthy",
                         lambda *a, **k: called.append(a) or True)

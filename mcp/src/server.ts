@@ -1,31 +1,3 @@
-/**
- * The tools.
- *
- * WHAT THIS SERVER IS FOR: letting an agent provision and watch its own captcha
- * solving. Sign the human in, mint a key for the hosted endpoint, report what has
- * been spent, and hand over a payment link when the balance runs low. It does
- * not solve captchas — that is the gateway's OpenAI-compatible endpoint, and
- * the key minted here is what talks to it.
- *
- * TWO RULES SHAPE EVERY TOOL BELOW.
- *
- *  1. NOTHING SPENDS MONEY WITHOUT A HUMAN. `get_topup_link` returns a URL. It
- *     does not charge a card, and there is no tool that can. An agent may
- *     *offer* to spend; a person clicks.
- *
- *  2. NO TOOL OUTPUT EVER CONTAINS A LIVE CREDENTIAL. `create_api_key` writes
- *     the minted key straight to a 0600 file and reports the PATH; the solver
- *     reads it from there. Returning the secret — which this tool used to do —
- *     puts it in the transcript the moment an agent repeats it in a summary,
- *     and asking the agent nicely not to is not a control. The management
- *     token obtained by `sign_in` is likewise written to disk and never
- *     printed.
- *
- * Read-only tools are annotated as such so a client can decide what needs
- * confirming. `create_api_key` and `revoke_api_key` are not read-only and are
- * marked destructive where they are.
- */
-
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
@@ -41,16 +13,6 @@ import {
 } from './credentials.js';
 import type { PendingDevice } from './credentials.js';
 
-/**
- * How long `sign_in` waits before handing control back.
- *
- * Deliberately short. MCP clients time tool calls out — 60 seconds is a common
- * default — and a sign-in that blocks for two minutes gets killed with the
- * device code stranded. So this polls for well under any of them, then returns
- * "still waiting, call me again", and the pending code is on disk so the next
- * call resumes the same flow rather than printing a second code at a human who
- * is already looking at the first one.
- */
 const SIGN_IN_WAIT_MS = 25_000;
 
 interface DeviceStart {
@@ -84,11 +46,7 @@ interface AccountResponse {
     balance_usd: string;
     low_balance_threshold: number | null;
     low_balance: boolean;
-    /**
-     * Optional because a control plane older than migration 0008 does not send
-     * them, and an MCP client is distributed — it meets whatever is deployed.
-     * Absent reads as "a normal account", which is the safe way to be wrong.
-     */
+
     unlimited?: boolean;
     is_admin?: boolean;
   };
@@ -117,7 +75,7 @@ interface UsageResponse {
   ledger: Array<{ at: string; kind: string; delta_credits: number; usd_amount_cents: number | null }>;
   balance_credits: number;
   balance_usd: string;
-  /** Absent on a control plane older than migration 0008. */
+
   unlimited?: boolean;
 }
 
@@ -154,13 +112,6 @@ function failure(body: string): ToolResult {
   return { content: [{ type: 'text', text: body }], isError: true };
 }
 
-/**
- * Turn a thrown ApiError into something an agent can act on.
- *
- * `not_signed_in` gets the instruction rather than the raw message, because it
- * is the one failure with an obvious next step and an agent that is told the
- * step will take it instead of reporting an error to the human.
- */
 function describe(error: unknown): ToolResult {
   if (error instanceof ApiError) {
     if (error.code === 'not_signed_in' || error.status === 401) {
@@ -185,8 +136,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
         'the key it mints is used against the OpenAI-compatible endpoint reported by get_account.',
     },
   );
-
-  // ── signing in ────────────────────────────────────────────────────────────
 
   server.registerTool(
     'sign_in',
@@ -217,8 +166,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           );
         }
 
-        // Resume a code that is still live rather than printing a second one at
-        // a human who is already looking at the first.
         let pending = credential.pending;
         if (!pending || pending.expiresAtMs <= Date.now()) {
           const started = await api.request<DeviceStart>('/api/v1/device/start', {
@@ -268,7 +215,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           );
         }
 
-        // Denied or dead. Drop the pending code so the next call starts clean.
         const { pending: _dropped, ...withoutPending } = credential;
         saveCredential(baseUrl, withoutPending);
         return failure(
@@ -293,9 +239,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     },
     async () => {
       try {
-        // Revoke server-side first. If that fails we still have the token, and
-        // deleting it locally would leave a live credential nobody can reach to
-        // revoke — the file is the only copy of it.
         await api.request('/api/v1/signout', { method: 'POST' });
         clearCredential(baseUrl);
         return text('Signed out. The token has been revoked on the server and removed from disk.');
@@ -308,8 +251,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
       }
     },
   );
-
-  // ── the account ───────────────────────────────────────────────────────────
 
   server.registerTool(
     'get_account',
@@ -326,9 +267,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
         const lines = [
           `Account:   ${me.account.github_login ?? `#${me.account.user_id}`}${me.account.is_admin ? ' (admin)' : ''}`,
           `Email:     ${me.account.email ?? '(none on file)'}`,
-          // An exempt account's balance is real and simply never spent. Printing
-          // it alone would have an agent reason about a number that cannot move,
-          // and offer top-ups against it.
+
           me.account.unlimited
             ? `Balance:   unlimited — this account is not billed for solves`
             : `Balance:   ${me.account.balance_usd} (${me.account.balance_credits.toLocaleString('en-US')} credits)`,
@@ -396,8 +335,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
       try {
         const usage = await api.request<UsageResponse>('/api/v1/usage');
 
-        // Sliced here rather than asked for: the window is fixed server-side
-        // because that is what makes the read cheap. See the note on the route.
         const window = days ?? usage.window_days;
         const daily = usage.daily.slice(-window);
         const credits = daily.reduce((sum, day) => sum + day.credits, 0);
@@ -457,8 +394,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     },
   );
 
-  // ── keys ──────────────────────────────────────────────────────────────────
-
   server.registerTool(
     'list_api_keys',
     {
@@ -514,13 +449,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           body: { name: name ?? null },
         });
 
-        // The secret goes to disk and NOT into this tool's result. Everything
-        // returned below is safe to repeat: an id, a masked form, and a path.
-        //
-        // The write is the last thing that can fail, and if it does the key
-        // already exists server-side — so say so plainly rather than pretending
-        // nothing happened, and point at revoke. Silently swallowing this would
-        // strand a live key that the user does not know they own.
         let credentialFile: string;
         try {
           credentialFile = writeSolverCredential({
@@ -581,8 +509,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     },
   );
 
-  // ── money ─────────────────────────────────────────────────────────────────
-
   server.registerTool(
     'get_topup_link',
     {
@@ -627,10 +553,6 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           );
         }
 
-        // The packs are SUGGESTIONS now, not the set of amounts on sale — the
-        // page takes any whole dollar amount in the range. Presenting them as
-        // "available packs" is what would make an agent tell a human they have
-        // to pick one of three.
         const packs = (result.packs ?? [])
           .map(
             (pack) =>
@@ -687,16 +609,14 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           lines.push(
             `${row.label}: $${row.usd_per_1000_responses.toFixed(2)} per 1,000 (${row.credits_per_response} credits each)`,
             `  ${row.covers}`,
-            // The number that turns a rate into a cost. Without it an agent
-            // estimating a job would quietly assume one response per captcha.
+
             `  Typically ${row.typical_responses_per_captcha} response(s) per captcha`,
           );
         }
         lines.push(
           '',
           `Free (never reach the model): ${pricing.free_challenges.join(', ')}`,
-          // The ceiling an agent should actually plan against: one captcha can
-          // never cost more than this, however badly it goes.
+
           `One captcha costs at most ${pricing.max_billable_responses_per_session} billable responses ` +
             `($${((pricing.classes.find((row) => row.puzzle_class === 'image')?.usd_per_1000_responses ?? 0) * pricing.max_billable_responses_per_session).toFixed(2)} per 1,000 for images). ` +
             `Responses past that are served free, and the attempt is abandoned after ${pricing.max_responses_per_session}.`,
@@ -743,14 +663,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           lines.push(`${model.name} — ${model.zone}`);
           lines.push(`  ${model.tagline}`);
           lines.push(`  Base: ${model.base_model}`);
-          /*
-           * `hosted` and "downloadable" are SEPARATE facts, and deriving one
-           * from the other is what made this listing wrong in both directions
-           * at once: it announced the unreleased model as "what the hosted API
-           * runs" and reported the model actually taking requests as "reserved,
-           * not uploaded yet". Twilight is downloadable AND serving; Abyss is
-           * neither. Read each flag for what it says.
-           */
+
           if (model.coming_soon) {
             lines.push('  Coming soon — not serving, nothing to download.');
           } else if (model.published) {
@@ -764,15 +677,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           if (model.accuracy !== null) {
             lines.push(`  Measured: ${(model.accuracy * 100).toFixed(1)}% exact match`);
           }
-          // NO VIDEO LINE. Animated support is a property of the GENERATION:
-          // every v1.2 model answers animated challenges and no v1 or v1.1 model
-          // can. The whole lineup is v1.2, so this printed on all three — which
-          // tells an agent choosing between them nothing, and implies the ones
-          // it is missing from cannot. It was worse than uninformative until
-          // 2026-09-06, when the control plane had Sunlight flagged `false` and
-          // this line said the 4-bit merge could not do video. The field is
-          // still published by `/api/v1/models`; it just is not worth a line
-          // while it is true of everything.
+
           lines.push('');
         }
         return text(lines.join('\n').trimEnd());
@@ -791,15 +696,6 @@ type PollOutcome =
   | { kind: 'denied' }
   | { kind: 'dead' };
 
-/**
- * Poll until the token arrives or the budget runs out.
- *
- * `slow_down` doubles the interval, permanently for this attempt, which is what
- * RFC 8628 §3.5 asks for. It should not happen — we honour the interval the
- * server gave us — but a clock that jumps or a retried call can produce it, and
- * an implementation that ignores it is one that hammers an unauthenticated
- * endpoint whenever it does.
- */
 async function pollForToken(api: ControlPlane, pending: PendingDevice): Promise<PollOutcome> {
   const deadline = Date.now() + SIGN_IN_WAIT_MS;
   let interval = Math.max(1, pending.intervalSeconds) * 1000;
@@ -832,8 +728,6 @@ async function pollForToken(api: ControlPlane, pending: PendingDevice): Promise<
       }
     }
 
-    // Do not overshoot the deadline sleeping: returning a moment early with
-    // "call me again" is better than being killed by the client's timeout.
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await sleep(Math.min(interval, remaining));

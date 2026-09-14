@@ -216,14 +216,10 @@ to fix, and discovering that twenty minutes into a test run is a waste nobody
 chose.
 
 **Coverage floors are set at what the suites measure, not at what the spec
-asks.** The spec wants 90% line and branch on a service anything external
-depends on. Python measures **58.31%** combined line-and-branch on 3.12 and
-58.33% on 3.10 — **31.69 points short** of 90. The TypeScript driver measures **71.10%
-line and 78.48% branch** — **18.90 and 11.52 points short**. The floors are
-therefore 58 and 71/78: the measured values rounded down. A gate that is red the
-day it lands blocks every pull request and teaches the team to bypass gates,
-which costs more than the gap it advertises. The numbers go up, never down, and
-the distance above is the number to close.
+asks.** A gate that is red the day it lands blocks every pull request and
+teaches the team to bypass gates, which costs more than the gap it advertises.
+The floors are the measured values rounded down (Python 69%, TypeScript 73%
+lines / 80% branches after the 2026-09 code cut); they go up, never down.
 
 **The Python floor is measured on the interpreters CI actually runs.** 3.10
 reports 58.33% and 3.12 reports 58.31% — 0.02 of a point apart — so the
@@ -337,13 +333,6 @@ test — those lines were uncovered because nothing called them. Two rules made 
 safe: an exported symbol is published API and was never a candidate, and every
 deletion had to be unreferenced across `git ls-files` AND across the installed
 consumers on this machine.
-
-**`planner.VIDEO_ACTION_PROMPT_TEMPLATE` is unreferenced and was kept.** Its two
-siblings, `SELECT_GRID_PROMPT` and `PIXEL_ACTION_PROMPT`, are hashed by
-`pinned_model.json` and asserted by `test_pinned_model.py`, so the three are one
-declared set rather than three loose constants — and the comment above it is the
-only explanation of the animated pipeline in that module. The function that used
-it was the duplicate worth deleting; the alias is one line.
 
 **Test output is kept out of the published package by the bundler, not by the
 test.** `python/tests/test_solver.py` writes debug PNGs to `latestDebugRun/`
@@ -487,9 +476,8 @@ median (193 vs 197 ms over 30 px, 681 vs 708 over 1000) with a much longer tail
 — max 1354 ms against 819 — which is what real people look like and is the
 thing to watch against the per-board clock. Import is ~60 ms and the first call
 5 ms, against a numpy the client already loads for OpenCV, so the per-solve cost
-is noise. The TOUCH model stays ours: Cursory records mice, and a finger is not
-a slower mouse — different velocity profile, different bow, a contact patch that
-wanders.
+is noise. Touch uses the same recordings at 90 Hz; a tap adds a one-pixel contact
+wobble, because a motionless tap is a synthetic one.
 
 THE LICENCE IS THE PART TO BE CAREFUL WITH. Both packages are
 LGPL-3.0-or-later and this product is source-available proprietary. That

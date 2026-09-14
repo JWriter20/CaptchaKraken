@@ -1,24 +1,3 @@
-/**
- * The opening gesture of a slide is a sweep at the slot, not a calibration nudge.
- *
- * `executeSlide` used to open by probing: two small nudges of the handle, +24px
- * and +64px, purely to measure how wide the piece is and how fast it follows,
- * before the drag had started going anywhere. That is two moves and two
- * screenshots spent in front of the vendor before the gesture reads as a drag
- * at all, and it looks nothing like a person using a slider.
- *
- * A person sweeps the handle to about where the piece belongs, looks, and
- * nudges. The distance between the piece and the slot is already an estimate of
- * the travel — the piece and the handle both start flush left — so the sweep
- * costs nothing to size, and the looks that correct it measure the widget on
- * the way, which is what the probes were for.
- *
- * The Python half is `python/tests/test_page_solver.py`'s
- * `TestSlideAimsBeforeItCorrects`; per project rule 1c the two ports must make
- * the same gesture, and a divergence here throws nothing on either side — the
- * handle just stops somewhere else.
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -29,12 +8,11 @@ const WIDGET_W = 400;
 const WIDGET_H = 400;
 const HANDLE = { x: 120, y: 420, width: 40, height: 30 };
 const ELEMENT = { x: 100, y: 100, width: WIDGET_W, height: WIDGET_H };
-const START_X = HANDLE.x + HANDLE.width / 2;   // 140
-const PIECE_REST = 30;                          // the piece's centre, in the widget
+const START_X = HANDLE.x + HANDLE.width / 2;
+const PIECE_REST = 30;
 const PIECE_W = 40;
 const TARGET_PX = 150;
 
-/** A byte-valid PNG header — enough for readPngDimensions and file I/O. */
 function writePng(file: string, width: number, height: number): void {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
@@ -47,10 +25,6 @@ function writePng(file: string, width: number, height: number): void {
   ]));
 }
 
-/**
- * Drive `executeSlide` over a 40px piece that follows the handle 1:1 and
- * return the handle offsets it actually swept to, in order.
- */
 async function drive(pieceInDom: boolean): Promise<number[]> {
   const sweeps: number[] = [];
   const state = { offset: 0 };
@@ -78,15 +52,13 @@ async function drive(pieceInDom: boolean): Promise<number[]> {
       if (sel.includes('slider') || sel.includes('btn')) return handle;
       return pieceInDom && sel.includes('slice') ? piece : null;
     },
-    // The piece is looked up with `$$`, not `$` — every match of each selector,
-    // so a generic pattern that hits the vendor's outer container before the
-    // piece cannot win. See `measurePieceBox`.
+
     $$: async (sel: string) =>
       (pieceInDom && sel.includes('slice') ? [piece] : []),
   };
 
   const solver: any = new CaptchaKrakenSolver({});
-  // The hover that grabs the handle is not a sweep and carries no piece.
+
   solver.move = async () => {};
   solver.performSmoothMove = async (_page: unknown, x: number) => {
     state.offset = x - START_X;
@@ -108,28 +80,15 @@ async function drive(pieceInDom: boolean): Promise<number[]> {
 }
 
 test('the first move goes most of the way to the slot', async () => {
-  // The handle sits 40px into the widget and the slot is at 150px, so the
-  // opening sweep is the ~110px between them — not 24px.
   const sweeps = await drive(false);
   assert.ok(sweeps[0] > 100, `opened with a ${sweeps[0].toFixed(0)}px nudge, not a sweep`);
 });
 
 test('the piece the page names is where the sweep is aimed', async () => {
-  // Piece centre 30 within the widget, slot at 150: 120px of travel, exactly.
-  // The first look only confirms it, so there is nothing to correct.
   const sweeps = await drive(true);
   assert.deepEqual(sweeps, [120], `expected one exact sweep, got ${JSON.stringify(sweeps)}`);
 });
 
-/**
- * MEASURED on a Tencent slide board: the handle's centre sits 42px into a 360px
- * widget and the piece's sits 136px in, so aiming the HANDLE at a slot 288px
- * across sends the PIECE to 382 — off the right edge, where the only thing left
- * to photograph is the ground it vacated. Reported as "nothing moved" that is
- * unrecoverable; reported as the ghost plus the travel, the next correction
- * brings it back. Mirror of `TestASweepThatOvershootsTheBoard` in
- * python/tests/test_page_solver.py.
- */
 const OVER = { widget: 360, pieceRest: 136, pieceW: 42, startX: 42, target: 288.4 };
 
 async function driveOvershoot(): Promise<{ sweeps: number[], finalCentre: number }> {
@@ -153,7 +112,7 @@ async function driveOvershoot(): Promise<{ sweeps: number[], finalCentre: number
     state.offset = x - OVER.startX;
     sweeps.push(state.offset);
   };
-  // What locate_piece answers for this widget, 1:1.
+
   solver.trackPiece = async (_e: unknown, _b: string, _a: string, _x: number[], travel = 0) => {
     const restLeft = OVER.pieceRest - OVER.pieceW / 2;
     const centre = OVER.pieceRest + state.offset;
@@ -189,8 +148,6 @@ test('a sweep that puts the piece off the board is brought back', async () => {
 });
 
 test('a sweep that lands short is corrected from the screen', async () => {
-  // With no piece element the sweep is aimed from the HANDLE, so it lands short
-  // by however far the piece sits from it. That is what the looks are for.
   const sweeps = await drive(false);
   assert.ok(sweeps.length > 1, 'no correction after an estimate that was off');
   assert.ok(

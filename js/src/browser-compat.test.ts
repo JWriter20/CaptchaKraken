@@ -1,29 +1,3 @@
-/**
- * The compatibility claims, checked against REAL browser libraries.
- *
- * puppeteer-adapter.test.ts pins the translation with a fake, which cannot
- * catch the failure that actually matters here: Puppeteer or Playwright
- * CHANGING one of the methods we call. `viewport()` going away, `isVisible()`
- * moving, `waitForFunction`'s argument order flipping — a fake happily keeps
- * agreeing with a wrapper that no longer matches the library.
- *
- * So this file launches the real thing and drives every member of the
- * structural `PlaywrightPage` through it:
- *
- *   - vanilla Playwright, passed to the solver surface with NO adapter, which
- *     is the "any Playwright-compatible launcher works" claim in index.ts;
- *   - Puppeteer through `fromPuppeteer`, which is the "verified against
- *     Puppeteer 24.x" claim the adapter header makes.
- *
- * SKIPPED WHEN THE LIBRARY IS ABSENT, and deliberately not a devDependency:
- * this package ships with ZERO browser dependencies, and making one a dev
- * dependency would put a ~200MB browser download in front of every contributor
- * who only wanted to run the unit tests. To run these:
- *
- *     npm i --no-save puppeteer playwright && npx playwright install chromium
- *     npm test
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -31,10 +5,8 @@ import { fromPuppeteer } from './puppeteer-adapter';
 import { watchPage } from './watcher';
 import { PlaywrightPage } from './playwright-types';
 
-/** Resolve an optional browser library, or null when it is not installed. */
 function optional(name: string): any | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     return require(name);
   } catch {
     return null;
@@ -53,12 +25,6 @@ const HTML =
   '<iframe id="frame" srcdoc="<div id=\'inner\'>inner text</div>"></iframe>' +
   '</body>';
 
-/**
- * Exercise every member of the structural page surface.
- *
- * One body for both libraries: that IS the claim under test — the solver only
- * ever calls these, so if they all work on a page, the solver works on it.
- */
 async function exerciseSurface(page: PlaywrightPage): Promise<void> {
   assert.deepEqual(page.viewportSize(), { width: 1280, height: 720 }, 'viewportSize');
 
@@ -83,13 +49,11 @@ async function exerciseSurface(page: PlaywrightPage): Promise<void> {
   await page.waitForTimeout(50);
   assert.ok(Date.now() - started >= 45, 'waitForTimeout returned early');
 
-  // The iframe path, which is how every real captcha is reached.
   const frame = await (await page.$('#frame'))!.contentFrame();
   assert.ok(frame, 'contentFrame');
   assert.ok(await frame!.$('#inner'), 'frame.$');
   assert.ok(await frame!.waitForSelector('#inner', { state: 'visible', timeout: 5000 }), 'frame.waitForSelector');
-  // Argument ORDER is the delta the adapter bridges: Playwright takes
-  // (fn, arg, options) and Puppeteer takes (fn, options, ...args).
+
   await frame!.waitForFunction((sel: any) => !!document.querySelector(sel), '#inner', { timeout: 5000 });
 
   await page.mouse.move(100, 100, { steps: 4 });
@@ -97,7 +61,7 @@ async function exerciseSurface(page: PlaywrightPage): Promise<void> {
   await page.mouse.up({ button: 'left' });
 
   await page.keyboard.type('abc', { delay: 1 });
-  await page.keyboard.press('Control+A');   // combo: one call in PW, three in Puppeteer
+  await page.keyboard.press('Control+A');
   await page.keyboard.press('Backspace');
 
   assert.equal(page.isClosed!(), false, 'isClosed on an open page');
@@ -144,8 +108,6 @@ test('the watcher solves a captcha that appears after it is installed', { skip: 
     const solver = {
       async detectCaptcha(p: any) { return await p.$('#late-captcha'); },
       async solve(p: any) {
-        // Removing it is what a real solve does to the challenge: the next
-        // probe must then find nothing, or the watcher re-solves forever.
         await p.$eval('#late-captcha', (el: any) => el.remove());
         solves += 1;
         return { isSolved: true } as any;
@@ -172,21 +134,6 @@ test('the watcher solves a captcha that appears after it is installed', { skip: 
 });
 
 test('one watcher covers every navigation on the page', { skip: !playwright && 'playwright not installed' }, async () => {
-  /**
-   * The claim the whole per-page design rests on.
-   *
-   * `watch(page)` is installed ONCE and is expected to keep working as the page
-   * navigates — which is what makes a browser-wide installer unnecessary for the
-   * case people actually hit: a challenge appearing on request 40 of a scrape,
-   * on the same `Page` object the run started with. If a watcher stopped at the
-   * first navigation, every user would need to re-install after each `goto` and
-   * the API would be the wrong shape.
-   *
-   * Waits on the COUNT rather than sleeping a fixed span: `node --test` runs
-   * test files in parallel, so several Chromium launches compete for CPU and a
-   * fixed 400ms is enough alone and not enough in the suite. That is how the
-   * first version of this test passed in isolation and flaked in CI.
-   */
   const browser = await playwright.chromium.launch({ headless: true, args: LAUNCH_ARGS });
   try {
     const page = await browser.newPage();
@@ -208,9 +155,6 @@ test('one watcher covers every navigation on the page', { skip: !playwright && '
 
     const watcher = watchPage(solver, page as unknown as PlaywrightPage, { intervalMs: 25 });
 
-    // Two clean navigations: the watcher must stay quiet, not error out. This
-    // one IS a fixed settle, because it asserts an absence — there is no count
-    // to wait for.
     await page.goto('data:text/html,<body>one</body>');
     await page.goto('data:text/html,<body>two</body>');
     await new Promise((r) => setTimeout(r, 500));
@@ -219,7 +163,6 @@ test('one watcher covers every navigation on the page', { skip: !playwright && '
     await page.goto('data:text/html,<body><div id="c"></div>three</body>');
     await until(1, 'the watcher did not survive navigation');
 
-    // Again, to prove it is still armed rather than having fired once.
     await page.goto('data:text/html,<body><div id="c"></div>four</body>');
     await until(2, 'the watcher stopped arming after its first solve');
 

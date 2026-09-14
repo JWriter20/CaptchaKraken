@@ -1,40 +1,3 @@
-"""
-Regression: GeeTest's submit control is a DIV that says "OK", and the verify
-finder could not see it.
-
-``_get_verify_button`` looked for two shapes only — a ``<button>`` whose text
-contains one of Verify / Next / Submit / Skip, and a ``<div role="button">``
-with the same texts — then two vendor fallbacks (``#recaptcha-verify-button``,
-``.button-submit``). GeeTest matches none of them. Its control is
-
-    <div class="geetest_submit geetest_disable">OK</div>
-
-which is the wrong TAG (a bare div, no ``role``) and the wrong TEXT ("OK" is not
-on the list). So it returned None and nothing was ever pressed.
-
-WHAT THAT COST, AND WHY IT LOOKED LIKE THE MODEL
-
-On GeeTest's ordered icon-click the model was right and the driver threw the
-answer away. Measured live on 2026-08-19: the model returned three points that
-landed on the three reference icons in order, and the cursor arrived within
-0.005 normalised of each requested centre — and then no OK. The board does not
-grade until you press it, so the solve loop re-read the same unchanged puzzle,
-re-answered it identically, and gave up at the round cap. It scored 0/31 and
-then 0/13, which reads exactly like a puzzle type the model cannot do. Every one
-of those attempts was a correct answer.
-
-That is why this pins the FINDER rather than a solve rate: a rate cannot tell
-"answered wrongly" from "answered correctly and never sent".
-
-The JS driver has the identical list in ``js/src/solver.ts::getVerifyButton``
-and is pinned by ``js/src/geetest-submit-button.test.ts``. Per CLAUDE.md 1c the
-two ports must behave the same.
-
-Fakes rather than a browser: what is under test is which element the finder
-SELECTS out of a known DOM. The fake resolves the selector forms the finder
-actually uses, so it does not presuppose which one the fix reaches for.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -43,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from captchakraken.page_solver import PageSolver  # noqa: E402
+from captchakraken.page_solver import PageSolver
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
@@ -68,20 +31,17 @@ class FakeEl:
     def is_visible(self) -> bool:
         return self._visible
 
-    def __repr__(self) -> str:  # pragma: no cover - assertion output only
+    def __repr__(self) -> str:
         return f"FakeEl({self.tag}, {self.classes}, {self.text!r})"
 
 
 class FakeFrame:
-    """Enough of Playwright's ``query_selector`` for the queries the finder makes."""
 
     def __init__(self, dom: List[FakeEl]) -> None:
         self.dom = dom
 
     def query_selector(self, selector: str) -> Optional[FakeEl]:
         if selector.startswith("xpath="):
-            # Every quoted lowercase run is a candidate; the alphabet is
-            # translate()'s own second argument, so drop it and keep the text.
             import re
 
             wanted = [w for w in re.findall(r"'([a-z]+)'", selector) if w != ALPHABET]
@@ -105,15 +65,10 @@ class FakeFrame:
         return None
 
 
-# The GeeTest ordered-icon panel, as captured from gt4.geetest.com.
 def geetest_panel() -> List[FakeEl]:
     return [
         FakeEl("div", ["geetest_box"], "Select in this order OK"),
-        # The control. Note `geetest_disable`: GeeTest greys it until enough
-        # icons are picked, and it is a plain div throughout.
         FakeEl("div", ["geetest_submit_14e1a298", "geetest_submit", "geetest_disable"], "OK"),
-        # A decoy that also says "OK". A fix that matches on the word alone
-        # would settle on the tooltip, which does nothing when pressed.
         FakeEl("div", ["geetest_submit_tips_14e1a298", "geetest_submit_tips"], "OK"),
     ]
 
@@ -123,7 +78,6 @@ def finder() -> PageSolver:
 
 
 def test_panel_really_does_defeat_the_old_two_shapes() -> None:
-    """Guards the premise: if GeeTest ever ships a real Verify button, say so."""
     submit = next(el for el in geetest_panel() if "geetest_submit" in el.classes)
     assert submit.tag == "div"
     assert submit.role is None

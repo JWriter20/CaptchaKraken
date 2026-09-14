@@ -111,8 +111,7 @@ actions = solver.solve("captcha.png")
 ```
 
 Pure-OpenCV tool subcommands (no model): `find-grid`, `find-checkbox`,
-`detect-selected`, `grid-cell-states`, `find-move`, `find-movable`, and a
-persistent `serve` worker the browser driver polls.
+`detect-selected`, `grid-cell-states`, and a persistent `serve` worker the browser driver polls.
 
 ## Configuration (model-agnostic)
 

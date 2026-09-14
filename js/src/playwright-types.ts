@@ -1,28 +1,3 @@
-/**
- * Minimal, implementation-neutral structural types for the slice of the
- * Playwright API the solver actually uses.
- *
- * **Why these exist.** CaptchaKraken never launches a browser — you bring your
- * own Playwright-compatible launcher and hand `solve()` a `Page`. To stay truly
- * browser-agnostic the package depends on NO concrete browser implementation
- * (not `playwright`, not `patchright`, not `camoufox-js`). Typing the public API
- * against any one of those packages' `Page` would (a) force that package into
- * consumers' trees and (b) break across version skew — e.g. `patchright` pins
- * its own forked, older core whose `Page` is missing the newest `playwright-core`
- * methods, so a `patchright` page won't structurally match a `playwright-core`
- * page and vice-versa.
- *
- * Instead we declare a duck-typed surface covering only what the solver calls.
- * Every real Playwright `Page` / `Frame` / `ElementHandle` — from vanilla
- * `playwright`, `patchright`, `camoufox-js`, or anything else — structurally
- * satisfies these, regardless of which Playwright version it was built against.
- *
- * Keep these in sync with `solver.ts`: if the solver starts calling a new
- * Playwright method, add it here. The set is intentionally small and stable —
- * these are long-standing Playwright primitives, not bleeding-edge additions.
- */
-
-/** `{ x, y, width, height }` in CSS pixels — the shape `boundingBox()` returns. */
 export interface BoundingBoxRect {
   x: number;
   y: number;
@@ -30,62 +5,41 @@ export interface BoundingBoxRect {
   height: number;
 }
 
-/** `{ width, height }` — the shape `viewportSize()` returns. */
 export interface ViewportSize {
   width: number;
   height: number;
 }
 
-/**
- * Structural subset of Playwright's `ElementHandle`. Returned by `Page.$` /
- * `Frame.$` / `Page.waitForSelector` and accepted by the solver as the captcha
- * element / verify button / iframe handle.
- */
 export interface PlaywrightElementHandle {
-  /** Screenshot just this element to a PNG file (the only option the solver passes). */
   screenshot(options?: { path?: string; timeout?: number; animations?: 'disabled' | 'allow' }): Promise<Buffer>;
-  /** The content document of an `<iframe>` element handle, or null if not a frame. */
+
   contentFrame(): Promise<PlaywrightFrame | null>;
-  /** Element box in page CSS pixels, or null if not rendered. */
+
   boundingBox(): Promise<BoundingBoxRect | null>;
-  /** Scroll the element into view if it isn't already. */
+
   scrollIntoViewIfNeeded(options?: { timeout?: number }): Promise<void>;
-  /** Read an attribute, or null if absent. */
+
   getAttribute(name: string): Promise<string | null>;
-  /** Whether the element is visible. */
+
   isVisible(): Promise<boolean>;
-  /** The element's text content, or null. */
+
   textContent(): Promise<string | null>;
-  /**
-   * First matching element WITHIN this element's subtree, or null. The vendors
-   * that render into the host page rather than an iframe (GeeTest, Yidun,
-   * BotDetect, …) have no Frame to scope against, so the widget element is the
-   * boundary that keeps a generic selector off the rest of the document.
-   */
+
   $(selector: string): Promise<PlaywrightElementHandle | null>;
-  /**
-   * EVERY match within this element's subtree. Needed where "the first visible
-   * hit" is the wrong answer: a generic selector can match a vendor's outer
-   * container before the small thing inside it that was meant — see
-   * `measurePieceBox` in solver.ts.
-   */
+
   $$(selector: string): Promise<PlaywrightElementHandle[]>;
 }
 
-/**
- * Structural subset of Playwright's `Frame` (an iframe's content document).
- */
 export interface PlaywrightFrame {
-  /** First matching element handle, or null. */
   $(selector: string): Promise<PlaywrightElementHandle | null>;
-  /** Every matching element handle, in document order. */
+
   $$(selector: string): Promise<PlaywrightElementHandle[]>;
-  /** Wait for a selector to reach the given state; resolves to the handle (or null). */
+
   waitForSelector(
     selector: string,
     options?: { state?: 'attached' | 'detached' | 'visible' | 'hidden'; timeout?: number },
   ): Promise<PlaywrightElementHandle | null>;
-  /** Poll a predicate evaluated in the page until it returns truthy. */
+
   waitForFunction(
     pageFunction: Function | string,
     arg?: any,
@@ -93,64 +47,39 @@ export interface PlaywrightFrame {
   ): Promise<unknown>;
 }
 
-/**
- * Structural subset of Playwright's `Page` — exactly the members `solve()` and
- * its helpers call. Any real Playwright `Page` satisfies this.
- */
 export interface PlaywrightPage {
-  /** Low-level mouse control used to drive human-like trajectories and clicks. */
   mouse: {
     move(x: number, y: number, options?: { steps?: number }): Promise<void>;
     down(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
     up(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
   };
-  /**
-   * Key input. Used to type a distorted-text captcha's answer character by
-   * character — `fill()` would set the value with no keystrokes at all, and
-   * these are the vendors that score typing cadence.
-   */
+
   keyboard: {
     type(text: string, options?: { delay?: number }): Promise<void>;
     press(key: string, options?: { delay?: number }): Promise<void>;
   };
-  /** Sleep `timeout` ms (Playwright's own timer). */
+
   waitForTimeout(timeout: number): Promise<void>;
-  /** Wait for a selector to reach the given state; resolves to the handle (or null). */
+
   waitForSelector(
     selector: string,
     options?: { state?: 'attached' | 'detached' | 'visible' | 'hidden'; timeout?: number },
   ): Promise<PlaywrightElementHandle | null>;
-  /** Current viewport size, or null if not set. */
+
   viewportSize(): ViewportSize | null;
-  /**
-   * The browser context this page belongs to. OPTIONAL because only
-   * `humanization: 'mobile'` needs it, and then only to open a CDP session for
-   * `Input.dispatchTouchEvent` — the mouse and none modes never touch it. A
-   * launcher that does not expose it simply cannot serve mobile mode, and says
-   * so at construction rather than mid-solve.
-   */
+
   context?(): { newCDPSession(page: PlaywrightPage): Promise<any> };
-  /**
-   * Playwright's touchscreen, present when the context was created with
-   * `hasTouch: true`. OPTIONAL, and tap-only: it is the fallback for a browser
-   * with touch support but no CDP, and cannot express a drag.
-   */
+
   touchscreen?: {
     tap(x: number, y: number): Promise<void>;
   };
-  /** First matching element handle, or null. */
+
   $(selector: string): Promise<PlaywrightElementHandle | null>;
-  /** All matching element handles. */
+
   $$(selector: string): Promise<PlaywrightElementHandle[]>;
-  /**
-   * Whether the page has been closed. OPTIONAL because it is the one member
-   * here the solver itself never needs — the auto-solve watcher uses it to end
-   * its loop when the caller closes the browser out from under it, and falls
-   * back to treating the page as open when a launcher does not expose it.
-   * Playwright and Puppeteer both do.
-   */
+
   isClosed?(): boolean;
-  /** Run `pageFunction` against the first matching element, in the page context. */
+
   $eval<R>(
     selector: string,
     pageFunction: (element: Element) => R,
@@ -158,10 +87,4 @@ export interface PlaywrightPage {
   ): Promise<R>;
 }
 
-/**
- * Public alias. This is the type the solver's `solve(page)` accepts — kept under
- * a friendly name so consumers can annotate against it. It is the
- * implementation-neutral Playwright `Page`; pass a page from whichever
- * Playwright-compatible launcher you prefer.
- */
 export type Page = PlaywrightPage;

@@ -1,17 +1,3 @@
-/**
- * The hosted endpoint is asked for a DIFFERENT model than the one this client
- * downloads, and only the hosted endpoint is.
- *
- * Abyss is the first model where those two answers differ: our API serves it
- * and nobody can download it. One field could not express that — naming it as
- * `latest` would point every self-hoster at weights they are not licensed to
- * pull, and leaving it out would keep the hosted endpoint on the older model
- * forever. So `hosted_default` is separate, and it applies to OUR hosts only.
- *
- * This is also what makes the rollout version-gated with no version header: a
- * client shipping this registry asks for `abyss`, one that predates it asks for
- * whatever its own registry says. Nothing server-side has to tell them apart.
- */
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -32,8 +18,6 @@ test('our endpoint is asked for the hosted default', () => {
 });
 
 test('and asked for the name that ROUTES, not one of its arms', () => {
-  // A routed mixture is several names and only the alias routes. Sending an arm
-  // would pin every prompt family to that one expert and lose the mixture.
   const name = resolveLoraName({ cliRoot: CLI_ROOT, env: {}, baseUrl: HOSTED });
   const entry = REG.models[REG.served_aliases[name]];
   assert.ok(Object.keys(entry?.experts ?? {}).length > 0,
@@ -41,8 +25,6 @@ test('and asked for the name that ROUTES, not one of its arms', () => {
 });
 
 test("someone else's vLLM is asked for the download default", () => {
-  // Remote is not the same as ours. A self-hoster across the network serves
-  // whatever they loaded, and asking them for a hosted-only model is a 404.
   for (const url of ['http://localhost:8000/v1', 'http://10.0.0.5:8000/v1',
                      'https://vllm.someone-else.example/v1']) {
     assert.equal(resolveLoraName({ cliRoot: CLI_ROOT, env: {}, baseUrl: url }),

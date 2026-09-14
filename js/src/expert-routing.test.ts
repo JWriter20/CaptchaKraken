@@ -1,13 +1,3 @@
-/**
- * The `expert` knob reaches the Python CLI, and is absent when unset.
- *
- * The TS port does not route — it spawns the Python one, which owns
- * models.json and therefore owns the routing. What TS has to get right is
- * FORWARDING: a knob that exists in the type and never reaches argv is exactly
- * the failure `maxUnsupportedReSolves` already records in contract.json's
- * parity list, where a caller sets an option and it is silently ignored.
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

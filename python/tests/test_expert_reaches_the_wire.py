@@ -1,12 +1,3 @@
-"""The routed adapter name must reach the PAYLOAD, and only there.
-
-`prompts.route` being right is worth nothing if the planner keeps sending
-`self.model`. These tests read the JSON the client would have posted.
-
-The unrouted half is the more important one: it is the assertion that adding
-this mechanism changed nothing for `captcha`, `captcha-v12`, Twilight and
-Sunlight, which is every model anyone is running today.
-"""
 import json
 import pytest
 
@@ -41,7 +32,6 @@ class _Resp:
 
 @pytest.fixture
 def posted(monkeypatch):
-    """Every payload the planner would have sent, in order."""
     seen = []
 
     def fake_post(self, url, headers=None, json=None, timeout=None):
@@ -72,8 +62,6 @@ def _planner(model, **kw):
     return P.ActionPlanner(model=model, api_key="k", base_url="http://x/v1", **kw)
 
 
-# ── routed ──────────────────────────────────────────────────────────────────
-
 def test_a_grid_round_is_sent_to_the_grid_expert(tmp_path, posted, routed):
     _planner("routed").get_grid_selection(_png(tmp_path), rows=3, cols=3)
     assert posted[-1]["model"] == "routed-grid"
@@ -96,9 +84,6 @@ def test_a_keyframe_round_is_sent_to_the_video_expert(tmp_path, posted, routed):
 
 
 def test_one_planner_routes_every_family_in_one_solve(tmp_path, posted, routed):
-    """A real solve changes family mid-solve — a board that reads as a grid,
-    then a click round after the grid is rejected. The name must move with it,
-    which is why the family is a per-REQUEST argument and not planner state."""
     pl = _planner("routed")
     img = _png(tmp_path)
     pl.get_grid_selection(img, rows=3, cols=3)
@@ -126,26 +111,19 @@ def test_an_explicit_expert_beats_the_env(tmp_path, posted, routed, monkeypatch)
     assert posted[-1]["model"] == "routed-grid"
 
 
-# ── the pin fails LOUDLY, and early ─────────────────────────────────────────
-
 def test_a_bad_pin_fails_when_the_planner_is_built_not_mid_solve(routed):
     with pytest.raises(ValueError, match="unknown expert"):
         _planner("routed", expert="gird")
 
 
 def test_pinning_an_expert_on_a_single_adapter_model_refuses(routed):
-    """Not ignored. A benchmark that measured the generalist and reported it as
-    the expert is a number nobody can catch."""
     with pytest.raises(ValueError, match="declares no experts"):
         _planner("plain", expert="grid")
 
 
-# ── unrouted: the wire is unchanged ─────────────────────────────────────────
-
 @pytest.mark.parametrize("model", ["captcha", "captcha-v12",
                                    "someone-elses-adapter"])
 def test_an_unrouted_model_sends_one_name_for_every_family(tmp_path, posted, model):
-    """The shipped registry, not a fixture — this is the compatibility claim."""
     prompts.clear_cache()
     pl = _planner(model)
     img = _png(tmp_path)
@@ -157,8 +135,6 @@ def test_an_unrouted_model_sends_one_name_for_every_family(tmp_path, posted, mod
 
 def test_an_unrouted_planner_does_not_read_the_registry_per_request(tmp_path, posted,
                                                                     monkeypatch):
-    """Resolution can touch the Hub, so it happens once per planner. A
-    per-request lookup would put a network call in front of every round."""
     prompts.clear_cache()
     pl = _planner("captcha")
     calls = []
@@ -171,11 +147,6 @@ def test_an_unrouted_planner_does_not_read_the_registry_per_request(tmp_path, po
 
 
 def test_the_shipped_registry_routes_abyss_end_to_end(tmp_path, posted):
-    """No fixture: the real models.json, the real planner, the real payload.
-
-    This is the assertion that the publish commit has one job left — put the
-    weights behind these names — and that everything between a solve and the
-    wire is already correct."""
     prompts.clear_cache()
     pl = _planner("abyss")
     img = _png(tmp_path)
@@ -188,8 +159,6 @@ def test_the_shipped_registry_routes_abyss_end_to_end(tmp_path, posted):
 
 
 def test_abyss_reads_puzzles_at_its_own_band(tmp_path, posted):
-    """The band is resolved off the same key as the prompts, so it must survive
-    being asked for by an EXPERT name rather than the router's."""
     prompts.clear_cache()
     for name in ("abyss", "abyss-grid", "abyss-video"):
         assert _planner(name).pixel_budget.minimum == 518400
