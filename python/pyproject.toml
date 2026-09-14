@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "captchakraken"
-version = "2.10.0"
+version = "3.0.0"
 description = "Captcha-solving engine and CLI: OpenCV grid detection plus a fine-tuned Qwen3.5-9B vision model, for image grids, click and drag puzzles, sliders, distorted text and animated challenges. Hosted API or self-hosted on vLLM."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,10 +51,18 @@ classifiers = [
 dependencies = [
   "pydantic==2.13.5",
   "pillow==12.3.0",
-  "numpy==2.2.6",
+  # 2.3.x rather than 2.2.6 because `cursory` requires `numpy~=2.3.3` and the
+  # old pin was ours, not opencv's — opencv-python-headless asks only for
+  # `numpy>=2`. Moved deliberately as part of the major bump.
+  "numpy==2.3.5",
   "opencv-python-headless==5.0.0.93",
   "requests==2.34.2",
   "python-dotenv==1.2.3",
+  # The mouse. LGPL-3.0-or-later, used as an ordinary installed dependency and
+  # never vendored or bundled, which is the arrangement the licence is written
+  # for — see NOTICE. Its TypeScript port `cursory-js` is the JS driver's
+  # dependency, and the two agree bit for bit on a seed.
+  "cursory==2.0.0",
 ]
 
 [project.optional-dependencies]

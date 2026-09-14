@@ -24,6 +24,7 @@ v1 had a SAM3-backed tool-using planner with detect/segment/drag-refine; it
 lives on the `v1-old-architecture` branch.
 """
 
+import math
 import os
 import shutil
 import sys
@@ -134,6 +135,63 @@ VENDOR_GRID_CELLS = {
     "hcaptcha": frozenset({9}),
     "recaptcha": frozenset({9, 16}),
 }
+
+
+#: How far a detection may stray from a REGULAR lattice and still be solved as
+#: a grid, as a fraction of one cell. Three ways to stray, all measured the
+#: same: cells in a row must share a top edge, cells in a column must share a
+#: left edge, and every cell must be the same size.
+#:
+#: WHY THIS EXISTS. `find_grid` traces separator lines "of any border colour and
+#: small tilt" — it recovers slant on its own, so a TILTED lattice is one of its
+#: legitimate outputs. No vendor ships a tilted grid: every one of them lays the
+#: tiles out with CSS, on the pixel. That tilt tolerance is therefore pure
+#: headroom for a false positive, and it is exactly what a photographic
+#: backdrop's own edges walk through — the cells come back sheared a few pixels
+#: per row, running off the edge of the frame, and `_is_real_grid` passed them
+#: because it only ever asked what was INSIDE each cell.
+#:
+#: MEASURED 2026-09-13 over the real captures, six per family — every true grid
+#: `find_grid` finds is regular to the pixel, and the gap to the false one is
+#: not close:
+#:
+#:     the five true grid families we ship (a GeeTest 3x3 photo grid, an
+#:     hCaptcha 3x3 property grid, a Prosopo 3x3, and the reCAPTCHA 3x3 and
+#:     4x4)                                    25 detections   all 0.000
+#:     the false lattice on a click board      row 0.060, col 0.043, size 0.128
+#:
+#: So the number below is a floor with a 2x margin under the nearest false
+#: positive and infinite margin over every true grid, not a tuned threshold. It
+#: is not zero only because an antialiased separator traced on a 100px cell can
+#: honestly land a pixel out.
+_GRID_REGULARITY_TOL = 0.02
+
+
+def _lattice_irregularity(grid_boxes) -> Optional[float]:
+    """How far these cells are from a regular lattice, in cells. None if unknown.
+
+    `find_grid` returns its cells row-major, so the rows and columns are read
+    straight off the ordering rather than re-derived by clustering. None means
+    the question does not apply (not a square count, degenerate cells) — the
+    caller must not read that as "regular".
+    """
+    boxes = [tuple(b) for b in grid_boxes]
+    n = len(boxes)
+    k = int(round(math.sqrt(n))) if n else 0
+    if k < 2 or k * k != n:
+        return None
+    widths = [b[2] - b[0] for b in boxes]
+    heights = [b[3] - b[1] for b in boxes]
+    mid_w, mid_h = sorted(widths)[n // 2], sorted(heights)[n // 2]
+    if mid_w <= 0 or mid_h <= 0:
+        return None
+    rows = [boxes[i * k:(i + 1) * k] for i in range(k)]
+    cols = [[boxes[r * k + c] for r in range(k)] for c in range(k)]
+    row_skew = max(max(b[1] for b in r) - min(b[1] for b in r) for r in rows) / mid_h
+    col_skew = max(max(b[0] for b in c) - min(b[0] for b in c) for c in cols) / mid_w
+    size_spread = max((max(widths) - min(widths)) / mid_w,
+                      (max(heights) - min(heights)) / mid_h)
+    return max(row_skew, col_skew, size_spread)
 
 
 def _grid_dims(n_cells, puzzle_source="unknown"):
@@ -435,6 +493,21 @@ class CaptchaSolver:
         producing 9 "cells" where the top/bottom rows are mostly a single
         flat color (the band). Filter on that.
         """
+        # SHAPE BEFORE CONTENT. Every check below this asks what is INSIDE the
+        # cells, and a click board drawn over a photograph answers all of them
+        # correctly — the cells really are colourful and really do differ. What
+        # gives it away is that they are not a LATTICE: see
+        # `_GRID_REGULARITY_TOL`. Cheapest check here and the only one that
+        # needs no pixels, so it runs first.
+        irregularity = _lattice_irregularity(grid_boxes)
+        if irregularity is not None and irregularity > _GRID_REGULARITY_TOL:
+            self.debug.log(
+                f"_is_real_grid: cells are {irregularity:.3f} of a cell out of "
+                f"true (> {_GRID_REGULARITY_TOL}) — a sheared or ragged lattice "
+                f"is a false positive, not a grid → reject."
+            )
+            return False
+
         try:
             import cv2
             import numpy as np

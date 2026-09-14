@@ -88,9 +88,9 @@ side has:
 | Only in Python | Only in TypeScript |
 |---|---|
 | `animated_probe_enabled` | `onStep` — a per-step callback for progress UI |
-| `slide_probe_offsets_px` | `idleMouseWander` |
-| `slide_tolerance_px` | `repoPath`, `pythonCommand` — where the bundled engine lives |
-| `slide_max_corrections` | `model`, `apiKey` — Python takes these on `PageSolver(...)` itself |
+| `slide_tolerance_px` | `idleMouseWander` |
+| `slide_max_corrections` | `repoPath`, `pythonCommand` — where the bundled engine lives |
+| | `model`, `apiKey` — Python takes these on `PageSolver(...)` itself |
 
 Everything that decides **accuracy** — the prompts, the CV, the pixel budget,
 the model — lives in the shared Python half and is identical by construction.
@@ -253,7 +253,7 @@ desktop solve to touch dispatch would break every one of them silently.
 
 | Mode | What it dispatches | Use it when |
 |---|---|---|
-| `mouse` | Bezier arcs, Fitts's-law durations, speed-scaled jitter, overshoot-and-correct | Default. Desktop pages. |
+| `mouse` | Trajectories recorded from real people, morphed onto the requested endpoints and re-noised (Cursory) | Default. Desktop pages. |
 | `mobile` | Real touch events with finger kinematics — see below | The page is a mobile site, or you are driving a phone |
 | `none` | One move, one press, one release. No dwell, no jitter | Your own fixtures, or your stack humanises elsewhere |
 | custom | Whatever you write | You already model your users' input |

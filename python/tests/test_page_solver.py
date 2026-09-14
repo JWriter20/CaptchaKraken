@@ -675,6 +675,14 @@ class _Scope:
         self.asked.append(selector)
         return self._mapping.get(selector)
 
+    def query_selector_all(self, selector: str) -> List["FakeElement"]:
+        """The piece is looked up with EVERY match, not the first — a generic
+        pattern can hit a vendor's outer container before the piece inside it.
+        See `_measure_piece_box`."""
+        self.asked.append(selector)
+        found = self._mapping.get(selector)
+        return [found] if found is not None else []
+
 
 class _Keyboard:
     def __init__(self) -> None:
@@ -783,11 +791,11 @@ class TestTextCaptchas:
 class TestSlideGeometry:
     """The algebra behind the closed loop, in isolation.
 
-    Each probe measures  width = piece_width + ratio x offset,  where the width
-    spans the piece's original left edge to its current right edge.
+    Each reading measures  width = piece_width + ratio x offset,  where the
+    width spans the piece's original left edge to its current right edge.
     """
 
-    def test_two_probes_recover_both_unknowns(self):
+    def test_two_readings_recover_both_unknowns(self):
         # piece 40px wide, follows the handle 1:1.
         piece_w, ratio = PageSolver._solve_slide_geometry([(24.0, 64.0), (64.0, 104.0)], 400.0)
         assert (round(piece_w, 6), round(ratio, 6)) == (40.0, 1.0)
@@ -798,12 +806,12 @@ class TestSlideGeometry:
         piece_w, ratio = PageSolver._solve_slide_geometry([(20.0, 70.0), (60.0, 150.0)], 400.0)
         assert (round(piece_w, 6), round(ratio, 6)) == (30.0, 2.0)
 
-    def test_one_probe_falls_back_to_a_stated_one_to_one(self):
+    def test_one_reading_falls_back_to_a_stated_one_to_one(self):
         piece_w, ratio = PageSolver._solve_slide_geometry([(24.0, 64.0)], 400.0)
         assert (piece_w, ratio) == (40.0, 1.0)
 
     def test_an_absurd_ratio_is_rejected_rather_than_steered_by(self):
-        # A redraw between probes makes the two widths unrelated. A ratio of
+        # A redraw between readings makes the two widths unrelated. A ratio of
         # ~0.02 solved from that would demand a handle offset of thousands of
         # pixels — off the track, into the page, and on camoufox a hung move.
         _, ratio = PageSolver._solve_slide_geometry([(24.0, 64.0), (64.0, 65.0)], 400.0)
@@ -815,6 +823,26 @@ class TestSlideGeometry:
 
     def test_no_measurements_at_all_is_reported_as_such(self):
         assert PageSolver._solve_slide_geometry([], 400.0) == (None, 1.0)
+
+    def test_two_readings_taken_close_together_do_not_set_the_ratio(self):
+        """The loop's offsets are its own corrections now, and a correction can
+        be a couple of pixels. `changed_bbox` answers in whole pixels, so a 1px
+        rounding across a 2px spread solves to ratio 0.5 — and every correction
+        after it would be doubled, on a widget that was already nearly home."""
+        piece_w, ratio = PageSolver._solve_slide_geometry(
+            [(110.0, 150.0), (112.0, 151.0)], 400.0)
+        assert ratio == 1.0
+        assert round(piece_w, 6) == 39.0
+
+    def test_the_widest_pair_is_used_not_the_two_that_arrived_last(self):
+        """A correction can step BACK towards the handle, so the last two
+        readings are not necessarily the far-apart ones. Taken in arrival order
+        these last two are 2px apart and their 1px of rounding reads as ratio
+        0.5; the widest pair spans 82px and recovers the real 1:1 widget."""
+        piece_w, ratio = PageSolver._solve_slide_geometry(
+            [(110.0, 150.0), (30.0, 70.0), (112.0, 151.0)], 400.0)
+        assert round(ratio, 2) == 0.99
+        assert round(piece_w, 1) == 40.4
 
 
 class TestSlideDriver:
@@ -844,11 +872,15 @@ class TestSlideDriver:
         start_x = handle._box["x"] + handle._box["width"] / 2
         page.excludes = []  # type: ignore[attr-defined]
 
-        def fake_track(_element, _before, _after, exclude):
+        def fake_track(_element, _before, _after, exclude, travel=0.0):
             page.excludes.append(list(exclude))  # type: ignore[attr-defined]
             offset = page.mouse.moves[-1][0] - start_x
             right = self.PIECE_LEFT + self.PIECE_W + offset
-            return [int(self.PIECE_LEFT * dpr), 0, int(round(right * dpr)), int(20 * dpr)]
+            # `piece: None` on purpose — this rig is the UNION path, the one
+            # a vendor whose piece the CV cannot separate still drives.
+            return {"bbox": [int(self.PIECE_LEFT * dpr), 0,
+                             int(round(right * dpr)), int(20 * dpr)],
+                    "piece": None}
 
         solver._track_piece = fake_track  # type: ignore[method-assign]
         frac = target_px / widget_w
@@ -884,10 +916,11 @@ class TestSlideDriver:
     def test_a_geared_widget_still_lands(self):
         solver, page, element, scope, action, start_x = self._rig(target_px=200.0)
 
-        def geared(_element, _before, _after, _exclude):
+        def geared(_element, _before, _after, _exclude, travel=0.0):
             offset = page.mouse.moves[-1][0] - start_x
-            return [int(self.PIECE_LEFT), 0,
-                    int(round(self.PIECE_LEFT + self.PIECE_W + 2.0 * offset)), 20]
+            return {"bbox": [int(self.PIECE_LEFT), 0,
+                             int(round(self.PIECE_LEFT + self.PIECE_W + 2.0 * offset)), 20],
+                    "piece": None}
 
         solver._track_piece = geared  # type: ignore[method-assign]
         solver._execute_slide(page, element, scope, action, element._box)
@@ -921,6 +954,34 @@ class TestSlideDriver:
         assert y1 <= 320.0 * 2.625 and y2 >= 350.0 * 2.625
         assert x1 == 0.0 and x2 == pytest.approx(400.0 * 2.625, abs=1.0)
 
+    def test_the_mask_reaches_the_bottom_of_the_widget(self):
+        """The handle is not the only thing moving down there.
+
+        Most vendors fill the track behind the handle, and the filled track is
+        not the same height as the handle — Tencent's runs several pixels
+        lower. Masking only the handle's own band leaves those rows, and the
+        box this feeds is an EXTREME, so one surviving sliver of track at the
+        far left drags the left edge across the whole widget.
+
+        Measured on a Tencent slide board with the handle nudged +24 and
+        +64px, against a real piece about 42px wide: masked to the band the
+        loop derived a 135.4px piece, masked to the bottom it derived 42.0px.
+        `piece_centre` is `right_edge - piece_width / 2`, so the over-wide
+        reading sat ~47px left of the truth and the drive pushed the piece that
+        much too far right.
+
+        Mirror of `a 1x screen is unchanged` in slide-hidpi.test.ts.
+        """
+        solver, page, element, scope, action, _ = self._rig(target_px=150.0, dpr=1.0)
+        solver._execute_slide(page, element, scope, action, element._box)
+        x1, y1, x2, y2 = page.excludes[0]
+        # dpr 1, so these are the CSS numbers untouched: the handle is at y
+        # 420..450, the element starts at y 100, and the pad is 30 * 0.35.
+        assert (x1, round(y1), x2) == (0.0, 310, 400.0)
+        assert y2 == pytest.approx(400.0), (
+            "the mask stops at the handle instead of the bottom of the widget — "
+            "a rail that runs lower than its handle is left in the diff")
+
     def test_a_sliderless_widget_drags_the_piece_itself(self):
         """Lemin's 'cropped' puzzle has no track — you drag the piece onto the
         gap. Same answer from the model, because the two are indistinguishable
@@ -948,7 +1009,7 @@ class TestSlideDriver:
         release the mouse. A slide that returns with the button held wedges
         every later input event on the page."""
         solver, page, element, scope, action, _ = self._rig(target_px=150.0)
-        solver._track_piece = lambda *_: None  # type: ignore[method-assign]
+        solver._track_piece = lambda *_a, **_k: None  # type: ignore[method-assign]
         solver._execute_slide(page, element, scope, action, element._box)
         assert [k for k, _, _ in page.mouse.log][-1] == "up"
 
@@ -1002,6 +1063,105 @@ class TestPieceTracking:
         assert changed_bbox(str(a), str(b), exclude=[0, 85, 400, 115]) is None
 
 
+class TestLocatingThePiece:
+    """`locate_piece` — the piece itself, not the union of it and its ghost.
+
+    The union's width is `piece_width + travel`, so reading a centre out of it
+    means subtracting a travel the caller only BELIEVES, and inheriting every
+    error in that belief plus the inset on the vacated edge (measured live at
+    17px on GeeTest v4, half of which lands straight in the centre). A sweep at
+    the gap moves the piece several times its own width, which leaves the piece
+    and its ghost as two separate marks — and then the piece can simply be
+    measured.
+    """
+
+    MASK = [0, 85, 400, 115]
+
+    def _frame(self, path, pieces, handle_x=10):
+        import numpy as np
+        try:
+            import cv2
+        except ImportError:  # pragma: no cover
+            pytest.skip("cv2 not available")
+        img = np.zeros((120, 400, 3), dtype=np.uint8)
+        for x, w in pieces:
+            img[20:60, x:x + w] = 255
+        img[90:110, handle_x:handle_x + 30] = 200
+        cv2.imwrite(str(path), img)
+
+    def _read(self, tmp_path, before, after, travel):
+        from captchakraken.tool_calls.track_piece import locate_piece
+
+        a, b = tmp_path / "a.png", tmp_path / "b.png"
+        self._frame(a, before)
+        self._frame(b, after)
+        return locate_piece(str(a), str(b), travel, exclude=self.MASK)
+
+    def test_a_piece_clear_of_its_ghost_is_measured_not_inferred(self, tmp_path):
+        # 40px piece swept 190px: two marks, each a piece wide, 190 apart.
+        got = self._read(tmp_path, [(10, 40)], [(200, 40)], travel=190)
+        assert got == {"centre": 220.0, "width": 40.0}
+
+    def test_the_reading_survives_a_travel_the_caller_only_believes(self, tmp_path):
+        """The travel is `offset x ratio`, and until two readings are far enough
+        apart to solve it the ratio is ASSUMED to be 1. On a widget whose piece
+        follows at 0.85 the believed travel is 18% long — and the measured
+        centre must not move, because the mark is the piece however it got
+        there."""
+        got = self._read(tmp_path, [(10, 40)], [(170, 40)], travel=190)
+        assert got == {"centre": 190.0, "width": 40.0}
+
+    def test_a_piece_that_only_partly_left_its_ghost_is_not_two_pieces(self, tmp_path):
+        """Moved 20px, which is less than its own 40px width: the middle never
+        changes, so the diff is two 20px slivers — and neither of them is the
+        piece. Read as the span, they give the piece back."""
+        got = self._read(tmp_path, [(10, 40)], [(30, 40)], travel=20)
+        assert got == {"centre": 50.0, "width": 40.0}
+
+    def test_a_piece_driven_off_the_board_is_reported_where_it_went(self, tmp_path):
+        """A sweep aimed from the HANDLE overshoots by however far the piece
+        sits from it, and on a vendor whose piece does not start under the
+        handle that can push it off the end of the board. All that is left in
+        frame is the ground it vacated — narrower than the travel, which is how
+        it is known for what it is — and the caller has to be told the piece is
+        out there, not that the board is unreadable."""
+        got = self._read(tmp_path, [(10, 40)], [], travel=300)
+        assert got == {"centre": 330.0, "width": 40.0}
+
+    def test_a_piece_whose_vacated_ground_does_not_register_is_read_where_it_is(self, tmp_path):
+        """MEASURED on a Tencent slide board whose piece is a thin outline drawn
+        over a photograph: sweeping it 207px left ONE mark, 33px wide, and it is
+        the piece where it landed — the ground it vacated changed too few pixels
+        to survive the open. Read as a vacated ground instead, the piece is
+        reported 207px further right than it is, every correction after it is
+        computed against a place nothing has ever been, and the handle is driven
+        off the left end of its own track.
+
+        What separates the two is where the piece would have had to START. Here
+        that is 121px, which is a real place; a piece genuinely swept off the
+        board leaves a mark whose implied start is off the left edge, and the
+        test below is the same frame with the travel that makes it so.
+        """
+        got = self._read(tmp_path, [(105, 33)], [(312, 33)], travel=207)
+        assert got == {"centre": 328.5, "width": 33.0}
+
+    def test_the_two_lone_marks_are_told_apart_by_where_the_piece_began(self, tmp_path):
+        """The same single narrow mark, and the opposite reading: a piece at
+        x=30 could not have started at 30 - 300."""
+        got = self._read(tmp_path, [(10, 40)], [], travel=300)
+        assert got == {"centre": 330.0, "width": 40.0}
+
+    def test_something_else_moving_in_frame_is_not_mistaken_for_the_piece(self, tmp_path):
+        """A second mark is the piece's ghost only if it is the same object —
+        same width. An animating badge elsewhere on the board is not, and
+        steering to it would drive the piece somewhere nobody asked for."""
+        got = self._read(tmp_path, [(10, 40)], [(200, 40), (330, 8)], travel=190)
+        assert got == {"centre": 220.0, "width": 40.0}
+
+    def test_a_still_frame_locates_nothing(self, tmp_path):
+        assert self._read(tmp_path, [(10, 40)], [(10, 40)], travel=0) is None
+
+
 class TestSlideSubmitPolicy:
     """A completed slide has ALREADY submitted."""
 
@@ -1018,7 +1178,8 @@ class TestSlideSubmitPolicy:
         solver._solve_frame_freshness_guarded = (               # type: ignore[method-assign]
             lambda _el, shot, fn: fn(shot))
         solver._get_solution = lambda *_a, **_k: (actions, [])   # type: ignore[method-assign]
-        solver._track_piece = lambda *_: [10, 0, 200, 20]        # type: ignore[method-assign]
+        solver._track_piece = (                                  # type: ignore[method-assign]
+            lambda *_a, **_k: {"bbox": [10, 0, 200, 20], "piece": None})
 
         performed, _ = solver._solve_single(page, element, None)
         return performed, [k for k, _, _ in page.mouse.log]
@@ -1064,34 +1225,34 @@ class TestSlideSubmitPolicy:
         assert action.source_bounding_box is None
 
 
-class TestSlideProbeBookkeeping:
-    """The correction loop must steer from the offset its READING belongs to.
+class TestSlideLooksAgain:
+    """A reading that resolves nothing must not end the loop.
 
-    Regression: the base was indexed by how many probes succeeded
-    (`probes[len(widths) - 1]`). When probe 1 fails to resolve and probe 2
-    works, that indexes to probe 1's offset while the measurement came from
-    probe 2's — so the very first correction is computed against a position the
-    piece was never at, and the puzzle is failed with a confident-looking log.
+    The drive aims one sweep of the handle at the slot and then LOOKS — and the
+    first look can land on a spinner, a wholesale redraw, or a frame captured
+    mid-animation, none of which the pixel diff can separate a piece out of.
+    Treating that as "the piece is unreachable" would release at the open-loop
+    estimate on a widget that was about to answer, so the budget is spent on
+    looking again.
     """
 
-    def test_the_correction_base_follows_the_last_successful_reading(self):
+    def test_a_look_that_resolves_nothing_is_taken_again(self):
         solver = _solver()
         page = _typing_page()
         handle = FakeElement(box={"x": 120.0, "y": 420.0, "width": 40.0, "height": 30.0})
         element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
         scope = _Scope({".geetest_slider_button": handle})
         start_x = 140.0
-        probes = solver.config.slide_probe_offsets_px
 
-        # Probe 1 resolves nothing (a spinner, a redraw); probe 2 does.
+        # The first look resolves nothing; the second onwards do.
         calls = {"n": 0}
 
-        def flaky(_element, _before, _after, _exclude):
+        def flaky(_element, _before, _after, _exclude, travel=0.0):
             calls["n"] += 1
             if calls["n"] == 1:
                 return None
             offset = page.mouse.moves[-1][0] - start_x
-            return [10, 0, int(round(10 + 40 + offset)), 20]
+            return {"bbox": [10, 0, int(round(10 + 40 + offset)), 20], "piece": None}
 
         solver._track_piece = flaky  # type: ignore[method-assign]
         target_px = 150.0
@@ -1100,10 +1261,160 @@ class TestSlideProbeBookkeeping:
                               {"target_bounding_box": [frac, 0.4, frac, 0.6]}, element._box)
 
         released_at = next(x for kind, x, _ in reversed(page.mouse.log) if kind == "move")
-        # piece centre = 30 + offset, so a slot at 150 wants offset 120 —
-        # whichever probe happened to be the one that resolved.
+        # piece centre = 30 + offset, so a slot at 150 wants offset 120.
         assert abs((released_at - start_x) - 120.0) <= solver.config.slide_tolerance_px
-        assert probes[0] != probes[-1], "the probes must differ or this proves nothing"
+        assert calls["n"] >= 2, "the loop gave up on the first unreadable frame"
+
+
+class TestSlideAimsBeforeItCorrects:
+    """The opening gesture is a sweep at the slot, not a calibration nudge.
+
+    Probing the widget first — two small nudges to measure the piece before
+    going anywhere near the gap — reads nothing like a person using a slider,
+    and it spent two moves and two screenshots before the drag had started. The
+    distance between the piece and the slot is already an estimate of the
+    travel; taking it and correcting from what the screen shows is both the
+    human gesture and the shorter path.
+    """
+
+    START_X, PIECE_REST, PIECE_W = 140.0, 30.0, 40.0
+
+    def _drive(self, piece_in_dom: bool, target_px: float = 150.0):
+        """Returns the handle offsets the drive actually swept to, in order."""
+        solver = _solver()
+        page = _typing_page()
+        handle = FakeElement(box={"x": 120.0, "y": 420.0, "width": 40.0, "height": 30.0})
+        element = FakeElement(box={"x": 100.0, "y": 100.0, "width": 400.0, "height": 400.0})
+        state = {"offset": 0.0}
+        sweeps: list = []
+        rest, width = self.PIECE_REST, self.PIECE_W
+
+        class _Piece:
+            """A DOM piece that follows the handle 1:1, as the real ones do."""
+
+            def is_visible(self):
+                return True
+
+            def bounding_box(self):
+                centre = element._box["x"] + rest + state["offset"]
+                return {"x": centre - width / 2, "y": 200.0,
+                        "width": width, "height": width}
+
+        scope = _Scope(dict({".geetest_slider_button": handle},
+                            **({".geetest_slice": _Piece()} if piece_in_dom else {})))
+
+        def smooth(_page, x, _y):
+            # `_move_to_element` moves too, to hover the handle before grabbing
+            # it. That one is not a sweep and does not carry the piece.
+            if not any(kind == "down" for kind, _, _ in page.mouse.log):
+                return
+            state["offset"] = x - self.START_X
+            sweeps.append(state["offset"])
+
+        solver._smooth_move = smooth  # type: ignore[method-assign]
+        solver._track_piece = lambda *_a, **_k: {  # type: ignore[method-assign]
+            "bbox": [int(rest - width / 2), 0,
+                     int(round(rest + width / 2 + state["offset"])), 20],
+            "piece": None}
+        frac = target_px / 400.0
+        solver._execute_slide(page, element, scope,
+                              {"target_bounding_box": [frac, 0.4, frac, 0.6]}, element._box)
+        return sweeps
+
+    def test_the_first_move_goes_most_of_the_way_to_the_slot(self):
+        """Not 24px. The handle sits 40px into the widget and the slot is at
+        150px, so the opening sweep is the ~110px between them."""
+        sweeps = self._drive(piece_in_dom=False)
+        assert sweeps[0] > 100.0, f"opened with a {sweeps[0]:.0f}px nudge, not a sweep"
+
+    def test_the_piece_the_page_names_is_where_the_sweep_is_aimed(self):
+        """With the piece in the DOM the sweep is exact and the first look only
+        confirms it — one move, one screenshot, no correction at all."""
+        sweeps = self._drive(piece_in_dom=True)
+        # piece centre 30 within the widget, slot at 150 -> 120px of travel.
+        assert sweeps == [120.0], f"expected one exact sweep, got {sweeps}"
+
+    def test_a_sweep_that_lands_short_is_corrected_from_the_screen(self):
+        """Without the piece in the DOM the sweep is aimed from the HANDLE, so
+        it lands short by however far the piece sits from it. That is what the
+        looks are for, and the piece still ends up on the slot."""
+        sweeps = self._drive(piece_in_dom=False)
+        assert len(sweeps) > 1, "no correction after an estimate that was off"
+        assert abs(sweeps[-1] - 120.0) <= _solver().config.slide_tolerance_px
+
+
+class TestASweepThatOvershootsTheBoard:
+    """A sweep aimed from the handle can push the piece off the end.
+
+    MEASURED on a Tencent slide board: the handle's centre sits 42px into a
+    360px widget, the piece's sits 136px in. Aiming the HANDLE at a slot 288px
+    across therefore sends the PIECE to 382 — past the right edge, where there
+    is nothing left to photograph but the ground it vacated.
+
+    Reported as "nothing moved", that is unrecoverable: the loop looks again,
+    sees the same thing, and releases with the piece off the board. Reported for
+    what it is — the ghost, and the piece a travel beyond it — the very next
+    correction brings it back. The CV's half of this is
+    `TestLocatingThePiece::test_a_piece_driven_off_the_board_is_reported_where_it_went`.
+    """
+
+    WIDGET, PIECE_REST, PIECE_W, START_X = 360.0, 136.0, 42.0, 42.0
+
+    def _drive(self, target_px=288.4):
+        solver = _solver()
+        page = _typing_page()
+        handle = FakeElement(box={"x": 15.0, "y": 297.0, "width": 54.0, "height": 28.0})
+        element = FakeElement(box={"x": 0.0, "y": 0.0,
+                                   "width": self.WIDGET, "height": self.WIDGET})
+        # 1x: this test is about the sweep, not about pixel spaces, and a shot
+        # that disagreed with the box would rescale every number below.
+        element.screenshot = lambda path, **_: _write_png(  # type: ignore[method-assign]
+            path, int(self.WIDGET), int(self.WIDGET))
+        scope = _Scope({".tencent-captcha-dy__slider-block": handle})
+        state = {"offset": 0.0}
+        sweeps: list = []
+
+        def smooth(_page, x, _y):
+            if not any(kind == "down" for kind, _, _ in page.mouse.log):
+                return          # hovering the handle, before the grab
+            state["offset"] = x - self.START_X
+            sweeps.append(state["offset"])
+
+        def track(_element, _before, _after, _exclude, travel=0.0):
+            """What `locate_piece` answers for this widget, 1:1."""
+            rest_left = self.PIECE_REST - self.PIECE_W / 2
+            centre = self.PIECE_REST + state["offset"]
+            right = centre + self.PIECE_W / 2
+            span = [int(rest_left), 0, int(min(right, self.WIDGET)), 20]
+            if right > self.WIDGET:
+                # Off the frame: all that is left is the vacated ground.
+                span = [int(rest_left), 0, int(rest_left + self.PIECE_W), 20]
+                piece = {"centre": self.PIECE_REST + travel, "width": self.PIECE_W}
+            else:
+                piece = {"centre": centre, "width": self.PIECE_W}
+            return {"bbox": span, "piece": piece}
+
+        solver._smooth_move = smooth        # type: ignore[method-assign]
+        solver._track_piece = track         # type: ignore[method-assign]
+        frac = target_px / self.WIDGET
+        solver._execute_slide(page, element, scope,
+                              {"target_bounding_box": [frac, 0.4, frac, 0.6]}, element._box)
+        return sweeps, self.PIECE_REST + state["offset"]
+
+    def test_the_opening_sweep_does_overshoot_here(self):
+        """Not a hypothetical. The first move is aimed from the handle, and on
+        this widget that is 94px too far — which is exactly why the reading
+        below has to exist."""
+        sweeps, _ = self._drive()
+        assert sweeps[0] > self.WIDGET - self.PIECE_REST, (
+            f"first sweep {sweeps[0]:.0f}px does not put the piece off the board; "
+            f"this test is no longer about anything")
+
+    def test_the_piece_is_brought_back_onto_the_slot(self):
+        sweeps, final = self._drive()
+        assert len(sweeps) > 1, "released at the overshoot without correcting"
+        assert abs(final - 288.4) <= _solver().config.slide_tolerance_px, (
+            f"piece released at {final:.1f}px, wanted 288.4")
 
 
 class TestTypedAnswerIsSubmitted:

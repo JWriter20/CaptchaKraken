@@ -56,6 +56,16 @@ def test_config_defaults_come_from_the_manifest(monkeypatch):
         "CAPTCHA_LORA_NAME",
     ):
         monkeypatch.delenv(var, raising=False)
+    # SOMEONE ELSE'S ENDPOINT, pinned explicitly.
+    #
+    # `lora_name()` answers differently against OUR API — there it returns the
+    # hosted-only model, which is the whole point of `hosted_default`. Leaving
+    # the endpoint unset does not mean "not hosted": `base_url()` falls through
+    # to the credentials file, so on a machine that has ever signed in through
+    # the MCP flow this resolved to api.captchakraken.com and the assertion
+    # below became a different question than the one it is asking. Both halves
+    # are now asserted, each against the endpoint it belongs to.
+    monkeypatch.setenv("VLLM_BASE_URL", "http://127.0.0.1:8000/v1")
 
     manifest = config.pinned()
     assert config.base_model() == manifest["base_model"]

@@ -59,9 +59,11 @@ interface PuppeteerElementHandle {
   isVisible(): Promise<boolean>;
   evaluate(pageFunction: (el: any, ...args: any[]) => any, ...args: any[]): Promise<any>;
   $(selector: string): Promise<PuppeteerElementHandle | null>;
+  $$(selector: string): Promise<PuppeteerElementHandle[]>;
 }
 interface PuppeteerFrame {
   $(selector: string): Promise<PuppeteerElementHandle | null>;
+  $$(selector: string): Promise<PuppeteerElementHandle[]>;
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   waitForFunction(pageFunction: Function | string, options?: any, ...args: any[]): Promise<unknown>;
 }
@@ -109,6 +111,11 @@ function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle |
     isVisible: () => h.isVisible(),
     textContent: () => h.evaluate((el: Element) => el.textContent),
     $: async (selector) => wrapHandle(await h.$(selector)),
+    // Puppeteer spells it the same; the wrap is what differs — every handle has
+    // to come back through `wrapHandle`, and the nulls it can return are
+    // dropped rather than handed on as holes in the list.
+    $$: async (selector) =>
+      (await h.$$(selector)).map(wrapHandle).filter((x): x is PlaywrightElementHandle => !!x),
   };
 }
 
@@ -116,6 +123,8 @@ function wrapFrame(f: PuppeteerFrame | null): PlaywrightFrame | null {
   if (!f) return null;
   return {
     $: async (selector) => wrapHandle(await f.$(selector)),
+    $$: async (selector) =>
+      (await f.$$(selector)).map(wrapHandle).filter((x): x is PlaywrightElementHandle => !!x),
     waitForSelector: async (selector, options) =>
       wrapHandle(await f.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
     waitForFunction: (pageFunction, arg, options) =>

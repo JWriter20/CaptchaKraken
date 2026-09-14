@@ -3,9 +3,11 @@
 `_record_keyframes` has exactly one early exit — `cycle_closed`, which needs a
 digest to come back AFTER a different one. A still board only ever produces the
 one digest, so it can never close a cycle and films every frame up to
-`video_burst_max_ms`. `_speculate` has the missing half (`if not moved and
-fut.done(): break`) because it has a concurrent inference to wait on; the
-recording path had nothing equivalent.
+`video_burst_max_ms`. `_speculate` has the missing half — it breaks on the
+settled floor window — because it has a concurrent inference to wait on; the
+recording path had nothing equivalent. (That exit used to wait on the inference
+too, which cost it the same ceiling for a different reason: see
+`test_a_slow_model_does_not_extend_the_burst`.)
 
 MEASURED, because the obvious explanation was wrong. The first guess was render
 noise defeating the byte hash, and it does not: driving the real fixtures
@@ -124,7 +126,7 @@ def test_the_js_port_has_the_same_still_exit():
     Pinned against the source because Tier 1 is hermetic and has no node.
     """
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    assert "captured - lastNewAt >= floorFrames" in js, (
+    assert "elapsedMs - lastNewMs >= floorMs" in js, (
         "the JS burst has no settled exit: a board that stops producing new "
         "screens can never close a cycle, so it films to videoBurstMaxMs while "
         "the python port stops once it has settled")

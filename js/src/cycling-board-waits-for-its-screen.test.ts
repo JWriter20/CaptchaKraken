@@ -244,3 +244,40 @@ test('a cycling board is recorded after ONE round, not two', async () => {
     'two changes in one round and it still wants another round to be sure');
   assert.ok(queries <= 2, `${queries} inferences spent re-solving a board that never holds still`);
 });
+
+test('a board we have already touched is not re-classified by filming it', async () => {
+  /*
+   * A recording asks "is this board moving on its own", and after we have acted
+   * it cannot answer that: a refused answer makes the widget shake, wash and
+   * reset, and the film cannot separate the board's own motion from the
+   * feedback to ours. `shouldSpeculate` has always said so; `classifyByRecording`
+   * was added later and did not.
+   *
+   * Measured on GeeTest's slide-popup demo — a STATIC drag puzzle with a
+   * slider. Round one read it correctly as still. Round two filmed it while the
+   * handle was returning from the previous drag, called it animated, cut six
+   * keyframes out of a puzzle that has none, and failed 5 of 8 live against an
+   * 87% one-shot. Every failure ended "the model returned the same answer 3
+   * times running", which is what a board that never changed looks like.
+   */
+  const solver: any = new CaptchaKrakenSolver({});
+  let filmed = 0;
+  solver.startKeyframeBurst = () => {
+    filmed += 1;
+    return {
+      moved: () => true, screensSeen: () => 9, stableFrame: () => null,
+      ready: async () => 'animated', verdict: async () => true,
+      abandon: async () => {}, finish: async () => '/tmp/nope',
+    };
+  };
+  const element: any = { screenshot: async () => undefined };
+
+  // Untouched: it films, and may say whatever the film says.
+  assert.equal(await solver.classifyByRecording(element), 'animated');
+  assert.equal(filmed, 1);
+
+  // Touched: it must not film at all, and must not claim animated.
+  solver.actedOnBoard = true;
+  assert.equal(await solver.classifyByRecording(element), 'static');
+  assert.equal(filmed, 1, 'a touched board must not be filmed to classify it');
+});

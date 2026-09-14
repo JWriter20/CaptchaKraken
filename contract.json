@@ -1,6 +1,6 @@
 {
   "python": {
-    "version": "2.10.0",
+    "version": "3.0.0",
     "exports": [
       "ActionPlanner",
       "AppiumTouchBackend",
@@ -43,6 +43,9 @@
       "animated_challenge_after_ms",
       "animated_motion_streak",
       "animated_probe_enabled",
+      "board_paint_floor",
+      "board_paint_poll_ms",
+      "board_paint_timeout_ms",
       "element_screenshot_timeout_ms",
       "expert",
       "grid_load_poll_interval_ms",
@@ -72,7 +75,6 @@
       "settle_poll_ms",
       "settle_timeout_ms",
       "slide_max_corrections",
-      "slide_probe_offsets_px",
       "slide_tolerance_px",
       "speculative_burst_enabled",
       "stale_element_backoff_ms",
@@ -101,6 +103,8 @@
       "credentials_path",
       "extra_serve_args",
       "gpu_memory_utilization",
+      "hosted_hosts",
+      "is_hosted_endpoint",
       "lora_adapter",
       "lora_name",
       "lora_revision",
@@ -131,6 +135,7 @@
   "cli": {
     "entry_point": "captchakraken = captchakraken.cli:main",
     "subcommands": [
+      "board-painted",
       "check-movement",
       "check-movement-batch",
       "detect-selected",
@@ -191,6 +196,9 @@
     "CAPTCHA_EXPERT": [
       "python/src/captchakraken/prompts.py"
     ],
+    "CAPTCHA_HOSTED_HOSTS": [
+      "python/src/captchakraken/config.py"
+    ],
     "CAPTCHA_HUMANIZATION": [
       "js/src/humanize.ts",
       "python/src/captchakraken/humanize.py"
@@ -234,6 +242,7 @@
       "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_LORA_NAME": [
+      "js/src/solver.ts",
       "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_LORA_REVISION": [
@@ -277,6 +286,7 @@
       "python/src/captchakraken/config.py"
     ],
     "VLLM_BASE_URL": [
+      "js/src/solver.ts",
       "python/src/captchakraken/config.py"
     ],
     "VLLM_EXTRA_ARGS": [
@@ -337,7 +347,7 @@
       "",
       "python_only_config: solver knobs the Python PageSolverConfig has and",
       "CaptchaKrakenConfig does not, so the behaviour is unreachable from JS.",
-      "The three `slide_*` ones are the slider correction loop; a JS caller",
+      "The two `slide_*` ones are the slider correction loop; a JS caller",
       "cannot tune it. `max_unsupported_resolves`, `max_stale_frame_resolves`",
       "and `stale_frame_resolve_enabled` DO exist in TS — spelled `Re`Solves,",
       "which is not the snake->camel transform every other field follows, so a",
@@ -354,7 +364,6 @@
       "max_stale_frame_resolves",
       "max_unsupported_resolves",
       "slide_max_corrections",
-      "slide_probe_offsets_px",
       "slide_tolerance_px",
       "stale_frame_resolve_enabled"
     ],
@@ -379,6 +388,7 @@
       "bin": null,
       "files": [
         "dist",
+        "NOTICE",
         "python",
         "scripts",
         "AGENTS.md",
@@ -413,6 +423,9 @@
       "animatedChallengeAfterMs",
       "animatedMotionStreak",
       "apiKey",
+      "boardPaintFloor",
+      "boardPaintPollMs",
+      "boardPaintTimeoutMs",
       "elementScreenshotTimeoutMs",
       "expert",
       "gridLoadPollIntervalMs",

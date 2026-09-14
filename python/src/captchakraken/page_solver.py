@@ -38,6 +38,7 @@ driven from one.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import random
 import re
@@ -253,14 +254,28 @@ def burst_hang_deadline_ms(cfg) -> float:
     real time. This only has to notice a screenshot that never returns, so it
     is deliberately slack.
 
-    Sized off the CEILING, because that is what sizes the loop —
-    `_record_keyframes` plans `video_burst_max_ms` worth of frames, not
-    `video_burst_duration_ms` worth. Deriving it from the floor gave a
-    120-frame burst 17s, i.e. 141ms per frame against a 100ms interval, and a
-    burst that simply ran to its ceiling killed the attempt. Must match
+    Sized off the CEILING, because that is what bounds the loop. The burst
+    itself stops on `video_burst_max_ms` of WALL-CLOCK, so the slack above that
+    is headroom for one screenshot that hangs — the case this exists to name —
+    and not for a burst that merely films slowly. Must match
     `burstHangDeadlineMs` in the JS port.
     """
     return 3.0 * float(cfg.video_burst_max_ms) + 5_000.0
+
+
+def measured_fps(frames: int, elapsed_ms: float, nominal_fps: float) -> float:
+    """The rate a burst ACHIEVED, for the slicer's timestamps.
+
+    `video_burst_fps` is what the loop aims at, and a camera slower than the
+    interval does not reach it — so a frame index means a different moment on
+    a phone than on a desktop. The slicer picks frames by index and only uses
+    the rate to date them, so this keeps the manifest honest without moving
+    which frames the model is shown. Falls back to the nominal rate when there
+    is nothing to divide.
+    """
+    if frames <= 0 or elapsed_ms <= 0:
+        return float(nominal_fps)
+    return frames / (elapsed_ms / 1000.0)
 
 
 #: How unlike the chosen keyframe the widget must look before the gate calls it
@@ -560,6 +575,16 @@ class PageSolverConfig:
 
     grid_load_poll_interval_ms: int = 250
     grid_load_timeout_ms: int = 8_000
+
+    # The load gate in front of every inference screenshot. Short on purpose: a
+    # blank board is the transient a vendor shows while it rebuilds, so a panel
+    # still blank after this is blank for some other reason and waiting longer
+    # buys no picture. Proceeding costs one round; never proceeding costs the
+    # solve. `board_paint_floor` None means the engine's own default — raise it
+    # only with the corpus sweep in hand (tool_calls/board_painted.py).
+    board_paint_poll_ms: int = 180
+    board_paint_timeout_ms: int = 2_500
+    board_paint_floor: Optional[float] = None
     recaptcha_max_dynamic_rounds: int = 8
     recaptcha_fade_onset_grace_ms: int = 4_000
     recaptcha_dynamic_fade_poll_ms: int = 250
@@ -567,18 +592,17 @@ class PageSolverConfig:
     recaptcha_tile_hover_enabled: bool = True
 
     # ── puzzle-piece sliders (see _execute_slide) ──────────────────────────
-    # How far to nudge the handle, in px, to learn the piece's width and how
-    # fast it follows. Two probes because two unknowns; far enough apart that
-    # the difference between the two widths is signal rather than rounding, and
-    # both small enough to stay on the shortest track observed (~250px).
-    slide_probe_offsets_px: Tuple[float, ...] = (24.0, 64.0)
     # Stop steering once the piece is this close. Tighter than any vendor's
     # accept window, so the limit on solving is the model's slot estimate.
     slide_tolerance_px: float = 2.0
-    # Corrections after the probes. Each costs a screenshot with the mouse held
-    # down; two is enough for a linear system, and the third would only be
-    # chasing a measurement that is not going to converge.
-    slide_max_corrections: int = 2
+    # Looks after the opening drag, each costing one screenshot with the mouse
+    # held down and each able to correct. Three rather than two because the
+    # first correction is also the SECOND measurement: until it lands, the
+    # travel ratio is only assumed to be 1:1, so a geared widget spends one
+    # look learning what the other two steer by. The loop stops the moment the
+    # piece is inside `slide_tolerance_px`, so a widget that does not need the
+    # third never pays for it.
+    slide_max_corrections: int = 3
 
 
 # Vendors with no checkbox/challenge split — one container, one interactive
@@ -587,6 +611,34 @@ class PageSolverConfig:
 # lifted from src/captchaCollection/sources.py, which already drives these 8
 # vendors nightly in the collector. Mirror of VENDOR_WIDGET_LOCATORS in
 # solver.ts — keep both in the same order with the same selectors.
+def vendor_from_src(src: Optional[str]) -> str:
+    """Which grid shapes this board is allowed, from the challenge iframe's `src`.
+
+    The return value feeds `solver._grid_dims` (python) / the CLI's equivalent,
+    which restricts hCaptcha to a 3x3 and reCAPTCHA to a 3x3 or 4x4, and
+    restricts ANYTHING ELSE not at all — GeeTest and Prosopo both ship real 3x3
+    grids, so `unknown` has to stay permissive. That makes this the
+    highest-leverage string comparison in the client: a vendor it fails to name
+    loses the only check that stops `find_grid` reading a click board's header
+    and footer bands as a lattice and handing the board to the grid expert.
+
+    Keyed on `hcaptcha`, the same substring the seven `iframe[src*="hcaptcha"]`
+    selectors elsewhere use, NOT on the apex host. hCaptcha serves its challenge
+    from `newassets.hcaptcha.com/captcha/v1/<build>/static/hcaptcha.html#frame=
+    challenge`; the marker that is stable across builds, mirrors and our own
+    Tier 3 fixtures is `hcaptcha`.
+
+    Mirror of `vendorFromSrc` in solver.ts — CLAUDE.md 1c. Pure, so both ports
+    are tested against the same strings.
+    """
+    src = src or ""
+    if "hcaptcha" in src:
+        return "hcaptcha"
+    if "recaptcha/api2" in src:
+        return "recaptcha"
+    return "unknown"
+
+
 VENDOR_WIDGET_LOCATORS = [
     {"puzzle_source": "geetest", "selectors": [".geetest_box", ".geetest_panel_box", ".geetest_popup_window", ".geetest_widget"]},
     # Tencent renders IN THE HOST DOCUMENT since 2026-08-11; before that it was
@@ -643,7 +695,7 @@ VENDOR_WIDGET_LOCATORS = [
 #     meaning the second.
 #
 # Hosts measured 2026-08-24 by loading each vendor's demo page and recording
-# every third-party request (see scripts/check_vendor_selectors.py --hosts).
+# every third-party request against the live pages, never against a fixture.
 #: The two vendors with bespoke handling in this file. EVERYTHING else shares the
 #: generic path, and the two behaviours below are gated on "not one of these" —
 #: spelled as this set rather than as `== "unknown"`, which is what they used to
@@ -775,6 +827,86 @@ DRAGGABLE_PIECE_SELECTORS = [
     '[class*="puzzle"][class*="piece"]',
     '[class*="jigsaw"]',
 ]
+
+#: Elements that ARE the puzzle piece, for reading its position off the page
+#: instead of inferring it from a pixel diff.
+#:
+#: Separate from DRAGGABLE_PIECE_SELECTORS on purpose. That list answers "is
+#: there a piece to drag INSTEAD of a slider", and adding to it changes which
+#: gesture a widget gets. This one only ever answers "where is the piece and how
+#: wide is it", so a wrong hit costs a measurement, not a different drag.
+#:
+#: WHY THIS EXISTS. The CV fallback measures the piece as the union of what
+#: changed between two frames, which spans the vacated ground and the piece's
+#: new position — and its edges are inset by however much the piece's own edges
+#: fade into the board. That inset cancels out of the RATIO but not out of the
+#: WIDTH, and `piece_center = right_edge - width / 2` turns an under-measured
+#: width into a centre estimate too far right by half the error.
+#:
+#: MEASURED on gt4.geetest.com's slide demo, 2026-09-12. `.geetest_slice` is
+#: 80x80 in the DOM; the diff inferred 63px and 74px on two consecutive live
+#: attempts. 63 puts the centre 8.5px right of the truth, so the loop reports
+#: itself converged to within 2px while releasing 8.5px short — 2.5% of a 340px
+#: widget, against a notch that accepts about 2%. Fourteen of fourteen refused
+#: drags across two filmed runs undershot; not one overshot.
+#:
+#: RE-MEASURED against the live vendors 2026-09-13, by opening each demo the
+#: collector knows about and dumping the widget subtree — every element with its
+#: geometry and computed cursor. What each vendor actually calls its piece:
+#:
+#:     geetest v4   div.geetest_slice                   80x80, flush with the board
+#:     tencent      div.tencent-captcha-dy__fg-item     59x59, inset 25px
+#:     yidun        img.yidun_jigsaw                    61x160, a full-height strip
+#:
+#: Two things came out of that pass and both are in the list below.
+#:
+#: TENCENT'S PIECE HAS A NAME AND WE WERE NOT USING IT. `fg-item` matches none
+#: of the generic patterns — "fg" is not "puzzle", "piece" or "jigsaw" — so every
+#: Tencent slide fell through to the pixel-diff path and inherited its inferred
+#: width. That path works, which is why nothing looked broken; it is just less
+#: accurate than reading the box the vendor already draws.
+#:
+#: GEETEST NOW STAMPS A PER-BUILD HASH. The live element carries BOTH
+#: `geetest_slice` and `geetest_slice_1378c412`, and the suffix changes between
+#: builds. `.geetest_slice` still matches today because both classes are
+#: present, and the day the plain one stops being emitted is the day this list
+#: goes blind — which is the failure Tencent already put us through once, moving
+#: out of `iframe#tcaptcha_iframe_dy` on 2026-08-11 and leaving both solver
+#: ports blind for twelve days. A live check against the vendors' own demo
+#: pages is what notices, and it covers these selectors too.
+#:
+#: The JS twin is SLIDE_PIECE_MEASURE_SELECTORS.
+SLIDE_PIECE_MEASURE_SELECTORS = (
+    ".geetest_slice",
+    ".tencent-captcha-dy__fg-item",
+    ".yidun_jigsaw",
+    ".lemin-cropped-puzzle-piece",
+    '[class*="puzzle"][class*="piece"]',
+    '[class*="jigsaw"]',
+)
+
+#: What a piece can possibly measure. A puzzle piece is a small thing inside a
+#: board; anything approaching the width of the widget is the board, the panel,
+#: or the widget itself.
+#:
+#: THE GENERIC SELECTORS ABOVE NEED THIS TO BE SAFE. They are substring matches,
+#: and a vendor is free to put the same word on its outermost container.
+#: Measured on dun.163.com/trial/jigsaw, 2026-09-13: `[class*="jigsaw"]` matches
+#: TWO elements, and the first in document order is
+#:
+#:     div.yidun yidun-custom yidun--light yidun--float …   320x40   the widget
+#:     img.yidun_jigsaw                                      61x160   the piece
+#:
+#: so "first visible match" returned a box five times too wide that never moves,
+#: and the correction loop would have steered by a number that could not change.
+#: Tier 3 cannot see it — there is no Yidun slide fixture — which is exactly why
+#: these selectors are re-checked against the vendor's live widget.
+#:
+#: The same two numbers `_solve_slide_geometry` throws a measurement out on, for
+#: the same reason, so they are named once and used by both.
+SLIDE_PIECE_MIN_PX = 3.0
+SLIDE_PIECE_MAX_FRACTION = 0.6
+
 
 
 class PageSolver:
@@ -1256,6 +1388,45 @@ class PageSolver:
                 return element
         return None
 
+    def _measure_piece_box(self, scope: Any,
+                           widget_width: float) -> Optional[Dict[str, float]]:
+        """The slider piece's box, or None when the page will not say.
+
+        EVERY match of each selector, not the first. `_find_control` takes the
+        first visible hit, which is right for a handle or a submit button — they
+        are unique — and wrong for the piece, because the tail of the selector
+        list is deliberately generic and a vendor may carry the same word on its
+        outer container. See `SLIDE_PIECE_MAX_FRACTION` for the Yidun board where
+        the first match is the whole widget.
+
+        So the size bound is the filter, not a sanity check after the fact: a
+        piece is a small thing inside a board, and the first candidate that
+        could BE one wins.
+        """
+        for selector in SLIDE_PIECE_MEASURE_SELECTORS:
+            try:
+                found = scope.query_selector_all(selector)
+            except Exception:
+                continue  # a selector this adapter can't parse must not end the search
+            for candidate in found or ():
+                if not self._visible(candidate):
+                    continue
+                try:
+                    b = candidate.bounding_box()
+                except Exception:
+                    continue
+                if not b or b["width"] <= 0:
+                    continue
+                if not (SLIDE_PIECE_MIN_PX <= b["width"]
+                        <= widget_width * SLIDE_PIECE_MAX_FRACTION):
+                    too = "small" if b["width"] < SLIDE_PIECE_MIN_PX else "big"
+                    _debug(f"slider: {selector} matched a {b['width']:.0f}px box on "
+                           f"a {widget_width:.0f}px widget — too {too} to be the "
+                           f"piece; looking further")
+                    continue
+                return b
+        return None
+
     def _answer_box(self, scope: Any, element: Any = None) -> Optional[Any]:
         """Where a distorted-text captcha's answer goes.
 
@@ -1322,14 +1493,25 @@ class PageSolver:
         return True
 
     def _track_piece(
-        self, element: Any, before: str, after: str, exclude: Sequence[float]
-    ) -> Optional[Sequence[int]]:
-        """`captchakraken track-piece` — box of what moved, handle masked out."""
-        from .tool_calls.track_piece import changed_bbox
+        self, element: Any, before: str, after: str, exclude: Sequence[float],
+        travel: float = 0.0,
+    ) -> Optional[Dict[str, Any]]:
+        """`captchakraken track-piece` — what moved, with the handle masked out.
+
+        `{"bbox": [x1, y1, x2, y2], "piece": {"centre", "width"} | None}`, all in
+        the SHOT's pixels, or None when nothing moved. `travel` is how far the
+        piece is believed to have gone since `before`; it is what lets the CV
+        resolve the piece itself instead of the union of it and the ground it
+        vacated.
+        """
+        from .tool_calls.track_piece import changed_bbox, locate_piece
 
         try:
             self._screenshot(element, after, timeout_ms=self.config.element_screenshot_timeout_ms)
-            return changed_bbox(before, after, exclude)
+            bbox = changed_bbox(before, after, exclude)
+            if bbox is None:
+                return None
+            return {"bbox": bbox, "piece": locate_piece(before, after, travel, exclude)}
         except Exception as exc:
             _debug(f"track_piece failed: {exc}")
             return None
@@ -1362,16 +1544,22 @@ class PageSolver:
         elsewhere on the widget, and the ratio between the two is a vendor
         implementation detail that several of them deliberately vary.
 
-        So this is closed-loop, not a calculation. Press the handle, nudge it
-        twice by known amounts, and watch the screen:
+        So this is aim-then-correct, the way a person does it: one sweep of
+        the handle at where the piece ought to end up, then a look, then a
+        nudge. The opening sweep is sized from the distance between the piece
+        and the slot, which is a 1:1 guess at the ratio — close on every vendor
+        measured, and wrong in a direction the looks below can see.
+
+        Each look measures as well as corrects:
 
             union(before, after) spans the piece's ORIGINAL left edge to its
-            CURRENT right edge, so its width is  piece_width + ratio × nudge.
+            CURRENT right edge, so its width is  piece_width + ratio × travel.
 
-        Two nudges, two widths, two unknowns — solve for both, then steer the
-        remaining distance and re-measure. The mouse is not released until the
-        piece is home, because on every one of these puzzles releasing IS the
-        submit; there is no Verify button to reconsider at.
+        One such reading places the piece under the 1:1 assumption; the second,
+        taken for free at the first correction's offset, solves the ratio the
+        vendor actually uses. The mouse is not released until the piece is home,
+        because on every one of these puzzles releasing IS the submit; there is
+        no Verify button to reconsider at.
 
         Returns False if there is nothing here to drag, leaving the caller's
         normal no-op handling to deal with it.
@@ -1418,20 +1606,40 @@ class PageSolver:
         start_x = hbox["x"] + hbox["width"] / 2
         hold_y = hbox["y"] + hbox["height"] / 2
 
-        # Mask the whole horizontal BAND the handle runs in, not just where it
-        # is now: it is about to move across that band, and most vendors fill
-        # the track behind it as it goes. Either would otherwise be the largest
-        # moving thing in frame, and we would track the handle instead of the
-        # piece.
+        # Mask from the top of the handle's band DOWN TO THE BOTTOM of the
+        # widget, not just the strip the handle itself occupies.
+        #
+        # The handle is not the only thing that moves down there. Most vendors
+        # fill the track behind it, and the filled track is not the same height
+        # as the handle — Tencent's runs several pixels lower. Those few
+        # unmasked rows are enough to ruin the measurement, because the box
+        # this feeds is an EXTREME: one surviving sliver of track at the far
+        # left drags the left edge across the whole widget.
+        #
+        # Measured on a Tencent slide board, handle nudged +24 and +64px,
+        # against a real piece about 42px wide:
+        #
+        #     masked to the handle's band    pieceWidth 135.4px   (3.2x too wide)
+        #     masked to the bottom            pieceWidth  42.0px
+        #
+        # `pieceCentre` is `rightEdge - pieceWidth / 2`, so an over-wide piece
+        # puts the estimate ~47px LEFT of the truth and the loop drives the
+        # piece that much too far right. A GeeTest v4 slider measures 67/101px
+        # either way — its track sits inside the handle's band — so this costs
+        # nothing where the old bound was already enough.
+        #
+        # Safe because the piece is always in the picture ABOVE the rail: a
+        # widget whose piece is dragged directly, with no rail, took the
+        # no-handle branch above and never reaches here.
         pad = max(4.0, hbox["height"] * 0.35)
         band = [
             0.0,
             hbox["y"] - element_box["y"] - pad,
             element_box["width"],
-            hbox["y"] + hbox["height"] - element_box["y"] + pad,
+            element_box["height"],
         ]
 
-        shots = [_tmp_png("slide") for _ in range(4)]
+        shots = [_tmp_png("slide") for _ in range(2)]
         try:
             self._move_to_element(page, handle, padding_percentage=30.0)
             self._human.press(page)
@@ -1451,49 +1659,83 @@ class PageSolver:
             scale = self._shot_scale(shots[0], element_box["width"])
             exclude = [v * scale for v in band]
 
-            probes = self.config.slide_probe_offsets_px
+            def measure_piece_center():
+                """The piece's centre in element CSS px, ASKED OF THE PAGE.
+
+                None when the vendor draws it into a canvas and there is no
+                element to ask. Read fresh every time rather than cached: the
+                whole point is that it is the LIVE position, and a cached one is
+                exactly the stale estimate this replaces.
+                """
+                b = self._measure_piece_box(scope, element_box["width"])
+                if b is None:
+                    return None
+                return b["x"] + b["width"] / 2.0 - element_box["x"]
+
+            # Where the piece sits before anything moves. The page if it will
+            # say; otherwise the handle's own centre, which is the geometry
+            # every one of these puzzles shares — piece and handle both start
+            # flush left, so the handle's travel is the piece's travel.
+            rest_center = measure_piece_center()
+            if rest_center is None:
+                rest_center = start_x - element_box["x"]
+
+            # The opening sweep. 1:1, because the ratio cannot be known without
+            # moving something and every vendor measured is within ~15% of it.
+            offset = target_x - rest_center
+            self._smooth_move(page, start_x + offset, hold_y)
+
             widths: List[Tuple[float, float]] = []
             last_box = None
-            for offset, shot in zip(probes, shots[1:]):
-                self._smooth_move(page, start_x + offset, hold_y)
+            last_piece = None
+            ratio = 1.0
+            steered = False
+            for _ in range(self.config.slide_max_corrections):
                 self._human.pause("probe")
-                box = self._track_piece(element, shots[0], shot, exclude)
-                if box is not None:
-                    widths.append((float(offset), float(box[2] - box[0]) / scale))
-                    last_box = box
+                # Always diffed against the baseline, never against the previous
+                # look: what this measures is displacement from REST, which is
+                # what both readings below are written in.
+                seen = self._track_piece(element, shots[0], shots[1], exclude,
+                                         travel=offset * ratio * scale)
+                if seen is not None:
+                    box = seen["bbox"]
+                    widths.append((offset, float(box[2] - box[0]) / scale))
+                    last_box, last_piece = box, seen["piece"]
+                piece_w, ratio = self._solve_slide_geometry(widths, element_box["width"])
 
-            piece_w, ratio = self._solve_slide_geometry(widths, element_box["width"])
-            if last_box is None or piece_w is None:
-                # Never saw the piece — a canvas the screenshot cannot separate,
-                # a widget that redraws wholesale, or a press the handle refused.
-                # Fall back on the geometry every one of these puzzles shares:
-                # piece and handle both start flush left, so the handle's travel
-                # is the piece's travel.
-                _log("slider: piece never resolved on screen; steering by handle travel alone")
-                self._smooth_move(page, start_x + (target_x - (start_x - element_box["x"])), hold_y)
-            else:
-                # The offset `last_box` was MEASURED at — not `probes[-1]`, and
-                # not indexed by how many measurements succeeded. If the first
-                # probe failed to resolve and the second worked, those two
-                # disagree, and steering from a base the reading does not belong
-                # to sends the piece somewhere neither the model nor the screen
-                # asked for.
-                offset = float(widths[-1][0])
-                for _ in range(self.config.slide_max_corrections):
-                    piece_center = (last_box[2] / scale - piece_w / 2.0)
-                    error = target_x - piece_center
-                    if abs(error) <= self.config.slide_tolerance_px:
-                        break
-                    offset += error / ratio
-                    self._smooth_move(page, start_x + offset, hold_y)
-                    self._human.pause("probe")
-                    box = self._track_piece(element, shots[0], shots[3], exclude)
-                    if box is None:
-                        break  # ran out of track; release where we are
-                    last_box = box
-                _debug(f"slider: piece_w={piece_w:.1f} ratio={ratio:.3f} scale={scale:.3f} "
-                       f"final_center={last_box[2] / scale - piece_w / 2.0:.1f} "
-                       f"target={target_x:.1f}")
+                # THE PAGE FIRST; then the piece the diff RESOLVED; and only
+                # then the piece inferred from the union's width, which carries
+                # the union's bias — see `locate_piece`.
+                live = measure_piece_center()
+                if live is not None:
+                    piece_center = live
+                elif last_piece is not None:
+                    piece_center = last_piece["centre"] / scale
+                elif last_box is not None and piece_w is not None:
+                    piece_center = last_box[2] / scale - piece_w / 2.0
+                else:
+                    # A spinner, a wholesale redraw, a frame that arrived
+                    # mid-animation. Look again rather than give up — the pause
+                    # above is what clears it — and if none of them resolves,
+                    # the opening sweep stands, which is the best open-loop
+                    # placement there is.
+                    continue
+
+                steered = True
+                error = target_x - piece_center
+                source = ("dom" if live is not None
+                          else "piece" if last_piece is not None else "union")
+                _debug(f"slider: piece_w={piece_w} ratio={ratio:.3f} scale={scale:.3f} "
+                       f"center={piece_center:.1f} target={target_x:.1f} error={error:+.1f} "
+                       f"source={source}")
+                if abs(error) <= self.config.slide_tolerance_px:
+                    break
+                offset += error / ratio
+                self._smooth_move(page, start_x + offset, hold_y)
+
+            if not steered:
+                _log("slider: the piece never resolved on screen; "
+                     "released where the opening sweep put it")
 
             # Settle before letting go. A release in the same tick as the last
             # move reads as a machine, and some vendors sample the final
@@ -1512,35 +1754,44 @@ class PageSolver:
     def _solve_slide_geometry(
         widths: Sequence[Tuple[float, float]], widget_width: float
     ) -> Tuple[Optional[float], float]:
-        """Piece width and handle-to-piece travel ratio, from probe measurements.
+        """Piece width and handle-to-piece travel ratio, from what the loop saw.
 
         Each measurement is (handle offset, width of what changed), and
-        width = piece_width + ratio × offset. Two of them determine both.
+        width = piece_width + ratio × offset. Two of them determine both — but
+        only if they were taken far enough apart. `changed_bbox` answers in
+        whole device pixels, so each width carries about ±1px and the solved
+        ratio carries ±2/spread: at the 16px floor below that is ±0.13, no worse
+        than the 1:1 assumption is on a real widget, while at 4px it is ±0.5 and
+        gets multiplied into every correction that follows. The loop's offsets
+        are its own corrections now, so nothing else guarantees the spread.
 
-        With only one usable measurement the system is underdetermined, so ratio
-        is ASSUMED to be 1 — true of every vendor observed, and the assumption
-        is stated here rather than buried as a default. A ratio solved from
-        implausible measurements (a redraw, a piece that hit the wall between
-        probes) is rejected the same way: better a 1:1 guess that overshoots and
-        gets corrected than a ratio of 0.02 that sends the handle off the track.
+        With no usable pair the system is underdetermined, so ratio is ASSUMED
+        to be 1 — true of every vendor observed, and the assumption is stated
+        here rather than buried as a default. A ratio solved from implausible
+        measurements (a redraw, a piece that hit the wall) is rejected the same
+        way: better a 1:1 guess that overshoots and gets corrected than a ratio
+        of 0.02 that sends the handle off the track.
         """
         if not widths:
             return None, 1.0
         piece_w: Optional[float] = None
         ratio = 1.0
-        if len(widths) >= 2:
-            (o1, w1), (o2, w2) = widths[0], widths[-1]
-            if o2 != o1:
-                candidate = (w2 - w1) / (o2 - o1)
-                if 0.2 <= candidate <= 3.0:
-                    ratio = candidate
-                    piece_w = w1 - ratio * o1
+        # The widest-apart pair, not the first and the last: a correction can
+        # step back towards the handle, so the order they arrived in says
+        # nothing about how far apart they are.
+        (o1, w1), (o2, w2) = min(widths, key=lambda m: m[0]), max(widths, key=lambda m: m[0])
+        if o2 - o1 >= 16.0:
+            candidate = (w2 - w1) / (o2 - o1)
+            if 0.2 <= candidate <= 3.0:
+                ratio = candidate
+                piece_w = w1 - ratio * o1
         if piece_w is None:
             o, w = widths[-1]
             piece_w = w - ratio * o
         # A piece narrower than a few pixels, or wider than half the widget, is
         # a measurement of something else.
-        if not 3.0 <= piece_w <= widget_width * 0.6:
+        if not (SLIDE_PIECE_MIN_PX <= piece_w
+                <= widget_width * SLIDE_PIECE_MAX_FRACTION):
             return None, ratio
         return piece_w, ratio
 
@@ -1707,8 +1958,9 @@ class PageSolver:
                     "challenge that has not been triggered)")
         return (f"{base}, BUT {'/'.join(loaded)} code IS loaded and running on "
                 "this page. The vendor's markup no longer matches anything in "
-                "VENDOR_WIDGET_LOCATORS — re-measure with "
-                "scripts/check_vendor_selectors.py and update BOTH solver ports")
+                "VENDOR_WIDGET_LOCATORS — the selector list needs "
+                "re-measuring against the vendor's current markup, in both "
+                "solver ports")
 
     def is_captcha_solved(self, page: Any) -> bool:
         """
@@ -1739,6 +1991,8 @@ class PageSolver:
             # to disappear. Same defect the hCaptcha token had.
             if self._has_non_empty_field_value(page, '[name="cf-turnstile-response"]'):
                 return True
+            if self._is_geetest_accepted(page):
+                return True
 
             # Anchor state is the fallback, and this one DOES need the iframe:
             # it is read out of the anchor's own document.
@@ -1750,6 +2004,64 @@ class PageSolver:
                 return True
         except Exception:
             pass
+        return False
+
+    _GEETEST_ACCEPTED_SELECTOR = (
+        ".geetest_result_tips.geetest_success, "
+        ".geetest_captcha.geetest_success, "
+        ".geetest_captcha.geetest_lock_success"
+    )
+
+    def _is_geetest_accepted(self, page: Any) -> bool:
+        """GeeTest's accepted state, which is neither a token nor an absence.
+
+    The three vendors above hand out a response token, and everything else in
+    this driver falls back on "the widget is gone". GeeTest does neither when it
+    accepts: it paints a result banner INSIDE the still-open panel — "1.6 s. You
+    beat 97% of users" — and closes some seconds later. So the positive signal
+    is on screen while every check this loop makes still says no, the 1s verdict
+    window expires, and the next round spends a whole inference discovering the
+    puzzle was already solved.
+
+    MEASURED on gt4.geetest.com's slide demo, 2026-09-12, three consecutive
+    live solves: the driver opened another solve loop AFTER the success banner
+    had painted, every time.
+
+        run 1   t+12873ms success  ->  "Captcha Solve Loop 3/6"
+        run 2   t+25418ms success  ->  "Captcha Solve Loop 5/6"
+        run 3   t+12571ms success  ->  "Captcha Solve Loop 3/6"
+
+    Across ten filmed attempts that cost 34 model calls for 20 drags, and put
+    ~6s between the winning drag and the solve being reported.
+
+    THE DISCRIMINATOR IS THE VENDOR'S OWN, and it is exact. A refused drag gets
+    the same banner element with `geetest_fail`, a accepted one `geetest_success`:
+
+        reject   .geetest_result_tips geetest_fail    geetest_showResult   "Please try again"
+        accept   .geetest_result_tips geetest_success geetest_showResult   "1.6 s. You beat 97% of users"
+        anchor   .geetest_captcha ... geetest_lock_success                 "Verification Success"
+
+    VISIBILITY IS PART OF THE TEST, not a nicety: `geetest_popup_wrap` carries
+    the same success class at zero height while the panel is closed, so a bare
+    class match would report a solve on a widget that has not been touched.
+
+        The JS twin is `isGeetestAccepted`.
+        """
+        # THE HOST DOCUMENT, not an iframe. GeeTest v4 is a JS SDK that renders
+        # into the page it is embedded in — which is why `detect_captcha` looks
+        # for it with plain `.geetest_btn` selectors rather than an iframe src,
+        # and why this does not walk frames the way the checks above do.
+        #
+        # Each arm is scoped to the element that actually carries the state. A
+        # bare `[class~="geetest_lock_success"]` would also match
+        # `geetest_popup_wrap`, which holds the class at zero height with the
+        # panel shut — and matches it FIRST in document order.
+        try:
+            for el in page.query_selector_all(self._GEETEST_ACCEPTED_SELECTOR):
+                if self._visible(el):
+                    return True
+        except Exception:
+            pass    # a signal we could not read is not a failed solve
         return False
 
     def _is_challenge_freshly_rendered(self, page: Any) -> bool:
@@ -2111,8 +2423,17 @@ class PageSolver:
 
         cfg = self.config
         fps = max(1, int(cfg.video_burst_fps))
-        floor_frames = max(1, round(cfg.video_burst_duration_ms / (1000.0 / fps)))
-        total = max(floor_frames, round(cfg.video_burst_max_ms / (1000.0 / fps)))
+        # THE WINDOW IS WALL-CLOCK. It has to outlast the longest dwell a
+        # cycling board holds a screen for, which is a claim about seconds;
+        # counting frames says the same thing only while the loop actually
+        # reaches `fps`, and a loop whose camera is slower than the interval
+        # never sleeps. Measured on one element, same fixture, same box:
+        # 15.8ms a frame through camoufox, 183.5ms through chromium at a
+        # phone's DPR — so a 40-frame window meant 4.0s on one arm and 8.3s on
+        # the other, and the slower arm sat on a finished answer for the
+        # difference. Must match `burst()` in the JS port — CLAUDE.md 1c.
+        floor_ms = float(cfg.video_burst_duration_ms)
+        max_ms = max(floor_ms, float(cfg.video_burst_max_ms))
         interval = 1.0 / fps
 
         frames: List[Any] = []
@@ -2121,7 +2442,8 @@ class PageSolver:
         cycle_closed = False
         probe = _tmp_png("spec")
 
-        last_new_at = 0
+        #: Elapsed ms at which the most recent NEW screen appeared.
+        last_new_ms = 0.0
         pool = ThreadPoolExecutor(max_workers=1)
         try:
             # `_get_solution` DIRECTLY, not through the freshness guard.
@@ -2139,7 +2461,10 @@ class PageSolver:
             fut = pool.submit(
                 self._get_solution, shot, puzzle_source, retry_mode, text_mode)
             with self._phase("burst"):
-                for i in range(total):
+                t0 = time.monotonic()
+                i = -1
+                while (time.monotonic() - t0) * 1000.0 < max_ms:
+                    i += 1
                     start = time.monotonic()
                     try:
                         self._screenshot(element, probe, animations="allow")
@@ -2159,7 +2484,7 @@ class PageSolver:
                                 cycle_closed = True
                             elif d not in order:
                                 order.append(d)
-                                last_new_at = len(frames)
+                                last_new_ms = (time.monotonic() - t0) * 1000.0
                             last_digest = d
                     # CYCLING, not merely "more than one screen". A board that
                     # transitions ONCE and then holds has two screens and never
@@ -2204,8 +2529,9 @@ class PageSolver:
                     # it did before. Past that, three ways to be done:
                     # Nothing new for a whole floor window: it moved once and
                     # stopped — a fade-in, a settle, tower_stack.
-                    settled = (len(frames) >= floor_frames
-                               and (len(frames) - last_new_at) >= floor_frames)
+                    elapsed_ms = (time.monotonic() - t0) * 1000.0
+                    settled = (elapsed_ms >= floor_ms
+                               and (elapsed_ms - last_new_ms) >= floor_ms)
                     # NO "enough screens, stop filming" RULE HERE, deliberately.
                     # Many screens is a fine way to CLASSIFY a board as animated
                     # and a bad way to end its clip: number_with_highest_value_video
@@ -2215,21 +2541,46 @@ class PageSolver:
                     # the one board whose answer IS the frame. Mirrors the same
                     # note in the JS burst loop.
                     # Cycling: every screen is in hand.
-                    if cycle_closed and len(frames) >= floor_frames:
-                        _log(f"[animated] cycle closed after {len(frames) * interval:.1f}s "
+                    if cycle_closed and elapsed_ms >= floor_ms:
+                        _log(f"[animated] cycle closed after {elapsed_ms / 1000:.1f}s "
                              f"({len(order)} screens); stopping the burst")
                         break
                     # NOT "one screen so far". At the moment inference returns
                     # that is indistinguishable from "one screen ever" — the
                     # geetest svg board dwells 1.5-2.7s per screen and answers
                     # in 0.4s — so the only sound stop is the floor window.
-                    if fut.done() and settled:
+                    #
+                    # AND THE FLOOR WINDOW IS THE WHOLE TEST, so it does not
+                    # wait on the model. `settled` already means the board has
+                    # shown one screen and held it for a full floor — longer
+                    # than the worst dwell a real cycle holds a screen for —
+                    # which is the same evidence `_record_keyframes` stops on.
+                    # Nothing further is learned by filming; the camera was only
+                    # still running because the answer had not come back.
+                    #
+                    # It ran to `video_burst_max_ms` whenever inference was
+                    # slower than the floor. Measured 2026-09-13 on
+                    # a GeeTest 3x3 photo grid: a board perfectly still (one distinct
+                    # frame in 120) filmed the full 12 000 ms because that one
+                    # model call took 22.6 s, and the 8 s of surplus screenshots
+                    # were competing with the request they were waiting for.
+                    #
+                    # THE JS PORT NEVER WAITED HERE. Its burst breaks on the
+                    # settled window alone, which is why the same board reports
+                    # `burst 1.5s` + `inference 1.8s` there and reported
+                    # `burst 12.1s` + a 10.4 s hole here. This is the two ports
+                    # agreeing again, not a new rule — CLAUDE.md 1c.
+                    if settled:
                         break
+                    # Paced, not stretched: a camera that already overran the
+                    # interval sleeps for nothing, and one that would sleep past
+                    # the ceiling lets the loop condition end the burst instead.
                     wait = interval - (time.monotonic() - start)
-                    if wait > 0:
+                    if wait > 0 and elapsed_ms + wait * 1000.0 < max_ms:
                         time.sleep(wait)
 
-            _log(f"[animated] burst verdict after {len(frames) * interval:.1f}s: "
+            burst_ms = (time.monotonic() - t0) * 1000.0
+            _log(f"[animated] burst verdict after {burst_ms / 1000:.1f}s: "
                  f"{'CYCLING' if cycle_closed else 'not cycling'} "
                  f"({len(order)} screens)")
 
@@ -2238,7 +2589,19 @@ class PageSolver:
                 # still, or it moved once, or the cursor changed some pixels.
                 # The answer the model just gave describes the screen that is
                 # on now, so it stands and the frames are dropped.
-                actions, usage = fut.result()
+                #
+                # PHASED, because this is where a speculative solve waits. The
+                # burst above stops at the floor and the request does not, so on
+                # any board where the model is slower than 4 s the remainder is
+                # spent here — and it used to be spent outside every `_phase`,
+                # which is a hole in the timing report rather than a cost.
+                # Measured on the a GeeTest 3x3 photo grid board that broke the 20 s
+                # ceiling: 12.1 s reported as `burst` and 10.4 s reported as
+                # nothing, for one 22.6 s model call. The JS twin names it
+                # `inference` and so must this, or the two ports' reports cannot
+                # be compared — CLAUDE.md 1c.
+                with self._phase("inference"):
+                    actions, usage = fut.result()
                 if len(order) > 1:
                     # Except when it moved and then stopped — a fade, a single
                     # transition, `tower_stack`. Then the answer in hand is for
@@ -2269,7 +2632,8 @@ class PageSolver:
                 if self._deadline_ms is not None:
                     self._deadline_ms += cfg.video_budget_ms()
                     _log(f"[animated] +{cfg.video_budget_ms()}ms for the recording path")
-            kfset = extract_keyframes(frames, fps=float(fps))
+            kfset = extract_keyframes(
+                frames, fps=measured_fps(len(frames), burst_ms, fps))
             self._keyframe_mode = kfset.mode
             self._keyframe_steady_screens = kfset.steady_screens
             keyframe_dir = tempfile.mkdtemp(prefix="ckkf_")
@@ -2297,9 +2661,51 @@ class PageSolver:
 
         Drops the ANSWER and keeps the FRAMES, so the retry costs one inference
         rather than another `video_burst_max_ms` of filming.
+
+        UNLESS THE FRAMES CANNOT CARRY AN ANSWER, in which case they go too.
+        `steady_screens` is how many distinct screens the slicer could PROVE the
+        clip comes back to. Two or more is a cycling board, the case above: the
+        frames are the truth, the answer merely landed on the wrong screen, and
+        re-asking them is exactly right. Zero is a clip the slicer could not find
+        a steady screen in at all — a continuous animation — and there the frame
+        number in the answer refers to one of six arbitrary slices of something
+        that never holds still. Re-asking the same six slices asks the same
+        question about the same pictures, so it returns the same answer, and the
+        solve dies on `max_no_progress_rounds` having learned nothing.
+        Resampling does not save it either: a temperature moves the coordinate a
+        little, not the reading.
+
+        Measured 2026-09-13 on an hCaptcha growing-item animation, the last of the two
+        types that passed on JS and failed on python:
+
+            the recording   41 frames, 39 distinct screens, mode=even,
+                            steady_screens=0 — it grows, it does not cycle
+            the gold        frame: null, free — the frame carries no information
+            python          4 rounds, answers (0.738, 0.657) → (0.738, 0.657)
+                            → (0.725, 0.657) → (0.725, 0.657), scored 0.0,
+                            "no progress", 0/3 pairs
+            js              round 2 re-read the board as a STILL and answered
+                            (0.553, 0.425), scored 1.0
+
+        Dropping the frames is what lets the next round re-classify. A board that
+        has stopped moving is then read as the still it now is, which is the JS
+        behaviour this restores — CLAUDE.md 1c.
+
+        `>= 2` is not a new threshold: it is the same predicate the frame-wait
+        gate already uses to decide whether a clip has a screen to come back to
+        (`_wait_for_keyframe`). Both recording paths set the field from the
+        slicer, so it is a measurement here and not a default.
         """
         plan = self._animated_plan
         if plan is None or plan[2] is None:
+            return
+        if self._keyframe_steady_screens < 2:
+            _log("[animated] the answer was refused and the clip has no steady "
+                 "screen to re-read — dropping the recording so the next round "
+                 "sees the board as it is now")
+            self._discard_animated_plan()
+            self._keyframe_mode = None
+            self._keyframe_steady_screens = 0
             return
         keyframes, keyframe_dir, _actions, _usage = plan
         self._animated_plan = (keyframes, keyframe_dir, None, None)
@@ -2350,9 +2756,13 @@ class PageSolver:
         # board returns to a screen already recorded — the cycle is closed and
         # there is nothing left to capture. A continuous animation never
         # repeats and stops at the floor, keeping today's behaviour.
-        floor_frames = max(1, round(cfg.video_burst_duration_ms / (1000.0 / fps)))
-        total = max(floor_frames,
-                    round(cfg.video_burst_max_ms / (1000.0 / fps)))
+        #
+        # Both bounds are WALL-CLOCK. "Outlasts one full cycle" is a claim about
+        # seconds, and a frame count only carries it while the loop reaches
+        # `fps` — see the note in `_speculate` for the two measured frame costs
+        # that made the same 40 frames mean 4.0s and 8.3s.
+        floor_ms = float(cfg.video_burst_duration_ms)
+        max_ms = max(floor_ms, float(cfg.video_burst_max_ms))
         interval = 1.0 / fps
 
         # THE ESCALATION BUYS ITS OWN BUDGET, once per solve.
@@ -2396,22 +2806,24 @@ class PageSolver:
         order: List[str] = []          # distinct screens, in first-seen order
         last_digest: Optional[str] = None
         cycle_closed = False
-        #: Frame index at which the most recent NEW screen appeared. A board
-        #: that has shown nothing new for a whole floor-length window has
-        #: settled — see the exit below.
-        last_new_at = 0
+        #: Elapsed ms at which the most recent NEW screen appeared. A board that
+        #: has shown nothing new for a whole floor-length window has settled —
+        #: see the exit below.
+        last_new_ms = 0.0
 
-        remaining = max(0, total - len(frames))
         shot = _tmp_png("burst")
         # A burst that runs far past its own length is a hung screenshot, not a
         # tight budget — bounded separately so the two cannot be confused.
-        burst_deadline = time.monotonic() * 1000.0 + burst_hang_deadline_ms(cfg)
+        t0 = time.monotonic()
+        burst_deadline = t0 * 1000.0 + burst_hang_deadline_ms(cfg)
         try:
-            for i in range(remaining):
+            i = -1
+            while (time.monotonic() - t0) * 1000.0 < max_ms:
+                i += 1
                 if time.monotonic() * 1000.0 > burst_deadline:
                     raise CaptchaSolveError(
-                        f"the animated recording stalled: {i} of {remaining} frames "
-                        f"in {burst_hang_deadline_ms(cfg):.0f}ms. The widget "
+                        f"the animated recording stalled: {len(frames)} frames in "
+                        f"{burst_hang_deadline_ms(cfg):.0f}ms. The widget "
                         f"is not screenshotting."
                     )
                 start = time.monotonic()
@@ -2442,18 +2854,19 @@ class PageSolver:
                                 cycle_closed = True
                             elif d not in order:
                                 order.append(d)
-                                last_new_at = len(frames)
+                                last_new_ms = (time.monotonic() - t0) * 1000.0
                             last_digest = d
+                elapsed_ms = (time.monotonic() - t0) * 1000.0
                 # Past the floor with the cycle closed — more frames are the
                 # same screens again, paid for in budget the solve needs.
-                if cycle_closed and len(frames) >= floor_frames:
-                    _log(f"[animated] cycle closed after {len(frames) * interval:.1f}s "
+                if cycle_closed and elapsed_ms >= floor_ms:
+                    _log(f"[animated] cycle closed after {elapsed_ms / 1000:.1f}s "
                          f"({len(order)} screens); stopping the burst")
                     break
                 # NOTHING NEW FOR A WHOLE FLOOR-LENGTH WINDOW: the board has
                 # SETTLED, and a settled board can never close a cycle —
                 # `cycle_closed` needs a digest to come back AFTER a different
-                # one. Without this exit the only way out is `remaining`, so
+                # one. Without this exit the only way out is the ceiling, so
                 # every escalation onto a widget that is not cycling filmed the
                 # full `video_burst_max_ms`.
                 #
@@ -2480,17 +2893,18 @@ class PageSolver:
                 # measured p50 1.5s / p75 2.0s / max 2.7s on the geetest svg
                 # board — so a real cycle always produces a new screen inside
                 # the window and is never cut short here.
-                if (len(frames) >= floor_frames
-                        and len(frames) - last_new_at >= floor_frames):
-                    _log(f"[animated] no new screen for {floor_frames * interval:.1f}s "
+                if (elapsed_ms >= floor_ms
+                        and elapsed_ms - last_new_ms >= floor_ms):
+                    _log(f"[animated] no new screen for {floor_ms / 1000:.1f}s "
                          f"({len(order)} seen) — the board has settled; "
                          f"stopping the burst")
                     break
-                # Drift-corrected: a slow screenshot must not stretch the clip, or
-                # the recording covers more wall-clock than the model trained on and
-                # a cycle's period lands differently across the frames.
+                # Paced, not stretched: a camera already over the interval
+                # sleeps for nothing, and one that would sleep past the ceiling
+                # lets the loop condition end the burst instead of buying a
+                # frame the clip has no room for.
                 wait = interval - (time.monotonic() - start)
-                if wait > 0 and i < remaining - 1:
+                if wait > 0 and elapsed_ms + wait * 1000.0 < max_ms:
                     time.sleep(wait)
         finally:
             _unlink(shot)
@@ -2499,9 +2913,12 @@ class PageSolver:
             raise AnimatedChallengeError(
                 "could not record the animated challenge (no frame screenshotted)"
             )
-        _log(f"[animated] recorded {len(frames)} frames at {fps}fps")
+        burst_ms = (time.monotonic() - t0) * 1000.0
+        rate = measured_fps(len(frames), burst_ms, fps)
+        _log(f"[animated] recorded {len(frames)} frames in "
+             f"{burst_ms / 1000:.1f}s ({rate:.1f}fps)")
 
-        kfset = extract_keyframes(frames, fps=float(fps))
+        kfset = extract_keyframes(frames, fps=rate)
         temp_dir = tempfile.mkdtemp(prefix="ck_keyframes_")
         paths = write_keyframes(kfset, temp_dir, stem="challenge")
         _log(f"[animated] sliced to {len(paths)} keyframe(s) (mode={kfset.mode})")
@@ -2712,16 +3129,40 @@ class PageSolver:
         question about elements that were not on the page. A readiness gate can
         only report on what it can see; with nothing to check it has no opinion,
         and "no opinion" must not read as "not ready".
+
+        AND SO IS "NO PROMPT". The clause above was learned for the example
+        image and not applied to the prompt, which sat in its own
+        `wait_for_selector(".prompt-text", state="visible")` — a call that
+        THROWS when the element does not exist, so a challenge without one paid
+        the whole timeout before every board. Measured 2026-09-13 over the Tier
+        3 hCaptcha fixtures, none of which draw a `.prompt-text` (the
+        instruction is in the rendered pixels, as it is on several real
+        variants):
+
+            grocery_list          1 board    hcaptcha-images  3.0s   solved
+            click_blocked_lines   5 boards   hcaptcha-images 12.0s   TIMED OUT
+            tower_stack           7 boards   hcaptcha-images 18.0s   TIMED OUT
+
+        `hcaptcha_images_timeout_ms` is 3s and it was paid per board, so the
+        cost fell entirely on the puzzles that take the most rounds — the ones
+        with the least budget to spare. Both types solved 2/2 before the client
+        started recognising these boards as hCaptcha at all, and 0/2 after.
+        Folded into the function below, where a missing prompt is no opinion
+        and a prompt that is present but still painting still holds the gate.
         """
         cfg = self.config
         try:
             frame = challenge_iframe.content_frame()
             if not frame:
                 return
-            frame.wait_for_selector(".prompt-text", state="visible",
-                                    timeout=cfg.hcaptcha_images_timeout_ms)
             frame.wait_for_function(
                 """() => {
+                    // The PROMPT, when there is one. Absence is not a reason to
+                    // wait — see the note above.
+                    const vis = (el) => !!el && el.getClientRects().length > 0
+                        && getComputedStyle(el).visibility !== 'hidden';
+                    const prompt = document.querySelector('.prompt-text');
+                    if (prompt && !vis(prompt)) return false;
                     const tiles = Array.from(
                         document.querySelectorAll('.task-image .image, .task .image'));
                     if (tiles.length > 0) {
@@ -2780,6 +3221,68 @@ class PageSolver:
         finally:
             for path in frames:
                 _unlink(path)
+
+    def _board_painted(self, path: str) -> Optional[bool]:
+        """`captchakraken board-painted`. None when the image is unreadable."""
+        from .cli import _board_painted
+
+        try:
+            return _board_painted(path, self.config.board_paint_floor)["painted"]
+        except Exception:
+            return None
+
+    def _wait_for_board_painted(self, element: Any) -> int:
+        """Block until the widget has PAINTED its puzzle. Returns ms waited.
+
+        WHY THE SETTLE GATE DOES NOT ALREADY COVER THIS. `_settle_or_animated`
+        polls for stillness, and the blank panel a vendor shows while it
+        rebuilds the board is perfectly still — it is the stillest the widget
+        ever is, so it settles at once and we photograph the hole.
+        `_wait_for_hcaptcha_challenge_images` is the pairing that catches it
+        today, and it asks the DOM, so it only knows hCaptcha. This asks the
+        picture and holds for every vendor.
+
+        Measured on gt4.geetest.com's slide demo, 2026-09-12, ten live
+        attempts: six of fifty-two requests carried a board with no puzzle in
+        it, every one came back naming the centre of the image, and one attempt
+        ended `solver performed no interactions` on a blank board outright.
+
+        Best-effort, like its neighbours: on timeout it returns and the caller
+        screenshots anyway. The JS twin is `waitForBoardPainted`.
+        """
+        cfg = self.config
+        start = time.monotonic() * 1000.0
+        while True:
+            self._check_deadline("waiting for the board to paint")
+            path = _tmp_png("paint")
+            painted: Optional[bool] = None
+            got = False
+            try:
+                self._screenshot(element, path)
+                got = True
+                painted = self._board_painted(path)
+            except Exception:
+                got = False
+            finally:
+                _unlink(path)
+            # A FAILED GRAB IS A SKIPPED POLL, NOT A VERDICT: the element is
+            # mid-solve and one miss says nothing about whether the board has
+            # painted. And `painted is None` from a grab that WORKED is an
+            # unreadable image, not a blank one — looping on that would spend
+            # the whole budget every round on a box that never opens.
+            if got and painted is not False:
+                break
+            waited = (time.monotonic() * 1000.0) - start
+            if waited >= cfg.board_paint_timeout_ms:
+                if painted is False:
+                    _log(f"[board] the widget never painted a puzzle in "
+                         f"{cfg.board_paint_timeout_ms}ms — photographing the panel as it is")
+                break
+            _delay(cfg.board_paint_poll_ms)
+        waited = int((time.monotonic() * 1000.0) - start)
+        if painted and waited >= cfg.board_paint_poll_ms:
+            _log(f"[board] waited {waited}ms for the widget to paint its puzzle")
+        return waited
 
     def _get_grid_boxes(self, element: Any) -> Optional[Dict[str, Any]]:
         """
@@ -2880,6 +3383,14 @@ class PageSolver:
                          "nothing clicked — this board cycles; recording it rather "
                          "than re-solving a screen that has gone.")
                     return actions, merged_usage
+                # THE BOARD IS MID-REBUILD — THAT IS WHY WE ARE HERE. This guard fires
+                # exactly when the frame changed during inference, and on a vendor that
+                # tears the panel down between rounds the most likely thing to photograph
+                # at that moment is the blank it shows while rebuilding. Measured
+                # 2026-09-12 on the GeeTest slide with the gate on the main screenshot
+                # but not here: 2 of 12 requests were still a board with no puzzle in it,
+                # and BOTH were freshsolve frames.
+                self._wait_for_board_painted(element)
                 fresh = _tmp_png("freshsolve")
                 try:
                     self._screenshot(element, fresh)
@@ -3255,12 +3766,7 @@ class PageSolver:
         # The vendor hint routes to the right pipeline. It matters: hCaptcha
         # click puzzles must never go through grid detection, because find_grid
         # false-positives on the header/footer bands.
-        if "hcaptcha.com" in src:
-            puzzle_source = "hcaptcha"
-        elif "recaptcha/api2" in src:
-            puzzle_source = "recaptcha"
-        else:
-            puzzle_source = "unknown"
+        puzzle_source = vendor_from_src(src)
 
         # Everything the answer might have to be delivered INTO — a text box, a
         # slider handle — is looked up against this, never against the page.
@@ -3332,6 +3838,13 @@ class PageSolver:
                     return self._solve_recaptcha_grid(
                         page, element, retry_mode, grid, element_box
                     )
+
+        # A STILL BOARD IS NOT A LOADED BOARD. Every gate above this point asks
+        # whether the widget has stopped changing; none asks whether it has drawn
+        # anything, and the panel a vendor shows mid-rebuild answers "yes" to the
+        # first and "no" to the second. Ask before spending an inference on it.
+        with self._phase("board-paint"):
+            self._wait_for_board_painted(element)
 
         shot = _tmp_png("captcha")
         performed_action = False
@@ -3458,6 +3971,15 @@ class PageSolver:
             # mean something: this exact answer is about to be performed, so if
             # it matches the last one, the last one already ran and the page is
             # still asking the same question.
+            # THE ANSWER, MACHINE-READABLE, at the moment the driver commits
+            # to it. Tier 3 grades this with the SAME grader Tier 2 uses and
+            # gates on the difference: an answer Tier 2 would call correct, on a
+            # fixture the driver then failed, is a driver bug and nothing else.
+            # Without it every driver defect reads as a model miss — which is
+            # how a 2.5% drag undershoot hid behind an 87% held-out score.
+            # Both ports emit the same marker so one parser reads either.
+            _log("[answer] " + json.dumps(
+                {"actions": [_as_dict(a) for a in actions]}, default=str))
             self._note_answer(actions, retry_mode)
             _log(f"executing {len(actions)} action(s)")
             frame = element.content_frame()

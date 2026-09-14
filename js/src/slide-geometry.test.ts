@@ -56,3 +56,23 @@ test('a piece wider than the widget is not a piece', () => {
 test('no measurements at all is reported as such', () => {
   assert.deepEqual(solveSlideGeometry([], 400), { pieceWidth: null, ratio: 1 });
 });
+
+test('two readings taken close together do not set the ratio', () => {
+  // The loop's offsets are its own corrections now, and a correction can be a
+  // couple of pixels. changed_bbox answers in whole pixels, so a 1px rounding
+  // across a 2px spread solves to ratio 0.5 — and every correction after it
+  // would be doubled, on a widget that was already nearly home.
+  const { pieceWidth, ratio } = solveSlideGeometry([[110, 150], [112, 151]], 400);
+  assert.equal(ratio, 1);
+  assert.equal(pieceWidth, 39);
+});
+
+test('the widest pair is used, not the two that arrived last', () => {
+  // A correction can step BACK towards the handle, so the last two readings are
+  // not necessarily the far-apart ones. In arrival order these last two are 2px
+  // apart and their 1px of rounding reads as ratio 0.5; the widest pair spans
+  // 82px and recovers the real 1:1 widget.
+  const { pieceWidth, ratio } = solveSlideGeometry([[110, 150], [30, 70], [112, 151]], 400);
+  assert.equal(Number(ratio.toFixed(2)), 0.99);
+  assert.equal(Number(pieceWidth!.toFixed(1)), 40.4);
+});

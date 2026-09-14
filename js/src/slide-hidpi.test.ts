@@ -2,7 +2,7 @@
  * Regression, 2026-08-27: the slider missed every attempt on a phone.
  *
  * `executeSlide` closes a loop between two pixel spaces. It steers the handle
- * in CSS pixels — `boundingBox()`, the probe offsets, the model's slot — and it
+ * in CSS pixels — `boundingBox()`, its own offsets, the model's slot — and it
  * MEASURES the piece in the screenshot's pixels, which is where `changed_bbox`
  * masks the handle and reports what moved. Those are the same number on a 1x
  * desktop, so the loop was correct for a year and the two spaces were never
@@ -89,7 +89,12 @@ function rig(targetPx: number, dpr: number) {
     excludes.push([...exclude]);
     const offset = moves[moves.length - 1][0] - startX;
     const right = PIECE_LEFT + PIECE_W + offset;
-    return [Math.round(PIECE_LEFT * dpr), 0, Math.round(right * dpr), Math.round(20 * dpr)];
+    // `piece: null` on purpose — this rig drives the UNION path, the one a
+    // vendor whose piece the CV cannot separate still gets.
+    return {
+      bbox: [Math.round(PIECE_LEFT * dpr), 0, Math.round(right * dpr), Math.round(20 * dpr)],
+      piece: null,
+    };
   };
 
   const frac = targetPx / WIDGET_W;
@@ -125,7 +130,20 @@ test('a 1x screen is unchanged', async () => {
   await r.solver.executeSlide(r.page, r.element, r.scope, r.action, ELEMENT);
   const releasedAt = r.moves[r.moves.length - 1][0];
   assert.ok(Math.abs((releasedAt - r.startX) - 120) <= 2);
-  assert.deepEqual(r.excludes[0].map(Math.round), [0, 310, 400, 361]);
+  // THE POINT OF THIS TEST is that at dpr 1 the mask is the CSS numbers
+  // untouched — no scale applied, and none needed. The handle sits at y
+  // 420..450 in page space, the element starts at y 100, and the pad is
+  // 30 * 0.35, so the band opens at 310.
+  //
+  // It CLOSES at the bottom of the widget, not just below the handle. That
+  // used to read 361 — handle bottom plus pad — and the number was carried
+  // here as a literal, so this test pinned a bound it was not written to be
+  // about. The rail can run lower than the handle (Tencent's does), and the
+  // few rows of filled track left unmasked cost a 3.2x error in the measured
+  // piece width; see the note in executeSlide.
+  const [x1, y1, x2, y2] = r.excludes[0].map(Math.round);
+  assert.deepEqual([x1, y1, x2], [0, 310, WIDGET_W], 'the band is not the raw CSS box');
+  assert.equal(y2, WIDGET_H, 'the mask must reach the bottom of the widget');
 });
 
 // The rig writes into the real tmpdir through the driver's own shot paths;

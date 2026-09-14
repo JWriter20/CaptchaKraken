@@ -151,6 +151,27 @@ test` named every test and every module it imported, so adding a test meant
 editing that list and a test left out of it silently never ran — which had
 already happened.
 
+**A puzzle-piece slider is aimed once and then corrected, not calibrated
+first.** The distance between the piece and the slot is already an estimate of
+how far the handle has to travel, so the drag opens with one sweep at the gap —
+the gesture a person makes, and one move and one screenshot cheaper than the two
+measurement nudges it replaces. What the nudges were really for is the piece's
+width and the handle-to-piece ratio, and the sweep supplies both better: it
+carries the piece clear of the ground it vacated, leaving two separate marks in
+the frame, and the right-hand one IS the piece. Measuring it beats inferring it
+from the union of the two, whose width is the piece plus a travel that is only
+believed.
+
+**The piece does not always start under the handle, and a sweep aimed from the
+handle can push it off the board.** One vendor's handle sits 42px into a 360px
+card while its piece sits 136px in, so aiming the handle at a slot 288px across
+sends the piece to 382 — past the edge, where the only thing left to photograph
+is the ground it vacated. `locate_piece` reports that for what it is, a mark
+narrower than the distance travelled, and says where the piece went; the next
+correction brings it back. Reported instead as "nothing moved", it is
+unrecoverable: the loop looks again, sees the same thing, and lets go with the
+piece off the board.
+
 **Nothing may be written to stdout by the MCP server.** On the stdio transport
 stdout *is* the protocol channel, so one stray `console.log` — a banner, a
 deprecation notice — corrupts the stream and the client reports the server as
@@ -331,3 +352,147 @@ We deliberately did not add npm `overrides`: forcing a transitive to a version
 its parent did not choose is an upgrade rather than a pin, and this is the one
 package with no test suite to catch what it breaks. Re-check when the SDK
 releases.
+
+**A grid is a lattice, and the detector was only ever asked what was inside the
+cells.** `find_grid` traces separator lines "of any border colour and small
+tilt" and recovers the slant on its own, so a TILTED lattice is one of its
+legitimate outputs. No vendor ships one — every grid we solve is laid out with
+CSS, on the pixel — so that tolerance is headroom no true board needs and a
+photographic backdrop's own edges walk straight through it. `_is_real_grid`
+then passed the result, because every check it had asks about cell CONTENT
+(colour spread, the shared-background test that tells a sprite board from
+tiles) and a click puzzle drawn over a photograph answers all of them honestly.
+A grid answer is a LIST OF CELLS, so the mis-route does not read as a wrong
+answer; it reads as the driver pressing six things on a board whose answer is
+one press. The shape check now runs first and costs nothing — it needs no
+pixels. Measured over the real captures, six per family: every true grid the
+detector finds is regular to the pixel (25 detections, all 0.000) against 0.128
+for the false one, so the bar is a floor with a 2x margin rather than a tuned
+number. It is not zero only because an antialiased separator traced on a 100px
+cell can honestly land a pixel out.
+
+**Filming while the model is asked is only free if the camera stops first.**
+The speculative burst reads the still and records the widget at once, and the
+claim that makes that free is that the recording happens inside a wait the solve
+was making anyway. It did not: the settled exit waited on the inference as well
+as on the board, so once a board had shown one screen and held it for a full
+floor window — nothing further to learn — the loop went on screenshotting at
+10 fps for as long as the model took. Measured on a still GeeTest 3x3 photo grid
+that broke the 20 s board ceiling: one distinct frame in 120, and the burst
+still ran its whole 12 000 ms because that one model call took 22.6 s. The JS
+port never had this — its burst breaks on the settled window alone — so the same
+board reported `burst 1.5s` + `inference 1.8s` there and `burst 12.1s` plus a
+10.4 s hole here. The hole was the second half of the bug: the post-burst wait
+for the answer sat outside every phase, so the largest cost on a slow board was
+attributed to nothing at all and the report read as "the burst is slow".
+
+**The burst's windows are milliseconds, and were counted in frames.** "A burst
+must outlast one full cycle" is a claim about SECONDS: the floor is what makes
+the still verdict sound, because it is longer than the longest dwell a cycling
+board holds a screen for (max 2.7 s measured on the GeeTest svg board). Both
+loops expressed it as `video_burst_duration_ms / (1000 / fps)` frames instead,
+and the two only mean the same thing while the loop reaches `video_burst_fps` —
+which it does not when a screenshot costs more than the interval. There is no
+frame-dropping: the loop sleeps `interval - elapsed`, so a slow camera simply
+runs long, and the window stretches by exactly the ratio.
+
+Measured on one element screenshot, same fixture, same box: 15.8 ms through the
+desktop browser against 183.5 ms through Chromium at a phone's device pixel
+ratio of 2.625. It is the DPR and nothing else — the same viewport and touch
+emulation at DPR 1 costs 66.6 ms — so a 40-frame floor meant 4.02 s on one
+driver and 8.25 s on the other, for identical evidence, while the inference it
+overlapped had finished at 2.15 s. The same ratio scaled the 12 000 ms ceiling
+to 20-31 s, which is a whole solve budget on a board that never moved.
+
+The frame count was wrong in both directions, and the regression tests pin
+both: a fast camera reached the floor's frame count in 400 ms of a 500 ms
+window, so it also cut the clip SHORT of the dwell the window exists to
+outlast.
+
+`burst_hang_deadline_ms` keeps its 3x margin. It stopped being a budget for a
+slow loop the moment the loop bounded itself in wall-clock, and is now only
+what it says it is: headroom for a single screenshot that never returns.
+
+**The rate a burst reports is the rate it achieved.** The slicer dates frames
+by it, and a clip logged as "40 frames at 10fps" that actually ran at 5.4 is
+what kept the stretched window out of every log and every phase report. It
+moves no frames — the slicer picks by index and uses the rate only for
+timestamps — so this is honesty in the manifest, not a change of behaviour.
+
+**Re-asking the same pictures is arithmetic, not a retry.** A refused animated
+answer drops the ANSWER and keeps the FRAMES, which is right for a cycling
+board: the frames do not change, the answer merely landed on the wrong screen.
+It is wrong for a clip the slicer could not find a steady screen in.
+`steady_screens` counts the screens the clip can be PROVEN to come back to, and
+zero means a continuous animation — the keyframes are arbitrary slices of
+something that never holds still, the frame number refers to nothing, and the
+same question about the same pictures returns the same answer until the solve
+dies on `max_no_progress_rounds`. Resampling does not rescue it: a temperature
+moves the coordinate a little, not the reading. Those clips are now thrown away
+on refusal, which is what lets the next round re-classify a board that has
+stopped moving as the still it now is.
+
+**The piece selector list is a second vendor surface, and it fails silently.**
+`VENDOR_WIDGET_LOCATORS` failing is loud — nothing is detected. The piece list
+failing is not: the driver falls back to measuring what moved between two
+screenshots and solves anyway, so the pass rate does not move and no gate can
+see it. Re-measured against the live vendor demos 2026-09-13 and it had two
+defects. Tencent's piece carries a real, stable, vendor-named class that matches
+none of the generic patterns, so every live Tencent slide had been taking the
+fallback. And on Yidun the generic `[class*="jigsaw"]` matches TWO elements, the
+first in document order being the widget's own container — five times too wide
+and never moving — so "first visible match" would have handed the correction
+loop a number that cannot change. The lookup now takes EVERY match of each
+selector and keeps the first that could BE a piece, using the same size bound
+the geometry path already throws a measurement out on. GeeTest has also started
+stamping a per-build hash alongside the plain class; the plain one still matches
+today, and the day it stops is the day the list goes blind, which is what the
+live check is for.
+
+**The mouse path is not ours and should not be.** It was a Bezier arc with a
+Fitts's-law duration, an ease-in-out velocity profile, speed-scaled jitter and
+an overshoot-and-correct. Every one of those is a MODEL of what a hand does,
+tuned by hand, and every one is a closed form — which is exactly what makes it
+findable. A detector does not need to know our constants; it needs to know that
+the path is drawn from a two-parameter family at all. `cursory` models nothing:
+it searches a database of thousands of trajectories recorded from real people
+for the closest match to the requested movement, morphs that recording onto the
+endpoints, and re-noises it. The realism is measured rather than asserted, and
+the worst case is a bad recording rather than a recognisable curve.
+
+IT ALSO SETTLES THE DUAL-PORT PROBLEM FOR GOOD. Every other shared surface is
+two implementations and a test that they agree. The mouse was one algorithm
+written twice and pinned STATISTICALLY, because that is the best two
+independent implementations can do: a curve written twice differs in the last
+bits and then diverges over a thousand samples. `cursory-js` is a port rather
+than a rewrite — both reduce to the same numpy PCG64 stream — so a seed gives
+the same trajectory in both, and the parity is now pinned exactly, timings
+included. Measured: seed 42 over (120, 80) -> (940, 560) is 48 identical points
+in both, coordinates agreeing to about 2e-12 px (V8 and CPython rounding `exp`,
+`atan2`, `sin`, `cos` differently) and timings equal outright.
+
+WHAT IT COST, AND WHAT IT DID NOT. Move durations track the old model at the
+median (193 vs 197 ms over 30 px, 681 vs 708 over 1000) with a much longer tail
+— max 1354 ms against 819 — which is what real people look like and is the
+thing to watch against the per-board clock. Import is ~60 ms and the first call
+5 ms, against a numpy the client already loads for OpenCV, so the per-solve cost
+is noise. The TOUCH model stays ours: Cursory records mice, and a finger is not
+a slower mouse — different velocity profile, different bow, a contact patch that
+wanders.
+
+THE LICENCE IS THE PART TO BE CAREFUL WITH. Both packages are
+LGPL-3.0-or-later and this product is source-available proprietary. That
+combination is fine, and it is fine BECAUSE they are ordinary installed
+dependencies: declared in `pyproject.toml` and `package.json`, resolved by the
+user's package manager, never vendored, inlined, or bundled. `tsc` leaves
+`require('cursory-js')` as a runtime import rather than inlining it, and
+`copy-python.mjs` copies only our own tree. Vendoring either one is the change
+that would move this obligation somewhere else, so do not, and see NOTICE.
+
+TWO PACKAGING CONSEQUENCES, both deliberate and both part of the major bump.
+The Python client's `numpy` pin moves from 2.2.6 to 2.3.5, because Cursory
+requires `numpy~=2.3.3` and the old pin was OURS — opencv asks only for
+`numpy>=2`. That conflicts with `numba`, which arrives only under the `[serve]`
+extra (vLLM self-hosting) and is never imported by the solver. And the JS client
+gains its FIRST runtime dependency; it had none, which was a real property of a
+package meant to be embedded, and it is worth knowing that it is gone.

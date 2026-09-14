@@ -2,7 +2,7 @@
 How the driver MOVES. One pluggable object per input device.
 
 Humanisation used to be wired straight into `page_solver`: every gesture was a
-`page.mouse.*` call with a Bezier trajectory in front of it and a `random()`
+`page.mouse.*` call with a recorded human trajectory in front of it and a `random()`
 sleep behind it, and there was no way to ask for anything else. That is wrong in
 three directions at once —
 
@@ -89,7 +89,8 @@ def _same_point(a: Point, b: Point) -> bool:
 #:   between  between two taps of one batch (grid tiles)
 #:   grab     after pressing, before a drag starts moving
 #:   drop     after a drag arrives, before releasing
-#:   probe    between the slider's measurement nudges
+#:   probe    after a slider moves, while the screen is read for where the
+#:            piece actually landed
 #:   settle   before releasing a slider — the release IS the submit, and some
 #:            vendors sample the final milliseconds of the gesture
 #:   key      between two typed characters
@@ -162,7 +163,8 @@ class Humanizer:
 
 
 class MouseHumanizer(Humanizer):
-    """A hand on a mouse. Bezier arcs, Fitts's-law durations, overshoot.
+    """A hand on a mouse. Trajectories recorded from real people, morphed
+    onto the requested endpoints — see `trajectory.generate_trajectory`.
 
     Everything in here was `page_solver._smooth_move` / `_trace_path` /
     `_seed_cursor` / `_viewport` before this module existed, and is unchanged:
@@ -188,6 +190,9 @@ class MouseHumanizer(Humanizer):
         super().__init__(start)
         self._frequency = frequency
         self._viewport_cache: Optional[Dict[str, float]] = None
+        #: Is the button down? A move made with it down is a DRAG, and a drag
+        #: must not swing past its target — see `move`.
+        self._down = False
         # See `_seed_cursor`: the (0, 0) origin wedges camoufox's humanised
         # mouse, so the first move of each solve must step off it plainly.
         self._cursor_seeded = False
@@ -195,6 +200,9 @@ class MouseHumanizer(Humanizer):
     def reset(self, page: Any) -> None:
         self._viewport_cache = None
         self._cursor_seeded = False
+        # A solve that timed out mid-drag leaves the button down in this
+        # object's view; the next one must not start by thinking it is dragging.
+        self._down = False
 
     def _pause_ms(self, kind: str) -> float:
         lo, hi = self.PAUSES.get(kind, (0.0, 0.0))
@@ -293,14 +301,21 @@ class MouseHumanizer(Humanizer):
         self._seed_cursor(page)
         if _same_point(self.at, to):
             return
-        points, timings = generate_trajectory(self.at, to, self._frequency)
+        # A DRAG IS NOT A TRAVEL. With the button down the pointer is carrying
+        # something, so a path that swings past the target drags the piece past
+        # it and back — see `trajectory._draw`. Travelling to a click may
+        # overshoot; that is what people do and it costs nothing.
+        points, timings = generate_trajectory(
+            self.at, to, self._frequency, avoid_overshoot=self._down)
         self._trace(page, points, timings)
 
     def press(self, page: Any) -> None:
         page.mouse.down()
+        self._down = True
 
     def release(self, page: Any) -> None:
         page.mouse.up()
+        self._down = False
 
     def type_text(self, page: Any, field: Any, text: str) -> bool:
         # A retry round arrives with the previous attempt still in the box, and
@@ -696,8 +711,8 @@ class MobileHumanizer(Humanizer):
         report one unchanging coordinate; the centroid of the contact patch
         rolls a pixel or two under pressure. A tap with zero movement between
         touchstart and touchend is a synthetic tap.
-      - **Touch kinematics**, via `generate_swipe` — see its docstring for why
-        that is a different model rather than the mouse one retuned.
+      - **Drag paths from `generate_swipe`**, which is Cursory plus the
+        contact wobble. A TAP generates no path at all — see `move`.
       - **Longer, more variable pauses.** Every measured touch interaction is
         slower than its mouse equivalent, and a phone's are more variable
         because the hand holding the device is also moving.

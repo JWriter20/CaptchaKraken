@@ -4,17 +4,28 @@
  * The TypeScript side of `python/src/captchakraken/trajectory.py`; the two are
  * one implementation in two languages, pinned by `test_trajectory_parity.py`.
  *
- * What makes the output human rather than a lerp:
- *   - a Bezier arc, not a straight line (hand motion bows)
- *   - Fitts's-law duration: distance and precision set the time, not a constant
- *   - an ease-in-out velocity profile, so the cursor accelerates then brakes
- *   - sub-pixel jitter that scales with speed (fast motion is sloppier)
- *   - a small overshoot-and-correct on longer moves, which is the single most
- *     recognisable human tell and the one a linear interpolation never produces
+ * THE MOUSE PATH IS NOT OURS AND SHOULD NOT BE. It was a Bezier arc with a
+ * Fitts's-law duration, an ease-in-out velocity profile, speed-scaled jitter and
+ * an overshoot-and-correct — every one of those a MODEL of what a hand does,
+ * tuned by hand, and each one a thing a detector can look for precisely because
+ * it is a closed form. `cursory-js` does not model anything: it finds the
+ * closest match in a database of thousands of trajectories recorded from real
+ * people, morphs it onto the requested endpoints, and adds noise. The realism is
+ * measured rather than asserted, and the failure mode is a bad recording rather
+ * than a recognisable curve.
  *
- * `generate_swipe` is the SAME contract for a FINGER, and it is a different
- * model rather than the mouse model with different constants — see its
- * docstring.
+ * It also settles the dual-port problem for good. The two drivers used to carry
+ * one algorithm written twice, pinned by a statistical parity test, because that
+ * is the best two independent implementations can do. `cursory-js` is a port of
+ * Python `cursory` rather than a rewrite and agrees BIT FOR BIT on a seed — both
+ * reduce to the same numpy PCG64 stream — so the two drivers now share a mouse
+ * rather than resembling each other. Measured: seed 42 over (120, 80) ->
+ * (940, 560) gives 48 identical points and identical timings in both.
+ *
+ * `generate_swipe` below is OURS and stays ours: it is the same contract for a
+ * FINGER, and Cursory records mice. A finger is not a slower mouse — different
+ * velocity profile, different bow, a contact patch that wanders — so it is a
+ * different model rather than this one with other constants. See its docstring.
  *
  * Camoufox's own `humanize` is a DIFFERENT, browser-level mechanism that
  * re-humanises every `mouse.move()` it is handed. Running both composes them —
@@ -22,35 +33,13 @@
  * points below became its own humanised sub-trajectory. Drive with humanize off.
  */
 
+import { generateTrajectory } from 'cursory-js';
+
 export type Point = [number, number];
 
-// Fitts's law: MT = a + b * log2(distance / width + 1). The constants are the
-// usual empirical range for a mouse; `WIDTH` stands in for target precision.
-const FITTS_A_MS = 90.0;
-const FITTS_B_MS = 105.0;
-const WIDTH_PX = 28.0;
 
-// Below this, a move is a nudge inside one element: no overshoot, no arc.
-const SHORT_MOVE_PX = 24.0;
-// Overshooting a 30px hop looks like a twitch, not a human.
-const OVERSHOOT_MIN_DISTANCE_PX = 220.0;
 
-/** Cubic ease. Real pointer motion is roughly bell-shaped in velocity. */
-function easeInOut(t: number): number {
-  if (t < 0.5) return 4.0 * t * t * t;
-  return 1.0 - Math.pow(-2.0 * t + 2.0, 3) / 2.0;
-}
 
-function cubicBezier(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
-  const u = 1.0 - t;
-  const x = u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0];
-  const y = u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1];
-  return [x, y];
-}
-
-function uniform(lo: number, hi: number): number {
-  return lo + Math.random() * (hi - lo);
-}
 
 /**
  * Box-Muller. `Math.random()` is uniform and the jitter model wants a normal
@@ -64,31 +53,6 @@ function gauss(mu: number, sigma: number): number {
   return mu + sigma * Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
-/**
- * Two control points offset PERPENDICULAR to the travel direction, so the path
- * bows to one side. The sign is random per gesture: always bowing the same way
- * would itself be a fingerprint.
- */
-function controlPoints(start: Point, end: Point, distance: number): [Point, Point] {
-  const dx = end[0] - start[0];
-  const dy = end[1] - start[1];
-  if (distance === 0) return [start, end];
-  // Unit normal to the direction of travel.
-  const nx = -dy / distance;
-  const ny = dx / distance;
-  // Bow proportional to distance, but capped — long drags don't arc absurdly.
-  const bow = Math.min(distance * uniform(0.06, 0.16), 140.0) * (Math.random() < 0.5 ? -1.0 : 1.0);
-  // Control points at roughly 1/3 and 2/3 along, each pushed off-axis.
-  const c1: Point = [
-    start[0] + dx * uniform(0.2, 0.4) + nx * bow,
-    start[1] + dy * uniform(0.2, 0.4) + ny * bow,
-  ];
-  const c2: Point = [
-    start[0] + dx * uniform(0.6, 0.8) + nx * bow * uniform(0.4, 0.9),
-    start[1] + dy * uniform(0.6, 0.8) + ny * bow * uniform(0.4, 0.9),
-  ];
-  return [c1, c2];
-}
 
 /**
  * Returns `[points, timings]`. `timings` is CUMULATIVE milliseconds from the
@@ -100,205 +64,200 @@ function controlPoints(start: Point, end: Point, distance: number): [Point, Poin
  * is not a metronome; a perfectly periodic mousemove stream is trivially
  * detectable.
  */
-export function generate_trajectory(
-  target_start: readonly number[],
-  target_end: readonly number[],
-  frequency: number = 60,
-  frequencyRandomizer: number = 0.12,
-): [Point[], number[]] {
-  const start: Point = [Number(target_start[0]), Number(target_start[1])];
-  const end: Point = [Number(target_end[0]), Number(target_end[1])];
+// How far a path may run past its endpoint, along the travel axis, before it is
+// redrawn. Small enough to keep "this gesture does not overshoot" true, large
+// enough not to reject a path for a rounding artefact.
+const OVERSHOOT_TOL_PX = 2.0;
 
+// How many times to redraw before taking the best draw seen. Never fails: a
+// gesture that cannot find a clean path still moves.
+const OVERSHOOT_REDRAWS = 6;
+
+/** How far past `end` the path travels, projected on the travel axis. */
+function overshootOf(points: Point[], start: Point, end: Point): number {
   const dx = end[0] - start[0];
   const dy = end[1] - start[1];
-  const distance = Math.hypot(dx, dy);
-
-  if (distance < 1e-6) return [[end], [0.0]];
-
-  let durationMs = FITTS_A_MS + FITTS_B_MS * Math.log2(distance / WIDTH_PX + 1.0);
-  durationMs *= uniform(0.85, 1.2);
-
-  const steps = Math.max(2, Math.round((durationMs / 1000.0) * Math.max(1, frequency)));
-
-  // A short hop is a straight ease with jitter — bowing a 15px move looks worse
-  // than not bowing it.
-  let c1: Point;
-  let c2: Point;
-  if (distance < SHORT_MOVE_PX) {
-    c1 = start;
-    c2 = end;
-  } else {
-    [c1, c2] = controlPoints(start, end, distance);
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return 0;
+  const ux = dx / length;
+  const uy = dy / length;
+  let furthest = -Infinity;
+  for (const [x, y] of points) {
+    const along = (x - start[0]) * ux + (y - start[1]) * uy;
+    if (along > furthest) furthest = along;
   }
+  return furthest - length;
+}
 
-  // Overshoot: on a long move the hand arrives past the target and corrects.
-  // Modelled as a longer primary gesture to a point beyond the target, then a
-  // short settle back — the settle is appended as extra samples below.
-  const overshoot = distance >= OVERSHOOT_MIN_DISTANCE_PX && Math.random() < 0.55;
-  let aim: Point = end;
-  if (overshoot) {
-    const over = uniform(0.01, 0.035) * distance;
-    aim = [end[0] + (dx / distance) * over, end[1] + (dy / distance) * over];
+/**
+ * One Cursory trajectory, redrawn until it does not run past its endpoint.
+ *
+ * REDRAWN, NOT RESHAPED. Cursory's output is a recording of a real movement
+ * morphed onto these endpoints, and the whole reason to use it is that nobody
+ * drew the curve. Clamping or straightening would put a hand-tuned step back in
+ * the middle of a recording; drawing a different one keeps every gesture real.
+ *
+ * WHY ANY OF THEM RUN PAST. A recording carries whatever excursion the person
+ * made relative to their OWN endpoints, and morphing scales that onto ours — so
+ * a wandering recording becomes a short movement that swings well past the
+ * target and returns. Measured over 400 draws per distance: 6-25% run more than
+ * 2px past, with a tail reaching 200px past a 150px movement. For a pointer
+ * travelling to a click that is realistic and free; for a DRAG it is not,
+ * because the pointer is carrying something.
+ *
+ * `directness` cannot fix it — it selects among recordings rather than
+ * straightening one, so overshoot bottoms out near 12% at 0.65 (the default
+ * here) and rises again toward 1.0.
+ *
+ * A SEED STILL MEANS ONE TRAJECTORY: attempts are derived from it, so a seeded
+ * call stays reproducible and the cross-port fixture holds.
+ */
+function draw(
+  start: Point, end: Point, frequency: number, frequencyRandomizer: number,
+  seed: number | bigint | undefined, directness: number, avoidOvershoot: boolean,
+): [Point[], number[]] {
+  let best: [Point[], number[]] | null = null;
+  let bestOver = Infinity;
+  const attempts = avoidOvershoot ? OVERSHOOT_REDRAWS : 1;
+  for (let i = 0; i < attempts; i += 1) {
+    const attemptSeed = seed === undefined
+      ? undefined
+      : (typeof seed === 'bigint' ? seed + BigInt(i) : seed + i);
+    const { points, timings } = generateTrajectory(start, end, {
+      frequency, frequencyRandomizer, seed: attemptSeed, directness,
+    });
+    const pts = points.map((q) => [Number(q[0]), Number(q[1])] as Point);
+    const ts = timings.map(Number);
+    if (!avoidOvershoot) return [pts, ts];
+    const over = overshootOf(pts, start, end);
+    if (over <= OVERSHOOT_TOL_PX) return [pts, ts];
+    if (over < bestOver) { best = [pts, ts]; bestOver = over; }
   }
+  return best as [Point[], number[]];
+}
 
-  const points: Point[] = [];
-  const timings: number[] = [];
-  let elapsed = 0.0;
-  const perStep = durationMs / steps;
 
-  for (let i = 0; i <= steps; i++) {
-    const t = easeInOut(i / steps);
-    let [px, py] = cubicBezier(start, c1, c2, aim, t);
-
-    // Jitter scales with instantaneous speed: the faster the cursor is moving,
-    // the less precisely a human tracks the intended path.
-    const speed = Math.abs(easeInOut(Math.min(1.0, (i + 1) / steps)) - easeInOut(i / steps));
-    const jitter = Math.min(1.6, 0.25 + speed * steps * 0.5);
-    px += gauss(0.0, jitter * 0.5);
-    py += gauss(0.0, jitter * 0.5);
-
-    points.push([px, py]);
-    timings.push(elapsed);
-    elapsed += perStep * uniform(1.0 - frequencyRandomizer, 1.0 + frequencyRandomizer);
-  }
-
-  if (overshoot) {
-    // Correction: a couple of small samples back onto the true target, at the
-    // slower pace of a deliberate fine adjustment.
-    const settleSteps = Math.floor(uniform(2, 5)); // 2..4 inclusive
-    const origin = points[points.length - 1];
-    for (let i = 1; i <= settleSteps; i++) {
-      const t = i / settleSteps;
-      points.push([
-        origin[0] + (end[0] - origin[0]) * t + gauss(0.0, 0.35),
-        origin[1] + (end[1] - origin[1]) * t + gauss(0.0, 0.35),
-      ]);
-      timings.push(elapsed);
-      elapsed += uniform(14.0, 30.0);
-    }
-  }
-
-  // Land exactly on the requested pixel. Everything above is texture; the final
-  // sample must be the point the caller asked for or clicks drift off-target.
-  points[points.length - 1] = end;
-  return [points, timings];
+export function generate_trajectory(
+  targetStart: readonly number[],
+  targetEnd: readonly number[],
+  frequency = 60,
+  frequencyRandomizer = 1.0,
+  seed?: number | bigint,
+  directness = 0.65,
+  avoidOvershoot = false,
+): [Point[], number[]] {
+  // `frequencyRandomizer` is the largest jitter applied to each sample time, IN
+  // MILLISECONDS — it was a fraction while this was a curve, and the units
+  // changed with the model. `seed` makes a movement reproducible; production
+  // leaves it undefined, which draws fresh entropy per call.
+  //
+  // A thin delegation, and deliberately thin: the arguments are Cursory's own,
+  // so there is no second set of knobs here to drift from the ones that do
+  // something.
+  return draw(
+    [Number(targetStart[0]), Number(targetStart[1])],
+    [Number(targetEnd[0]), Number(targetEnd[1])],
+    frequency, frequencyRandomizer, seed, directness, avoidOvershoot);
 }
 
 // ── Touch ───────────────────────────────────────────────────────────────────
 //
-// Fitts's law holds for direct touch too, but with a slower intercept and a much
-// wider effective target: a fingertip contact patch is ~9mm across, which is the
-// 44pt / 48dp minimum both platform guidelines are built around. So the same
-// distance takes longer AND is aimed less precisely than with a mouse.
-const TOUCH_FITTS_A_MS = 160.0;
-const TOUCH_FITTS_B_MS = 135.0;
-const TOUCH_WIDTH_PX = 44.0;
+// The PATH is Cursory's, the same as the mouse. What stays here is the one thing
+// a trajectory library cannot know, because it is not about the path at all: a
+// touchscreen reports the CENTROID OF A CONTACT PATCH, and that centroid wanders
+// under finger pressure independently of where the finger is going. A swipe
+// whose samples sit exactly on a generated path is a swipe no digitizer produced.
+//
+// Everything else that used to live here — a Fitts's-law duration, an asymmetric
+// ease, a bowed Bezier, a short-move threshold — was a MODEL of finger motion
+// built from platform tap-target guidelines rather than from measurement, which
+// is the same kind of hand-tuned closed form the mouse model was replaced for.
+//
+// MEASURED 2026-09-14 over captcha-sized drags, bow from the straight line at
+// 90 Hz, against the model that used to be here:
+//
+//     80px    ours 6.0px    cursory 5.8px     equivalent
+//     150px   ours 11.4px   cursory 23.7px    cursory arcs about twice as far
+//     250px   ours 17.9px   cursory 24.3px
+//
+// So this is not a free swap and it is recorded as such: a finger on a wrist
+// pivot plausibly bows less than a hand moving a mouse across a desk, and
+// Cursory's `directness` does not tune it — it selects among RECORDINGS, so it
+// does nothing at 150px and overshoots at 250px. What settles it is that our
+// numbers were asserted and Cursory's are measured from real people; a
+// hand-tuned constant is a fingerprint surface whoever wrote it.
 
-// How flick-like the launch is. 0 would be the mouse's symmetric bell; 1 would
-// be an instantaneous jump at t=0. See `easeTouch`.
-const TOUCH_LAUNCH = 0.7;
-
-// A finger drags across glass on a short wrist/thumb pivot, so it bows far less
-// than a hand moving a mouse across a desk.
-const TOUCH_BOW_CAP_PX = 40.0;
-
-// The reported contact point wanders, because it is the CENTROID of a soft patch
-// rolling under pressure rather than a rigid sensor. `TOUCH_WOBBLE_DECAY` is the
-// AR(1) coefficient that makes that wander low-frequency: white per-sample noise
-// would show up in a spectrum as nothing a finger produces.
+// The contact patch's centroid wander. `TOUCH_WOBBLE_DECAY` is an AR(1)
+// coefficient, which is what makes the wander LOW-FREQUENCY: white per-sample
+// noise would show up in a spectrum as nothing a finger produces.
 const TOUCH_WOBBLE_PX = 0.55;
 const TOUCH_WOBBLE_DECAY = 0.82;
 
 /**
- * Asymmetric ease: a finger leaves fast and brakes late.
+ * A FINGER travelling from `targetStart` to `targetEnd`.
  *
- * A mouse hand is symmetric (`easeInOut` — accelerate, decelerate, equally). A
- * finger is not: the launch is a flick off the contact point and the arrival is
- * a brake. Blending the two rather than using a pure ease-out is what keeps the
- * launch from being an instantaneous jump at t=0, which no digitizer would ever
- * report.
+ * Same contract as `generate_trajectory`: `[points, timings]`, timings
+ * cumulative from 0, last point exactly `targetEnd`.
+ *
+ * Cursory's path, sampled faster — a digitizer reports at a higher and steadier
+ * rate than a mouse, so the default frequency is 90 rather than 60 — with the
+ * contact wobble laid over it. See the section comment above for what was
+ * removed and what the swap measurably costs.
+ *
+ * ONLY EVER CALLED WHILE THE FINGER IS DOWN. A tap generates no path at all:
+ * `MobileHumanizer.move` records the position and dispatches nothing when there
+ * is no contact, because there is no hover on a touchscreen.
  */
-function easeTouch(t: number): number {
-  return (1.0 - TOUCH_LAUNCH) * easeInOut(t) + TOUCH_LAUNCH * (1.0 - Math.pow(1.0 - t, 2.4));
-}
+// A FINGER PREFERS THE EFFICIENT RECORDINGS. Cursory's `directness` biases
+// selection toward shorter, straighter movements, and for touch that is worth
+// spending: a drag is the one gesture a person is watching happen, and a
+// wandering recording morphed onto a 150px slider reads as sluggish.
+//
+// MEASURED 2026-09-14 over 80/150/250px drags at 90 Hz, 600 draws per setting:
+//
+//     directness   duration p50   p90    bow p50   redraws
+//     0.65 (mouse)     519 ms    729 ms   11.7px    10.7%
+//     0.85 (here)      400 ms    729 ms    9.9px    10.8%
+//     0.90             400 ms    729 ms    9.8px    15.0%
+//
+// 0.85 takes the whole of the speed-up — 23% off the median, and 40% at 150px,
+// which is where a slider drag lives — while the bow gets slightly TIGHTER,
+// which is the direction a finger on a wrist pivot should go. 0.9 buys no more
+// time and costs half again as many redraws.
+//
+// The mouse stays at Cursory's own 0.65. Its overshoot floor is lowest there,
+// and a pointer merely travelling to a click has no reason to hurry.
+const SWIPE_DIRECTNESS = 0.85;
 
-/**
- * A FINGER travelling from `target_start` to `target_end`, same contract as
- * `generate_trajectory`: `[points, timings]`, timings cumulative from 0, last
- * point exactly `target_end`.
- *
- * A separate model rather than `generate_trajectory` with other constants,
- * because the three things that make the mouse output human are each WRONG
- * here:
- *
- *   - **No overshoot-and-correct.** That tell is a hand arriving past a target
- *     it cannot see under the cursor. A finger occludes its own target and
- *     commits; the correction, when there is one, is a second gesture.
- *   - **A different velocity profile.** `easeTouch`, not `easeInOut` — above.
- *   - **Different jitter.** The mouse model adds white noise scaled by speed (a
- *     hand tracking a path imprecisely). A digitizer instead reports a wandering
- *     centroid, which is low-frequency and roughly speed INDEPENDENT, so this is
- *     a smoothed random walk.
- *
- * `frequency` defaults to 90: digitizers sample at 120Hz+, but touchmove is
- * coalesced to the compositor, so more samples than this buys nothing and costs
- * a dispatch round-trip each.
- */
 export function generate_swipe(
-  target_start: readonly number[],
-  target_end: readonly number[],
-  frequency: number = 90,
-  frequencyRandomizer: number = 0.1,
+  targetStart: readonly number[],
+  targetEnd: readonly number[],
+  frequency = 90,
+  frequencyRandomizer = 1.0,
+  seed?: number | bigint,
+  directness = SWIPE_DIRECTNESS,
 ): [Point[], number[]] {
-  const start: Point = [Number(target_start[0]), Number(target_start[1])];
-  const end: Point = [Number(target_end[0]), Number(target_end[1])];
-
-  const dx = end[0] - start[0];
-  const dy = end[1] - start[1];
-  const distance = Math.hypot(dx, dy);
-
-  if (distance < 1e-6) return [[end], [0.0]];
-
-  let durationMs =
-    TOUCH_FITTS_A_MS + TOUCH_FITTS_B_MS * Math.log2(distance / TOUCH_WIDTH_PX + 1.0);
-  durationMs *= uniform(0.85, 1.2);
-
-  const steps = Math.max(2, Math.round((durationMs / 1000.0) * Math.max(1, frequency)));
-
-  let c1: Point;
-  let c2: Point;
-  if (distance < SHORT_MOVE_PX) {
-    c1 = start;
-    c2 = end;
-  } else {
-    [c1, c2] = controlPoints(start, end, distance);
-    // Pull the mouse model's bow in: `controlPoints` is shared, and its arc is
-    // sized for a hand crossing a desk.
-    const shrink = Math.min(1.0, TOUCH_BOW_CAP_PX / Math.max(TOUCH_BOW_CAP_PX, distance * 0.16));
-    c1 = [start[0] + (c1[0] - start[0]) * shrink, start[1] + (c1[1] - start[1]) * shrink];
-    c2 = [start[0] + (c2[0] - start[0]) * shrink, start[1] + (c2[1] - start[1]) * shrink];
-  }
-
-  const points: Point[] = [];
-  const timings: number[] = [];
-  let elapsed = 0.0;
-  const perStep = durationMs / steps;
+  // Always: `generate_swipe` is only ever called while the finger is down, so
+  // every path it produces is a drag carrying something.
+  const [points, timings] = draw(
+    [Number(targetStart[0]), Number(targetStart[1])],
+    [Number(targetEnd[0]), Number(targetEnd[1])],
+    frequency, frequencyRandomizer, seed, directness, true);
+  const out: Point[] = [];
   let wobX = 0.0;
   let wobY = 0.0;
-
-  for (let i = 0; i <= steps; i++) {
-    const t = easeTouch(i / steps);
-    const [px, py] = cubicBezier(start, c1, c2, end, t);
-
+  const last = points.length - 1;
+  for (let i = 0; i < points.length; i += 1) {
+    const [x, y] = points[i];
+    if (i === 0 || i === last) {
+      // The ends are where the touch lands and lifts; a wobble there moves the
+      // gesture rather than texturing it.
+      out.push([Number(x), Number(y)]);
+      continue;
+    }
     wobX = wobX * TOUCH_WOBBLE_DECAY + gauss(0.0, TOUCH_WOBBLE_PX);
     wobY = wobY * TOUCH_WOBBLE_DECAY + gauss(0.0, TOUCH_WOBBLE_PX);
-
-    points.push([px + wobX, py + wobY]);
-    timings.push(elapsed);
-    elapsed += perStep * uniform(1.0 - frequencyRandomizer, 1.0 + frequencyRandomizer);
+    out.push([Number(x) + wobX, Number(y) + wobY]);
   }
-
-  // Land exactly where the caller asked, same reason as the mouse model.
-  points[points.length - 1] = end;
-  return [points, timings];
+  return [out, timings.map(Number)];
 }

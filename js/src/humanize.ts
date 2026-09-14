@@ -7,7 +7,7 @@
  * not drifted.
  *
  * Humanisation used to be wired straight into `solver.ts`: every gesture was a
- * `page.mouse.*` call with a Bezier trajectory in front of it and a `Math.
+ * `page.mouse.*` call with a recorded human trajectory in front of it and a `Math.
  * random()` sleep behind it, and there was no way to ask for anything else. That
  * is wrong in three directions at once —
  *
@@ -88,7 +88,8 @@ function gauss(mu: number, sigma: number): number {
  *   between  between two taps of one batch (grid tiles)
  *   grab     after pressing, before a drag starts moving
  *   drop     after a drag arrives, before releasing
- *   probe    between the slider's measurement nudges
+ *   probe    after a slider moves, while the screen is read for where the
+ *            piece actually landed
  *   settle   before releasing a slider — the release IS the submit, and some
  *            vendors sample the final milliseconds of the gesture
  *   key      between two typed characters
@@ -182,7 +183,8 @@ export abstract class BaseHumanizer implements Humanizer {
 // ───────────────────────────────────────────────────────────────────── mouse
 
 /**
- * A hand on a mouse. Bezier arcs, Fitts's-law durations, overshoot.
+ * A hand on a mouse. Trajectories recorded from real people, morphed onto the
+ * requested endpoints — see `trajectory.generate_trajectory`.
  *
  * Everything in here was `solver.performSmoothMove` / `tracePath` before this
  * module existed, and is unchanged: the constants were measured and a refactor
@@ -205,6 +207,12 @@ export class MouseHumanizer extends BaseHumanizer {
 
   private frequency: number;
 
+  /**
+   * Is the button down? A move made with it down is a DRAG, and a drag must not
+   * swing past its target — see `move`.
+   */
+  private isDown = false;
+
   constructor(start: Point = [0, 0], frequency = 60) {
     super(start);
     this.frequency = frequency;
@@ -212,16 +220,29 @@ export class MouseHumanizer extends BaseHumanizer {
 
   async move(page: Page, to: Point): Promise<void> {
     if (samePoint(this.at, to)) return;
-    const [points, timings] = generate_trajectory(this.at, to, this.frequency);
+    // A DRAG IS NOT A TRAVEL. With the button down the pointer is carrying
+    // something, so a path that swings past the target drags the piece past it
+    // and back — see `draw` in trajectory.ts. Travelling to a click may
+    // overshoot; that is what people do and it costs nothing.
+    const [points, timings] = generate_trajectory(
+      this.at, to, this.frequency, 1.0, undefined, 0.65, this.isDown);
     await this.trace(page, points, timings);
   }
 
   async press(page: Page): Promise<void> {
     await page.mouse.down();
+    this.isDown = true;
   }
 
   async release(page: Page): Promise<void> {
     await page.mouse.up();
+    this.isDown = false;
+  }
+
+  async reset(_page: Page): Promise<void> {
+    // A solve that timed out mid-drag leaves the button down in this object's
+    // view; the next one must not start by thinking it is dragging.
+    this.isDown = false;
   }
 
   async typeText(page: Page, _field: PlaywrightElementHandle, text: string): Promise<boolean> {
@@ -616,8 +637,8 @@ export async function touchBackendFor(
  *     report one unchanging coordinate; the centroid of the contact patch rolls
  *     a pixel or two under pressure. A tap with zero movement between touchstart
  *     and touchend is a synthetic tap.
- *   - **Touch kinematics**, via `generate_swipe` — see its docstring for why that
- *     is a different model rather than the mouse one retuned.
+ *   - **Drag paths from `generate_swipe`**, which is Cursory plus the contact
+ *     wobble. A TAP generates no path at all — see `move`.
  *   - **Longer, more variable pauses.** Every measured touch interaction is
  *     slower than its mouse equivalent, and a phone's are more variable because
  *     the hand holding the device is also moving.

@@ -355,11 +355,27 @@ test('the swipe honours the trajectory contract', () => {
 });
 
 test('a finger does not overshoot', () => {
-  // The mouse model's most recognisable tell is a hand arriving past a target
-  // it cannot see under the cursor. A finger occludes its own target.
-  for (let i = 0; i < 20; i++) {
+  // A hand arriving past a target it cannot see under the cursor is the mouse's
+  // most recognisable tell. A finger occludes its own target and commits.
+  //
+  // The path comes from Cursory now, and a recording carries whatever excursion
+  // the person made relative to their OWN endpoints — morphed onto a short
+  // movement, that becomes a swing well past the target and back. Measured: 6
+  // to 25% of raw draws run more than 2px past, with a tail reaching 200px past
+  // a 150px movement. `generate_swipe` therefore REDRAWS rather than reshapes,
+  // because straightening a path would put a hand-drawn curve back in the
+  // middle of a recording. Six redraws leave under 0.03% unclean.
+  //
+  // The bound allows the contact wobble laid over the path afterwards: an AR(1)
+  // walk with sigma 0.55 and decay 0.82 is stationary at about 0.96px, so 3
+  // sigma is ~2.9px on top of the path's own 2px tolerance. That is contact
+  // behaviour rather than aim — a digitizer's reported centroid really does sit
+  // a pixel or two off the finger — and it is 60x short of the excursions this
+  // test exists to catch.
+  for (let i = 0; i < 200; i++) {
     const [points] = generate_swipe([0, 0], [600, 0]);
-    assert.ok(Math.max(...points.map((p) => p[0])) <= 603);
+    const past = Math.max(...points.map((p) => p[0])) - 600;
+    assert.ok(past <= 6, `swipe ran ${past.toFixed(1)}px past its endpoint`);
   }
 });
 

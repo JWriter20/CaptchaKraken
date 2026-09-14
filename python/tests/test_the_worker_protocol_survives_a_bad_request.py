@@ -72,8 +72,13 @@ def test_a_malformed_line_is_answered_and_the_worker_keeps_going(monkeypatch, ca
 
     assert replies[1]["ok"] is False, "a malformed line must be answered, not ignored"
     assert replies[1]["error"]
-    assert replies[2] == {"id": 2, "ok": True, "result": {"has_movement": False}}, \
+    # The RESULT may grow fields — `check-movement` now carries a `ratio`
+    # alongside its verdict so a caller can report how MUCH moved, not merely
+    # that something did. What this test pins is that the worker ANSWERED, with
+    # the right id and the right verdict, after a malformed line.
+    assert replies[2]["id"] == 2 and replies[2]["ok"] is True, \
         "the worker died on a bad line instead of serving the next request"
+    assert replies[2]["result"]["has_movement"] is False
 
 
 def test_an_unknown_command_is_refused_by_name_without_dying(monkeypatch, capsys, tmp_path):

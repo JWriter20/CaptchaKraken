@@ -42,6 +42,12 @@ Modes:
         hot path the Playwright lib polls while waiting for reCAPTCHA tiles to
         settle — one subprocess per poll, not one per cell.
 
+  captchakraken board-painted    image.png [floor]
+        Has the widget painted its puzzle, or is the middle of the panel the
+        blank hole it shows while it rebuilds? -> {"painted", "texture", "floor"}.
+        The gate in front of every inference screenshot; a still board is not
+        the same thing as a loaded one.
+
   captchakraken is-empty-cell    image.png cell_number
   captchakraken is-cell-selected image.png cell_number
   captchakraken is-cell-changing imgA.png imgB.png cell_number
@@ -396,7 +402,7 @@ def _handle_serve() -> bool:
       grid-cell-states-fixed  {a, b, grid_boxes}            -> states
       check-movement          {a, b, threshold?}            -> {has_movement: bool}
       match-region            {ref, live, cx, cy, ...}      -> {match, diff, ...}
-      track-piece             {before, after, exclude?}     -> {bbox, moved}
+      track-piece             {before, after, exclude?, travel?} -> {bbox, piece}
 
     Unknown cmd / malformed line -> an {ok:false} response (the process keeps
     running). EOF on stdin ends the loop cleanly. All heavy detection delegates
@@ -428,8 +434,9 @@ def _handle_serve() -> bool:
             from .image_processor import ImageProcessor
 
             threshold = float(req.get("threshold", 0.005))
-            moved = ImageProcessor.detect_movement(req["a"], req["b"], threshold)
-            return {"has_movement": bool(moved)}
+            ratio = ImageProcessor.movement_ratio(req["a"], req["b"])
+            # The ratio rides along so the caller can say WHY it re-solved.
+            return {"has_movement": bool(ratio > threshold), "ratio": round(ratio, 5)}
         if cmd == "match-region":
             # Animated wait gate: is the widget back in the state the model
             # answered about? Polled every ~120ms while a click is held, so it
@@ -437,11 +444,18 @@ def _handle_serve() -> bool:
             return _match_region(req["ref"], req["live"],
                                  float(req["cx"]), float(req["cy"]),
                                  req.get("tolerance"))
+        if cmd == "board-painted":
+            # Load gate in front of the inference screenshot: is there a puzzle
+            # in the middle of this panel, or is it the hole the widget shows
+            # while it rebuilds? Polled a few times per round, so it belongs on
+            # the worker for the same reason the others do.
+            return _board_painted(req["image"], req.get("floor"), req.get("box"))
         if cmd == "track-piece":
             # Slider closed loop: where has the piece got to? Called several
             # times per drag WITH THE MOUSE HELD DOWN, so a process spawn per
             # reading would stretch the drag into something no human hand does.
-            return _track_piece(req["before"], req["after"], req.get("exclude"))
+            return _track_piece(req["before"], req["after"], req.get("exclude"),
+                                req.get("travel") or 0.0)
         raise ValueError(f"unknown cmd: {cmd!r}")
 
     # Signal readiness so the JS side knows imports are done before it polls.
@@ -587,19 +601,34 @@ def _match_region(ref: str, live: str, cx: float, cy: float,
     return {"match": bool(d <= tol), "diff": float(d), "tolerance": tol}
 
 
-def _track_piece(before: str, after: str, exclude=None) -> dict:
-    """Where did the puzzle piece get to? See tool_calls/track_piece.py."""
-    from .tool_calls.track_piece import changed_bbox
+def _board_painted(image: str, floor=None, box=None) -> dict:
+    """Has the widget painted its puzzle? See tool_calls/board_painted.py."""
+    from .tool_calls.board_painted import board_is_painted
+
+    return board_is_painted(image, floor, box)
+
+
+def _track_piece(before: str, after: str, exclude=None, travel: float = 0.0) -> dict:
+    """Where did the puzzle piece get to? See tool_calls/track_piece.py.
+
+    `travel` is how far the piece is believed to have moved, in the shots' own
+    pixels. Given it, `piece` is the piece ITSELF rather than the union of it
+    and the ground it vacated, so the caller neither has to infer the piece's
+    width nor inherits the bias in that inference.
+    """
+    from .tool_calls.track_piece import changed_bbox, locate_piece
 
     bbox = changed_bbox(before, after, exclude)
-    return {"bbox": bbox, "moved": bbox is not None}
+    piece = locate_piece(before, after, travel, exclude) if bbox is not None else None
+    return {"bbox": bbox, "piece": piece, "moved": bbox is not None}
 
 
 def _handle_track_piece() -> bool:
-    """`captchakraken track-piece before.png after.png [exclude_json]`
+    """`captchakraken track-piece before.png after.png [exclude_json] [travel]`
 
     `exclude_json` is `[x1, y1, x2, y2]` in pixels — the slider handle, which is
-    moving too and would otherwise be measured instead of the piece.
+    moving too and would otherwise be measured instead of the piece. `travel` is
+    how far the piece is believed to have moved, in those same pixels.
 
     Also available over the persistent worker as cmd `track-piece`, which is
     what the driver should use: this runs mid-drag, several times, with the
@@ -609,11 +638,34 @@ def _handle_track_piece() -> bool:
         return False
     if len(sys.argv) < 4:
         print(json.dumps({
-            "error": "Usage: captchakraken track-piece before.png after.png [exclude_json]"
+            "error": "Usage: captchakraken track-piece before.png after.png "
+                     "[exclude_json] [travel]"
         }), file=sys.stderr)
         sys.exit(1)
     exclude = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
-    print(json.dumps(_track_piece(sys.argv[2], sys.argv[3], exclude)))
+    travel = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
+    print(json.dumps(_track_piece(sys.argv[2], sys.argv[3], exclude, travel)))
+    return True
+
+
+def _handle_board_painted() -> bool:
+    """`captchakraken board-painted image.png [floor]`
+
+    -> {"painted": bool|null, "texture": float|null, "floor": float}.
+    `painted: null` means the image could not be read, which the caller must not
+    treat as blank. Also available over the persistent worker as cmd
+    `board-painted`, which is what the driver should use — this is polled while
+    a round waits for the board to come back.
+    """
+    if len(sys.argv) <= 1 or sys.argv[1] != "board-painted":
+        return False
+    if len(sys.argv) < 3:
+        print(json.dumps({
+            "error": "Usage: captchakraken board-painted image.png [floor]"
+        }), file=sys.stderr)
+        sys.exit(1)
+    floor = float(sys.argv[3]) if len(sys.argv) > 3 else None
+    print(json.dumps(_board_painted(sys.argv[2], floor)))
     return True
 
 
@@ -885,6 +937,8 @@ def main():
     if _handle_match_region():
         return
     if _handle_track_piece():
+        return
+    if _handle_board_painted():
         return
     if _handle_report_outcome():
         return

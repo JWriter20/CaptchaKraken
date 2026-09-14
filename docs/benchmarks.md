@@ -90,7 +90,7 @@ with three figures behind them.
 
 Measured **2026-09-11** on **1,436 held-out captures** across **50 puzzle types** — every one we generate, including the ones both models are bad at.
 
-| Vendor | Puzzle | n | CaptchaKraken v1.2 Twilight | CaptchaKraken v1.2 Abyss |
+| Vendor | Puzzle | n | Twilight | Abyss |
 |---|---|---:|---:|---:|
 | BotDetect | Distorted text | 28 | 93% | 96% |
 | GeeTest v3 | Slide jigsaw (v3) | 11 | 73% | 73% |
@@ -143,7 +143,7 @@ Measured **2026-09-11** on **1,436 held-out captures** across **50 puzzle types*
 | reCAPTCHA | 3x3 tile grid | 281 | 68% | 67% |
 | reCAPTCHA | 4x4 tile grid | 50 | 44% | 42% |
 
-**65.3% → 74.1% overall**, weighted by how many captures of each puzzle we hold (+8.8% absolute, +14% relative).
+**One board, one answer: 65.3% → 74.1%** (+8.8% absolute, +14% relative), weighted by how many captures of each puzzle we hold.
 
 Abyss is ahead by ten points or more on **15** of the 50 types and behind by five or more on **6**. Both counts are here because a table that only showed the wins would not be a measurement.
 

@@ -26,7 +26,7 @@ import { parseApiError } from './errors';
 import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
 import { resolvePythonCommand } from './python-command';
 import { buildSolveArgs, redactCommand, solveEnv } from './cli-invocation';
-import { solveSlideGeometry } from './slide-geometry';
+import { solveSlideGeometry, MIN_PIECE_PX, MAX_PIECE_FRACTION } from './slide-geometry';
 import { getBundledCliRoot, resolveLoraName } from './model-name';
 
 const execFileAsync = promisify(execFile);
@@ -143,6 +143,34 @@ enum CaptchaState {
  * vendors nightly in the collector. Mirror of PYTHON_VENDOR_WIDGET_LOCATORS in
  * page_solver.py — keep both in the same order with the same selectors.
  */
+/**
+ * Which grid shapes this board is allowed, from the challenge iframe's `src`.
+ * 
+ * The return value feeds `solver._grid_dims` (python) / the CLI's equivalent,
+ * which restricts hCaptcha to a 3x3 and reCAPTCHA to a 3x3 or 4x4, and restricts
+ * ANYTHING ELSE not at all — GeeTest and Prosopo both ship real 3x3 grids, so
+ * `unknown` has to stay permissive. That makes this the highest-leverage string
+ * comparison in the client: a vendor it fails to name loses the only check that
+ * stops `find_grid` reading a click board's header and footer bands as a lattice
+ * and handing the board to the grid expert.
+ * 
+ * Keyed on `hcaptcha`, the same substring the seven `iframe[src*="hcaptcha"]`
+ * selectors elsewhere use, NOT on the apex host. hCaptcha serves its challenge
+ * from `newassets.hcaptcha.com/captcha/v1/<build>/static/hcaptcha.html#frame=
+ * challenge`; the marker that is stable across builds, mirrors and our own Tier 3
+ * fixtures is `hcaptcha`.
+ *
+ * Mirror of `vendor_from_src` in page_solver.py — CLAUDE.md 1c. Pure, so both
+ * ports are tested against the same strings.
+ */
+export function vendorFromSrc(src: string | null | undefined):
+    'hcaptcha' | 'recaptcha' | 'unknown' {
+  const s = src || '';
+  if (s.includes('hcaptcha')) return 'hcaptcha';
+  if (s.includes('recaptcha/api2')) return 'recaptcha';
+  return 'unknown';
+}
+
 const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: string[] }> = [
   { puzzleSource: 'geetest', selectors: ['.geetest_box', '.geetest_panel_box', '.geetest_popup_window', '.geetest_widget'] },
   // Tencent renders IN THE HOST DOCUMENT since 2026-08-11; before that it was
@@ -330,12 +358,82 @@ const DRAGGABLE_PIECE_SELECTORS: ReadonlyArray<string> = [
 ];
 
 /**
+ * Elements that ARE the puzzle piece, for reading its position off the page
+ * instead of inferring it from a pixel diff.
+ *
+ * Separate from DRAGGABLE_PIECE_SELECTORS on purpose. That list answers "is
+ * there a piece to drag INSTEAD of a slider", and adding to it changes which
+ * gesture a widget gets. This one only ever answers "where is the piece and how
+ * wide is it", so a wrong hit costs a measurement, not a different drag.
+ *
+ * WHY THIS EXISTS. The CV fallback measures the piece as the union of what
+ * changed between two frames, which spans the vacated ground and the piece's
+ * new position — and its edges are inset by however much the piece's own edges
+ * fade into the board. That inset cancels out of the RATIO but not out of the
+ * WIDTH, and `pieceCentre = rightEdge - width/2` turns an under-measured width
+ * into a centre estimate that is too far right by half the error.
+ *
+ * MEASURED on gt4.geetest.com's slide demo, 2026-09-12. `.geetest_slice` is
+ * 80x80 in the DOM; the diff inferred 63px and 74px on two consecutive live
+ * attempts. 63 puts the centre 8.5px right of the truth, so the loop reports
+ * itself converged to within 2px while releasing 8.5px short — 2.5% of a 340px
+ * widget, against a notch that accepts about 2%. Fourteen of fourteen refused
+ * drags across two filmed runs undershot; not one overshot.
+ *
+ * RE-MEASURED against the live vendors 2026-09-13, by opening each demo the
+ * collector knows about and dumping the widget subtree — every element with its
+ * geometry and computed cursor. What each vendor actually calls its piece:
+ *
+ *     geetest v4   div.geetest_slice                 80x80, flush with the board
+ *     tencent      div.tencent-captcha-dy__fg-item   59x59, inset 25px
+ *     yidun        img.yidun_jigsaw                  61x160, a full-height strip
+ *
+ * TENCENT'S PIECE HAS A NAME AND WE WERE NOT USING IT. `fg-item` matches none of
+ * the generic patterns — "fg" is not "puzzle", "piece" or "jigsaw" — so every
+ * Tencent slide fell through to the pixel-diff path and inherited its inferred
+ * width. That path works; it is just less accurate than reading the box the
+ * vendor already draws.
+ *
+ * GEETEST NOW STAMPS A PER-BUILD HASH. The live element carries BOTH
+ * `geetest_slice` and `geetest_slice_1378c412`, and the suffix changes between
+ * builds. `.geetest_slice` still matches today because both classes are present,
+ * and the day the plain one stops being emitted is the day this list goes blind
+ * — the failure Tencent already put us through once, moving out of
+ * `iframe#tcaptcha_iframe_dy` on 2026-08-11 and leaving both ports blind for
+ * twelve days. A live check against each vendor's own demo page is what
+ * notices, and it covers these selectors too, not only the widget locators.
+ *
+ * The python twin is SLIDE_PIECE_MEASURE_SELECTORS in page_solver.py.
+ */
+const SLIDE_PIECE_MEASURE_SELECTORS: ReadonlyArray<string> = [
+  '.geetest_slice',
+  '.tencent-captcha-dy__fg-item',
+  '.yidun_jigsaw',
+  '.lemin-cropped-puzzle-piece',
+  '[class*="puzzle"][class*="piece"]',
+  '[class*="jigsaw"]',
+];
+
+/**
  * Puzzle-piece slider tuning. Mirrors the `slide_*` fields of
  * PageSolverConfig in page_solver.py.
  */
-const SLIDE_PROBE_OFFSETS_PX = [24, 64];
+/**
+ * One reading of a held slider drag, in the SHOT's pixels.
+ *
+ * `bbox` is the union of everything that moved — the piece's original left edge
+ * to its current right edge. `piece` is the piece itself where the CV could
+ * resolve it from the ground it vacated, which is the reading to prefer: the
+ * union's width carries the piece's width plus the travel, and inferring one
+ * from the other inherits the error in both.
+ */
+interface TrackedPiece {
+  bbox: [number, number, number, number];
+  piece: { centre: number, width: number } | null;
+}
+
 const SLIDE_TOLERANCE_PX = 2;
-const SLIDE_MAX_CORRECTIONS = 2;
+const SLIDE_MAX_CORRECTIONS = 3;
 
 /**
  * The two numbers that bound a solve, together, because they only make sense
@@ -584,6 +682,17 @@ export class CaptchaKrakenSolver {
    * a widget is never filmed twice to answer the same question.
    */
   private pendingBurst: ReturnType<CaptchaKrakenSolver['startKeyframeBurst']> | null = null;
+
+  /**
+   * The rate the last burst ACHIEVED, for the slicer's timestamps.
+   *
+   * `videoBurstFps` is what the loop aims at, and a camera slower than the
+   * interval does not reach it — so a frame index means a different moment on
+   * a phone than on a desktop. The slicer picks frames by index and only uses
+   * the rate to date them, so this keeps the manifest honest without moving
+   * which frames the model is shown. Mirrors `measured_fps` in the python port.
+   */
+  private lastBurstFps: number | null = null;
 
   private actedOnBoard = false;
   // Current challenge lifecycle state (see CaptchaState). Diagnostic + used to
@@ -1161,18 +1270,14 @@ export class CaptchaKrakenSolver {
     // Anything that is not hCaptcha or reCAPTCHA reports 'unknown' and is
     // allowed every shape (GeeTest and Prosopo both ship real 3x3 grids).
     const src = await captchaElement.getAttribute('src').catch(() => null);
-    const puzzleSource = src && src.includes('hcaptcha.com')
-      ? 'hcaptcha'
-      : src && src.includes('recaptcha/api2')
-        ? 'recaptcha'
-        : 'unknown';
+    const puzzleSource = vendorFromSrc(src);
 
     // Distinguish the anchor "I'm not a robot" checkbox from the open image
     // challenge so recorders can drop the (useless) pre-challenge checkbox
     // screenshots and keep only the real puzzle. reCAPTCHA: anchor = api2/anchor,
     // challenge = api2/bframe. hCaptcha: anchor = frame=checkbox, challenge =
     // frame=challenge. (Note puzzleSource alone can't tell hCaptcha's checkbox
-    // from its challenge — both srcs contain hcaptcha.com.)
+    // from its challenge — both srcs contain `hcaptcha`.)
     const frameRole: SolveStepEvent['frameRole'] =
       !src ? 'unknown'
         : src.includes('recaptcha/api2/bframe') || src.includes('frame=challenge')
@@ -1306,6 +1411,12 @@ export class CaptchaKrakenSolver {
       }
     }
 
+    // A STILL BOARD IS NOT A LOADED BOARD. Every gate above this point asks
+    // whether the widget has stopped changing; none asks whether it has drawn
+    // anything, and the panel a vendor shows mid-rebuild answers "yes" to the
+    // first and "no" to the second. Ask before spending an inference on it.
+    const painted = await this.ph('board-paint', () => this.waitForBoardPainted(captchaElement));
+
     // 1. Take Screenshot — or take the one the classifier already came to rest on.
     //
     // `classifyByRecording` calls a board static only after the picture has held
@@ -1315,7 +1426,12 @@ export class CaptchaKrakenSolver {
     // "we photographed it", which is where a board that starts moving again gets
     // photographed mid-change.
     const screenshotPath = path.join(os.tmpdir(), `captcha_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
-    const settledFrame = isAnimated ? null : (this.pendingBurst?.stableFrame() ?? null);
+    // …and if the board painted WHILE WE WATCHED, the classifier's settled
+    // frame predates the paint: it is a photograph of the blank panel, banked
+    // before there was anything to photograph. Take a fresh one.
+    const settledFrame = (isAnimated || painted.waitedMs >= (this.config.boardPaintPollMs ?? 180))
+      ? null
+      : (this.pendingBurst?.stableFrame() ?? null);
     if (settledFrame && fs.existsSync(settledFrame)) {
       fs.copyFileSync(settledFrame, screenshotPath);
     } else {
@@ -1524,6 +1640,19 @@ export class CaptchaKrakenSolver {
       // something: this exact answer is about to be performed, so if it matches
       // the last one, the last one already ran and the page is still asking the
       // same question.
+      /*
+       * THE ANSWER, MACHINE-READABLE, at the moment the driver commits to it.
+       *
+       * Tier 3 grades this with the SAME grader Tier 2 uses, and gates on the
+       * difference: an answer that Tier 2 would call correct, on a fixture the
+       * driver then failed, is a driver bug and nothing else. Without the answer
+       * on stdout that comparison cannot be made, and every driver defect reads
+       * as a model miss — which is exactly how a 2.5% drag undershoot hid behind
+       * an 87% held-out score for as long as it did.
+       *
+       * Emitted by both ports under the same marker so one parser reads either.
+       */
+      console.log('[answer] ' + JSON.stringify({ actions: actionList }));
       this.noteAnswer(actionList, retryMode);
       console.log(`Executing ${actionList.length} actions.`);
       const frame = await captchaElement.contentFrame();
@@ -1878,6 +2007,59 @@ export class CaptchaKrakenSolver {
    * for a couple of seconds while it verifies, so treating that frame as a fresh
    * puzzle (the old behavior) burned ~18s re-running the pipeline on it.
    */
+  /**
+   * GeeTest's accepted state, which is neither a token nor an absence.
+   *
+   *     The three vendors above hand out a response token, and everything else in
+   *     this driver falls back on "the widget is gone". GeeTest does neither when it
+   *     accepts: it paints a result banner INSIDE the still-open panel — "1.6 s. You
+   *     beat 97% of users" — and closes some seconds later. So the positive signal
+   *     is on screen while every check this loop makes still says no, the 1s verdict
+   *     window expires, and the next round spends a whole inference discovering the
+   *     puzzle was already solved.
+   *
+   *     MEASURED on gt4.geetest.com's slide demo, 2026-09-12, three consecutive
+   *     live solves: the driver opened another solve loop AFTER the success banner
+   *     had painted, every time.
+   *
+   *         run 1   t+12873ms success  ->  "Captcha Solve Loop 3/6"
+   *         run 2   t+25418ms success  ->  "Captcha Solve Loop 5/6"
+   *         run 3   t+12571ms success  ->  "Captcha Solve Loop 3/6"
+   *
+   *     Across ten filmed attempts that cost 34 model calls for 20 drags, and put
+   *     ~6s between the winning drag and the solve being reported.
+   *
+   *     THE DISCRIMINATOR IS THE VENDOR'S OWN, and it is exact. A refused drag gets
+   *     the same banner element with `geetest_fail`, a accepted one `geetest_success`:
+   *
+   *         reject   .geetest_result_tips geetest_fail    geetest_showResult   "Please try again"
+   *         accept   .geetest_result_tips geetest_success geetest_showResult   "1.6 s. You beat 97% of users"
+   *         anchor   .geetest_captcha ... geetest_lock_success                 "Verification Success"
+   *
+   *     VISIBILITY IS PART OF THE TEST, not a nicety: `geetest_popup_wrap` carries
+   *     the same success class at zero height while the panel is closed, so a bare
+   *     class match would report a solve on a widget that has not been touched.
+   */
+  private async isGeetestAccepted(page: Page): Promise<boolean> {
+    // THE HOST DOCUMENT, not an iframe. GeeTest v4 is a JS SDK that renders into
+    // the page it is embedded in — which is why `detectCaptcha` looks for it with
+    // plain `.geetest_btn` selectors rather than an iframe src, and why this does
+    // not walk frames the way the hCaptcha and reCAPTCHA checks above do.
+    //
+    // Each arm is scoped to the element that actually carries the state. A bare
+    // `[class~="geetest_lock_success"]` would also match `geetest_popup_wrap`,
+    // which holds the class at zero height with the panel shut — and matches it
+    // FIRST in document order.
+    try {
+      for (const el of await page.$$('.geetest_result_tips.geetest_success, .geetest_captcha.geetest_success, .geetest_captcha.geetest_lock_success')) {
+        if (await el.isVisible().catch(() => false)) return true;
+      }
+    } catch {
+      /* a signal we could not read is not a failed solve */
+    }
+    return false;
+  }
+
   private async isCaptchaSolved(page: Page): Promise<boolean> {
     try {
       // The token FIRST, and unconditionally. It is a hidden field on the PAGE,
@@ -1894,6 +2076,7 @@ export class CaptchaKrakenSolver {
       // Turnstile widget is UNSOLVED, so the signal was known to one half of
       // the driver and ignored by the other. Mirrors the Python driver.
       if (await this.hasNonEmptyFieldValue(page, '[name="cf-turnstile-response"]')) return true;
+      if (await this.isGeetestAccepted(page)) return true;
 
       // Anchor state is the fallback, and this one DOES need the iframe: it is
       // read out of the anchor's own document.
@@ -1978,16 +2161,33 @@ export class CaptchaKrakenSolver {
       const frame = await challengeIframe.contentFrame();
       if (!frame) return;
 
-      // Prompt must be present and non-empty first — it's the cheapest signal
-      // that the challenge frame has rendered its content at all.
-      await frame.waitForSelector('.prompt-text', {
-        state: 'visible',
-        timeout: this.config.hcaptchaImagesTimeoutMs ?? 3000,
-      });
-
       // Then wait for the actual imagery to load. Grid tiles expose a
       // background-image; click/drag puzzles expose a canvas or example image.
       await frame.waitForFunction(() => {
+        // THE PROMPT, WHEN THERE IS ONE. This used to be its own
+        // `waitForSelector('.prompt-text', {state: 'visible'})` ahead of the
+        // poll — a call that THROWS when the element does not exist, so a
+        // challenge without one paid the whole timeout before every board.
+        // The lesson at the bottom of this function was learned for the
+        // example image and never applied here.
+        //
+        // Measured 2026-09-13 over the Tier 3 hCaptcha fixtures, none of which
+        // draw a `.prompt-text` (the instruction is in the rendered pixels, as
+        // it is on several real variants):
+        //
+        //     grocery_list         1 board   hcaptcha-images  3.0s   solved
+        //     click_blocked_lines  5 boards  hcaptcha-images 12.0s   TIMED OUT
+        //     tower_stack          7 boards  hcaptcha-images 18.0s   TIMED OUT
+        //
+        // The timeout is 3s and it was paid PER BOARD, so the cost fell on the
+        // puzzles taking the most rounds — the ones with the least budget to
+        // spare. Both types solved 2/2 before the client began recognising
+        // these boards as hCaptcha at all, and 0/2 after.
+        const vis = (el: Element | null) => !!el && el.getClientRects().length > 0
+          && getComputedStyle(el).visibility !== 'hidden';
+        const prompt = document.querySelector('.prompt-text');
+        if (prompt && !vis(prompt)) return false;
+
         const tiles = Array.from(
           document.querySelectorAll('.task-image .image, .task .image'),
         ) as HTMLElement[];
@@ -2095,8 +2295,8 @@ export class CaptchaKrakenSolver {
     }
     return `${base}, BUT ${loaded.join('/')} code IS loaded and running on this `
       + 'page. The vendor\'s markup no longer matches anything in '
-      + 'VENDOR_WIDGET_LOCATORS — re-measure with '
-      + 'scripts/check_vendor_selectors.py and update BOTH solver ports.';
+      + 'VENDOR_WIDGET_LOCATORS — the selector list needs re-measuring '
+      + 'against the vendor\'s current markup, in both solver ports.';
   }
 
   public async hasInteractiveWidgetInDom(page: Page): Promise<boolean> {
@@ -2517,6 +2717,98 @@ export class CaptchaKrakenSolver {
       // fall through to one-shot
     }
     return this.runCliTool(fallbackArgs);
+  }
+
+  /**
+   * Block until the widget has PAINTED its puzzle, and never for long.
+   *
+   * WHY THE SETTLE GATE DOES NOT ALREADY COVER THIS. `waitForElementSettled`
+   * polls for stillness, and the blank panel a vendor shows while it rebuilds
+   * the board is perfectly still — it is the stillest the widget ever is, so it
+   * settles instantly and we photograph the hole. The pairing that catches it
+   * today is `waitForHcaptchaChallengeImages`, which asks the DOM and only
+   * knows hCaptcha. This asks the picture, so it holds for every vendor.
+   *
+   * Measured on gt4.geetest.com's slide demo, 2026-09-12, ten live attempts:
+   * six of fifty-two requests carried a board with no puzzle in it, every one
+   * came back with the centre of the image as its answer, and the driver
+   * executed one of them — a drag to nowhere that cost the round. One attempt
+   * ended `solver performed no interactions` on a blank board outright.
+   *
+   * BEST-EFFORT, LIKE ITS NEIGHBOURS. On timeout it returns and the caller
+   * screenshots anyway. A gate that can refuse to ever take a picture would
+   * turn a wasted round into a dead solve, and a blank board is a transient:
+   * if it is still blank after the budget, waiting longer does not help.
+   *
+   * Returns how long it waited, so the caller can tell "it was already
+   * painted" (0) from "it painted while we watched" — a settled frame the
+   * classifier banked BEFORE the paint is stale, and must not be reused.
+   */
+  private async waitForBoardPainted(
+    el: ElementHandle,
+    opts?: { pollMs?: number; timeoutMs?: number; floor?: number },
+  ): Promise<{ verdict: 'painted' | 'blank' | 'unknown'; waitedMs: number }> {
+    const pollMs = opts?.pollMs ?? this.config.boardPaintPollMs ?? 180;
+    const timeout = opts?.timeoutMs ?? this.config.boardPaintTimeoutMs ?? 2500;
+    const floor = opts?.floor ?? this.config.boardPaintFloor;
+    const start = Date.now();
+    let saw: 'painted' | 'blank' | 'unknown' = 'unknown';
+    const tmp = () => path.join(
+      os.tmpdir(),
+      `paint_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
+    );
+    for (;;) {
+      const f = tmp();
+      let got = false;
+      try {
+        await el.screenshot({ path: f, timeout: 2500, animations: 'disabled' });
+        got = true;
+      } catch {
+        /* element busy or detaching — treat as a skipped poll, not a verdict */
+      }
+      if (got) {
+        try {
+          const res = await this.runCvTool(
+            'board-painted',
+            floor === undefined ? { image: f } : { image: f, floor },
+            floor === undefined ? ['board-painted', f] : ['board-painted', f, String(floor)],
+          );
+          // `painted: null` is an unreadable image, NOT a blank one. Falling
+          // through on it is right; looping on it would spend the budget every
+          // round on a box the CV tool cannot open at all.
+          if (res && res.painted === true) {
+            saw = 'painted';
+          } else if (res && res.painted === false) {
+            saw = 'blank';
+          } else {
+            saw = 'unknown';
+          }
+        } catch {
+          saw = 'unknown';
+        }
+      }
+      if (fs.existsSync(f)) { try { fs.unlinkSync(f); } catch { /* best-effort */ } }
+      // A FAILED GRAB IS A SKIPPED POLL, NOT A VERDICT. The element is mid-solve
+      // — navigating, detaching, or busy under the solver's own screenshots —
+      // and one miss says nothing about whether the board has painted. Breaking
+      // on it let a single flaky grab wave a blank board straight through.
+      if (got && saw !== 'blank') break;
+      if (Date.now() - start >= timeout) {
+        if (saw === 'blank') {
+          console.log(
+            `[board] the widget never painted a puzzle in ${timeout}ms — `
+            + 'photographing the panel as it is',
+          );
+        }
+        break;
+      }
+      await delay(pollMs);
+    }
+    const waitedMs = Date.now() - start;
+    if (saw === 'painted' && waitedMs >= pollMs) {
+      console.log(`[board] waited ${waitedMs}ms for the widget to paint its puzzle`);
+    }
+    return { verdict: saw, waitedMs };
   }
 
   /**
@@ -3276,11 +3568,18 @@ export class CaptchaKrakenSolver {
     finish: () => Promise<string>;
   } {
     const fps = Math.max(1, this.config.videoBurstFps ?? 10);
-    const durationMs = this.config.videoBurstDurationMs ?? 4000;
-    const floorFrames = Math.max(1, Math.round(durationMs / (1000 / fps)));
-    const ceilingMs = this.config.videoBurstMaxMs ?? 12_000;
-    const total = Math.max(floorFrames, Math.round(ceilingMs / (1000 / fps)));
+    // EVERY WINDOW HERE IS WALL-CLOCK. "Outlasts one full cycle" is a claim
+    // about seconds, and a frame count only carries it while the loop reaches
+    // `fps` — a camera slower than the interval never sleeps, so the window
+    // stretches by however slow it is. Measured on one element, same fixture,
+    // same box: 15.8ms a frame on the desktop browser, 183.5ms through
+    // chromium at a phone's DPR, so a 40-frame window meant 4.0s on one and
+    // 8.3s on the other. Must match `_speculate` in the python port.
+    const floorMs = this.config.videoBurstDurationMs ?? 4000;
+    const ceilingMs = Math.max(floorMs, this.config.videoBurstMaxMs ?? 12_000);
     const intervalMs = 1000 / fps;
+    const t0 = Date.now();
+    const elapsed = () => Date.now() - t0;
     // A burst that runs far past its own length is a hung screenshot, not a
     // tight budget — bounded separately so the two cannot be confused. Mirrors
     // `_record_keyframes` in the python port.
@@ -3290,24 +3589,24 @@ export class CaptchaKrakenSolver {
     const order: string[] = [];        // distinct screens, in first-seen order
     let captured = 0;
     let lastDigest: string | null = null;
-    // Frame index of the most recent NEW screen. A board that has shown
-    // nothing new for a whole floor-length window has SETTLED.
-    let lastNewAt = 0;
-    // Frame index of the most recent CHANGE of any kind — a screen coming back
+    // Elapsed ms at which the most recent NEW screen appeared. A board that has
+    // shown nothing new for a whole floor-length window has SETTLED.
+    let lastNewMs = 0;
+    // Elapsed ms of the most recent CHANGE of any kind — a screen coming back
     // counts here and not above. This is what "has the picture held still"
     // reads, which is the question the separate settle probe used to answer
     // with its own screenshot loop.
-    let lastChangeAt = 0;
+    let lastChangeMs = 0;
     let lastFrame: string | null = null;
     let cycleClosed = false;
     let stopped = false;
     let runToEnd = false;              // set by finish(): keep going past the floor
 
     const loop = (async () => {
-      for (let i = 0; i < total && !stopped; i++) {
+      for (let i = 0; elapsed() < ceilingMs && !stopped; i++) {
         if (Date.now() > hangDeadline) {
           console.warn(
-            `[animated] the recording stalled: ${captured} of ${total} frames in `
+            `[animated] the recording stalled: ${captured} frames in `
             + `${burstHangDeadlineMs(this.config)}ms — the widget is not screenshotting`);
           break;
         }
@@ -3333,13 +3632,13 @@ export class CaptchaKrakenSolver {
           try {
             const d = createHash('sha1').update(fs.readFileSync(frame)).digest('hex');
             if (d !== lastDigest) {
-              lastChangeAt = captured;
+              lastChangeMs = elapsed();
               // A screen already recorded, coming back after another one: the
               // loop has closed and every screen is now in the clip.
               if (order.includes(d) && order.length >= 2) cycleClosed = true;
               else if (!order.includes(d)) {
                 order.push(d);
-                lastNewAt = captured;
+                lastNewMs = elapsed();
               }
               lastDigest = d;
             }
@@ -3350,14 +3649,15 @@ export class CaptchaKrakenSolver {
         // Past the floor and the cycle has closed — anything more is the same
         // screens again, paid for in wall-clock the solve budget needs.
         // A board that never closes a cycle used to have no exit at all: the
-        // loop ran to `total`, so every escalation onto a non-cycling widget
+        // loop ran to the ceiling, so every escalation onto a non-cycling widget
         // filmed the whole videoBurstMaxMs. Mirrors `_record_keyframes` in the
         // python port, which carries the measurement — including why "one
         // screen" is not enough: a board that transitions ONCE and then holds
         // shows two screens, repeats neither, and ran the full ceiling.
-        if (runToEnd && i + 1 >= floorFrames && captured - lastNewAt >= floorFrames) {
+        const elapsedMs = elapsed();
+        if (runToEnd && elapsedMs >= floorMs && elapsedMs - lastNewMs >= floorMs) {
           console.log(
-            `[animated] no new screen for ${(floorFrames * intervalMs / 1000).toFixed(1)}s `
+            `[animated] no new screen for ${(floorMs / 1000).toFixed(1)}s `
             + `(${order.length} seen) — the board has settled; stopping the burst`);
           break;
         }
@@ -3367,18 +3667,18 @@ export class CaptchaKrakenSolver {
         // and it failed every seed either way, so the clip boundary is not what
         // decides that board. Leaving the two original exits (a closed cycle,
         // or settled) rather than adding a third that buys nothing.
-        if (runToEnd && cycleClosed && i + 1 >= floorFrames) {
+        if (runToEnd && cycleClosed && elapsedMs >= floorMs) {
           console.log(
-            `[animated] cycle closed after ${((i + 1) * intervalMs / 1000).toFixed(1)}s `
+            `[animated] cycle closed after ${(elapsedMs / 1000).toFixed(1)}s `
             + `(${order.length} screens); stopping the burst`,
           );
           break;
         }
-        // Drift-corrected: a slow screenshot must not stretch the clip, or the
-        // burst covers more wall-clock than the model trained on and a cycle's
-        // period lands differently across the frames.
+        // Paced, not stretched: a camera already over the interval sleeps for
+        // nothing, and one that would sleep past the ceiling lets the loop
+        // condition end the burst instead of buying a frame it has no room for.
         const wait = intervalMs - (Date.now() - started);
-        if (wait > 0 && i < total - 1) await delay(wait);
+        if (wait > 0 && elapsedMs + wait < ceilingMs) await delay(wait);
       }
     })();
 
@@ -3435,8 +3735,8 @@ export class CaptchaKrakenSolver {
         // threshold can separate "static" from "animated but resting"; the
         // measured holds run 0.44s to 8.2s. Asking, and being ready to throw
         // the answer away, is what covers that gap.
-        const settleWindow = Math.max(2, Math.ceil(
-          ((this.config.settleFrames ?? 2) * (this.config.settlePollMs ?? 220)) / intervalMs));
+        const settleWindowMs = Math.max(2 * intervalMs,
+          (this.config.settleFrames ?? 2) * (this.config.settlePollMs ?? 220));
         const earlyScreens = Math.max(2, this.config.animatedMotionStreak ?? 5);
         let ended = false;
         loop.then(() => { ended = true; }, () => { ended = true; });
@@ -3447,11 +3747,11 @@ export class CaptchaKrakenSolver {
           }
           if (order.length >= earlyScreens) {
             console.log(
-              `[animated] ${order.length} screens in ${(captured * intervalMs / 1000).toFixed(1)}s `
+              `[animated] ${order.length} screens in ${(elapsed() / 1000).toFixed(1)}s `
               + 'and still arriving — recording it');
             return 'animated' as const;
           }
-          if (captured >= settleWindow && captured - lastChangeAt >= settleWindow) {
+          if (elapsed() >= settleWindowMs && elapsed() - lastChangeMs >= settleWindowMs) {
             return 'static' as const;
           }
           if (ended || stopped) {
@@ -3484,10 +3784,11 @@ export class CaptchaKrakenSolver {
         let why = 'a screen came back';
         loop.then(() => { ended = true; }, () => { ended = true; });
         while (!cycleClosed && !ended && !stopped) {
-          if (captured >= floorFrames) {
+          const elapsedMs = elapsed();
+          if (elapsedMs >= floorMs) {
             // Nothing new for a whole floor window: it moved once and stopped.
             // A fade-in, a settle, tower_stack. The still answer stands.
-            if (captured - lastNewAt >= floorFrames) {
+            if (elapsedMs - lastNewMs >= floorMs) {
               why = 'no new screen for a full floor window — it moved once and settled';
               break;
             }
@@ -3505,7 +3806,7 @@ export class CaptchaKrakenSolver {
         const moved = cycleClosed || animating;
         if (!moved && (ended || stopped)) why = ended ? 'the recording ended' : 'abandoned';
         console.log(
-          `[animated] burst verdict after ${(captured * intervalMs / 1000).toFixed(1)}s: `
+          `[animated] burst verdict after ${(elapsed() / 1000).toFixed(1)}s: `
           + `${moved ? 'ANIMATED' : 'still'} (${order.length} screens; ${why})`);
         return moved;
       },
@@ -3543,7 +3844,13 @@ export class CaptchaKrakenSolver {
           e.animated = true;
           throw e;
         }
-        console.log(`[animated] recorded ${captured} frames at ${fps}fps -> ${dir}`);
+        // `captured` is non-zero by the check above, and a 1ms floor keeps a
+        // clock too coarse to have ticked from reporting an infinite rate.
+        const burstMs = Math.max(1, elapsed());
+        this.lastBurstFps = captured / (burstMs / 1000);
+        console.log(
+          `[animated] recorded ${captured} frames in ${(burstMs / 1000).toFixed(1)}s `
+          + `(${this.lastBurstFps.toFixed(1)}fps) -> ${dir}`);
         return dir;
       },
     };
@@ -3573,7 +3880,7 @@ export class CaptchaKrakenSolver {
     const args = [
       '-m', 'captchakraken.cli', 'solve-animated',
       '--frames-dir', framesDir,
-      '--fps', String(this.config.videoBurstFps ?? 10),
+      '--fps', String(this.lastBurstFps ?? this.config.videoBurstFps ?? 10),
       ...(() => {
         const m = this.modelName(cliRoot);
         return m ? ['--model', m] : [];
@@ -3976,6 +4283,25 @@ export class CaptchaKrakenSolver {
    * which finishes it into keyframes or uses it as the speculative film.
    */
   private async classifyByRecording(el: ElementHandle): Promise<'static' | 'animated'> {
+    // ONLY ON A BOARD NOTHING HAS TOUCHED YET — the same precondition
+    // `shouldSpeculate` states, and for the same reason. A recording asks "is
+    // this board moving on its own", and once we have acted it cannot answer
+    // that: a refused answer makes the widget shake, wash and reset, and the
+    // film cannot tell the board's own motion from the feedback to ours.
+    //
+    // Measured 2026-09-12 on GeeTest's slide-popup demo, which is a static drag
+    // puzzle with a slider. Round one classified it correctly as still. Round
+    // two filmed it WHILE THE HANDLE WAS RETURNING from the previous drag, saw
+    // "a screen came back", cut six keyframes out of a puzzle that has none and
+    // solved it from the wrong path — 3/8 live against an 87% one-shot, all
+    // five failures ending "the model returned the same answer 3 times running".
+    //
+    // Nothing is lost by refusing. A board that genuinely animates has already
+    // been latched on round one (`repeatedAnswerSeen`, `animatedPlan`), so
+    // `shouldRetryAsAnimated` carries it forward without re-filming; and a board
+    // that starts animating only after we touch it is the repeated-answer
+    // escalation's job, which films deliberately instead of guessing.
+    if (this.actedOnBoard) return 'static';
     await this.releasePendingBurst();
     const rec = this.startKeyframeBurst(el);
     // Reported as 'settle' because that is the budget line it replaces, and a
@@ -4248,7 +4574,13 @@ export class CaptchaKrakenSolver {
       // self-checking: a widget that turns out not to move slices to a single
       // keyframe and is solved as the still it is, for the price of one burst.
       // page_solver.py makes that argument in `_settle_or_animated`.
-      if (!this.repeatedAnswerSeen && haveAnchor
+      // …AND NOTHING HAS BEEN CLICKED, which this said in its log line and never
+      // checked. After a drag the widget is mid-reset — GeeTest's slider glides
+      // its handle home and re-renders the piece — so the diff below sees our
+      // own gesture finishing and calls a static puzzle animated. That is how a
+      // slide-popup board ended up answered by `abyss-video` from six keyframes
+      // with a CLICK, on a puzzle whose answer is a drag.
+      if (!this.actedOnBoard && !this.repeatedAnswerSeen && haveAnchor
           && await this.captchaFrameChangedSince(
                captchaElement, liveAnchor, MOVED_DURING_INFERENCE_DIFF, 'allow')) {
         this.repeatedAnswerSeen = true;
@@ -4297,7 +4629,7 @@ export class CaptchaKrakenSolver {
         // It used to learn it a round later, from the same answer coming back
         // twice — two still inferences and ~10s of a 40s solve spent
         // rediscovering something the guard had already watched happen.
-        if (++changedDuringInference >= 2) {
+        if (++changedDuringInference >= 2 && !this.actedOnBoard) {
           this.repeatedAnswerSeen = true;
           console.log(
             '[freshness] the frame changed twice during inference with nothing '
@@ -4306,6 +4638,14 @@ export class CaptchaKrakenSolver {
           );
           return { actions: response.actions, token_usage: mergedUsage };
         }
+        // THE BOARD IS MID-REBUILD — THAT IS WHY WE ARE HERE. This guard fires
+        // exactly when the frame changed during inference, and on a vendor that
+        // tears the panel down between rounds the most likely thing to photograph
+        // at that moment is the blank it shows while rebuilding. Measured
+        // 2026-09-12 on the GeeTest slide with the gate on the main screenshot
+        // but not here: 2 of 12 requests were still a board with no puzzle in it,
+        // and BOTH were freshsolve frames.
+        await this.waitForBoardPainted(captchaElement);
         const fresh = path.join(
           os.tmpdir(),
           `freshsolve_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`,
@@ -4319,8 +4659,9 @@ export class CaptchaKrakenSolver {
         this.saveImageForDebug(fresh);
         console.log(
           `[freshness] captcha frame changed during inference `
-          + `(re-solve ${i + 1}/${maxReSolves}); the prior answer was for a stale `
-          + `frame — re-querying on the developed one.`,
+          + `(re-solve ${i + 1}/${maxReSolves}, ${(this.lastFrameDiffRatio * 100).toFixed(2)}% of `
+          + `pixels vs a ${(threshold * 100).toFixed(2)}% line); the prior answer was for a `
+          + `stale frame — re-querying on the developed one.`,
         );
         this.gridDebug('freshness:stale-frame', { reSolve: i + 1, threshold });
         currentPath = fresh;
@@ -4347,6 +4688,10 @@ export class CaptchaKrakenSolver {
    * temp frame. Best-effort: any screenshot/diff failure returns false so the
    * caller acts on the answer it already has rather than spinning.
    */
+  /** How much the last `captchaFrameChangedSince` saw move, for the log line
+   *  that reports why a round re-solved. Diagnostic only. */
+  private lastFrameDiffRatio = 0;
+
   private async captchaFrameChangedSince(
     captchaElement: ElementHandle,
     priorPath: string,
@@ -4364,6 +4709,7 @@ export class CaptchaKrakenSolver {
         { a: priorPath, b: probe, threshold },
         ['check-movement', priorPath, probe, String(threshold)],
       );
+      if (res && typeof res.ratio === 'number') this.lastFrameDiffRatio = res.ratio;
       return !!(res && res.has_movement);
     } catch {
       return false;
@@ -4774,6 +5120,60 @@ export class CaptchaKrakenSolver {
    * match a login form's text box or a carousel's drag handle somewhere else on
    * the document, and the answer would go there.
    */
+  /**
+   * The slider piece's box, or null when the page will not say.
+   *
+   * EVERY match of each selector, not the first. `findControl` takes the first
+   * visible hit, which is right for a handle or a submit button — they are
+   * unique — and wrong for the piece, because the tail of the selector list is
+   * deliberately generic and a vendor may carry the same word on its outer
+   * container. Measured on dun.163.com/trial/jigsaw, 2026-09-13:
+   * `[class*="jigsaw"]` matches TWO elements and the first in document order is
+   *
+   *     div.yidun yidun-custom yidun--light yidun--float …   320x40   the widget
+   *     img.yidun_jigsaw                                      61x160   the piece
+   *
+   * so "first visible match" returned a box five times too wide that never
+   * moves, and the correction loop would have steered by a number that could
+   * not change. Tier 3 cannot see it — there is no Yidun slide fixture — which
+   * is why these selectors are re-checked against the vendor's live widget.
+   *
+   * The size bound is therefore the filter and not a check after the fact: a
+   * piece is a small thing inside a board, and the first candidate that could
+   * BE one wins. Mirrors `_measure_piece_box` in page_solver.py — CLAUDE.md 1c.
+   */
+  private async measurePieceBox(
+    scope: Frame | ElementHandle,
+    widgetWidth: number,
+  ): Promise<{ x: number, y: number, width: number, height: number } | null> {
+    for (const selector of SLIDE_PIECE_MEASURE_SELECTORS) {
+      let found: ElementHandle[] = [];
+      try {
+        found = await scope.$$(selector);
+      } catch {
+        continue;  // a selector this adapter can't parse must not end the search
+      }
+      for (const candidate of found) {
+        try {
+          if (!(await candidate.isVisible())) continue;
+          const b = await candidate.boundingBox();
+          if (!b || b.width <= 0) continue;
+          if (b.width < MIN_PIECE_PX || b.width > widgetWidth * MAX_PIECE_FRACTION) {
+            log(`slider: ${selector} matched a ${b.width.toFixed(0)}px box on a `
+              + `${widgetWidth.toFixed(0)}px widget — too `
+              + `${b.width < MIN_PIECE_PX ? 'small' : 'big'} to be the piece; `
+              + `looking further`);
+            continue;
+          }
+          return b;
+        } catch {
+          // A candidate that vanished mid-read is not the piece either.
+        }
+      }
+    }
+    return null;
+  }
+
   private async findControl(
     scope: Frame | ElementHandle,
     selectors: ReadonlyArray<string>,
@@ -4871,12 +5271,22 @@ export class CaptchaKrakenSolver {
   }
 
   /** `captchakraken track-piece` — box of what moved, handle masked out. */
+  /**
+   * What moved, with the handle masked out: the union box, and — where the CV
+   * can resolve it — the PIECE itself. All in the shot's pixels, null when
+   * nothing moved.
+   *
+   * `travel` is how far the piece is believed to have gone since `beforePath`.
+   * It is what lets the CV tell the piece apart from the ground it vacated
+   * instead of handing back the union of the two; see track_piece.py.
+   */
   private async trackPiece(
     element: ElementHandle,
     beforePath: string,
     afterPath: string,
     exclude: [number, number, number, number],
-  ): Promise<[number, number, number, number] | null> {
+    travel = 0,
+  ): Promise<TrackedPiece | null> {
     try {
       await element.screenshot({
         path: afterPath,
@@ -4885,10 +5295,10 @@ export class CaptchaKrakenSolver {
       });
       const res = await this.runCvTool(
         'track-piece',
-        { before: beforePath, after: afterPath, exclude },
-        ['track-piece', beforePath, afterPath, JSON.stringify(exclude)],
+        { before: beforePath, after: afterPath, exclude, travel },
+        ['track-piece', beforePath, afterPath, JSON.stringify(exclude), String(travel)],
       );
-      return res && res.bbox ? res.bbox : null;
+      return res && res.bbox ? { bbox: res.bbox, piece: res.piece ?? null } : null;
     } catch (e) {
       console.warn('track-piece failed:', e);
       return null;
@@ -4904,11 +5314,17 @@ export class CaptchaKrakenSolver {
    * the widget, and the ratio between the two is a vendor implementation detail
    * that several of them deliberately vary.
    *
-   * So this is closed-loop, not a calculation. Press the handle, nudge it twice
-   * by known amounts, and watch the screen: union(before, after) spans the
+   * So this is aim-then-correct, the way a person does it: one sweep of the
+   * handle at where the piece ought to end up, then a look, then a nudge. The
+   * opening sweep is sized from the distance between the piece and the slot,
+   * which is a 1:1 guess at the ratio — close on every vendor measured, and
+   * wrong in a direction the looks can see.
+   *
+   * Each look measures as well as corrects: union(before, after) spans the
    * piece's ORIGINAL left edge to its CURRENT right edge, so its width is
-   * pieceWidth + ratio x nudge. Two nudges, two widths, two unknowns — solve for
-   * both, then steer the remaining distance and re-measure. The mouse is not
+   * pieceWidth + ratio x travel. One such reading places the piece under the
+   * 1:1 assumption; the second, taken for free at the first correction's
+   * offset, solves the ratio the vendor actually uses. The mouse is not
    * released until the piece is home, because on every one of these puzzles
    * releasing IS the submit; there is no Verify button to reconsider at.
    *
@@ -4970,19 +5386,40 @@ export class CaptchaKrakenSolver {
     const startX = hbox.x + hbox.width / 2;
     const holdY = hbox.y + hbox.height / 2;
 
-    // Mask the whole horizontal BAND the handle runs in, not just where it is
-    // now: it is about to move across that band, and most vendors fill the
-    // track behind it as it goes. Either would otherwise be the largest moving
-    // thing in frame, and we would track the handle instead of the piece.
+    // Mask from the top of the handle's band DOWN TO THE BOTTOM of the widget,
+    // not just the strip the handle itself occupies.
+    //
+    // The handle is not the only thing that moves down there. Most vendors fill
+    // the track behind it, and the filled track is not the same height as the
+    // handle — Tencent's runs several pixels lower. Those few unmasked rows are
+    // enough to ruin the measurement, because the box this feeds is an EXTREME:
+    // one surviving sliver of track at the far left drags the left edge across
+    // the whole widget.
+    //
+    // Measured on a Tencent slide board, handle nudged +24 and +64px, against
+    // a real piece about 42px wide:
+    //
+    //     masked to the handle's band    pieceWidth 135.4px   (3.2x too wide)
+    //     masked to the bottom            pieceWidth  42.0px
+    //
+    // `pieceCentre` is `rightEdge - pieceWidth / 2`, so an over-wide piece puts
+    // the estimate ~47px LEFT of the truth and the loop drives the piece that
+    // much too far right. A GeeTest v4 slider measures 67/101px either way — its
+    // track sits inside the handle's band — so this costs nothing where the old
+    // bound was already enough.
+    //
+    // Safe because the piece is always in the picture ABOVE the rail: a widget
+    // whose piece is dragged directly, with no rail, took the no-handle branch
+    // above and never reaches here.
     const pad = Math.max(4, hbox.height * 0.35);
     const band: [number, number, number, number] = [
       0,
       hbox.y - elementBox.y - pad,
       elementBox.width,
-      hbox.y + hbox.height - elementBox.y + pad,
+      elementBox.height,
     ];
 
-    const shots = Array.from({ length: 4 }, (_, i) =>
+    const shots = Array.from({ length: 2 }, (_, i) =>
       path.join(os.tmpdir(), `slide_${Date.now()}_${i}_${Math.floor(Math.random() * 1e9)}.png`));
     try {
       await this.move(page, handle, { paddingPercentage: 30 });
@@ -5006,44 +5443,98 @@ export class CaptchaKrakenSolver {
       const scale = this.shotScale(shots[0], elementBox.width);
       const exclude = band.map((v) => v * scale) as [number, number, number, number];
 
+      /**
+       * The piece's centre in element CSS px, ASKED OF THE PAGE — null when the
+       * vendor draws it into a canvas and there is no element to ask.
+       *
+       * Read fresh every time rather than once: the whole point is that it is
+       * the live position, and a cached one is exactly the stale estimate this
+       * replaces.
+       */
+      const measurePieceCentre = async (): Promise<number | null> => {
+        const b = await this.measurePieceBox(scope, elementBox.width);
+        if (!b) return null;
+        return b.x + b.width / 2 - elementBox.x;
+      };
+
+      // Where the piece sits before anything moves. The page if it will say;
+      // otherwise the handle's own centre, which is the geometry every one of
+      // these puzzles shares — piece and handle both start flush left, so the
+      // handle's travel is the piece's travel.
+      const restCentre = (await measurePieceCentre()) ?? (startX - elementBox.x);
+
+      // The opening sweep. 1:1, because the ratio cannot be known without
+      // moving something and every vendor measured is within ~15% of it.
+      let offset = targetX - restCentre;
+      await this.performSmoothMove(page, startX + offset, holdY);
+
       const widths: Array<[number, number]> = [];
       let lastBox: [number, number, number, number] | null = null;
-      for (let i = 0; i < SLIDE_PROBE_OFFSETS_PX.length; i++) {
-        const offset = SLIDE_PROBE_OFFSETS_PX[i];
-        await this.performSmoothMove(page, startX + offset, holdY);
+      let lastPiece: { centre: number, width: number } | null = null;
+      let lastCentre: number | null = null;
+      let ratio = 1;
+      let i = 0;
+      for (; i < SLIDE_MAX_CORRECTIONS; i++) {
         await this.human.pause('probe');
-        const box = await this.trackPiece(element, shots[0], shots[i + 1], exclude);
-        if (box) {
-          widths.push([offset, (box[2] - box[0]) / scale]);
-          lastBox = box;
+        // Always diffed against the baseline, never against the previous look:
+        // what this measures is displacement from REST, which is what both
+        // readings below are written in.
+        const seen = await this.trackPiece(element, shots[0], shots[1], exclude,
+          offset * ratio * scale);
+        if (seen) {
+          widths.push([offset, (seen.bbox[2] - seen.bbox[0]) / scale]);
+          lastBox = seen.bbox;
+          lastPiece = seen.piece;
         }
-      }
+        const solved = solveSlideGeometry(widths, elementBox.width);
+        const pieceWidth = solved.pieceWidth;
+        ratio = solved.ratio;
 
-      const { pieceWidth, ratio } = solveSlideGeometry(widths, elementBox.width);
-      if (!lastBox || pieceWidth === null) {
-        // Never saw the piece — a canvas the screenshot cannot separate, a
-        // widget that redraws wholesale, or a press the handle refused. Fall
-        // back on the geometry every one of these puzzles shares: piece and
-        // handle both start flush left, so the handle's travel is the piece's.
-        console.warn('Slider: piece never resolved on screen; steering by handle travel alone.');
-        await this.performSmoothMove(page, startX + (targetX - (startX - elementBox.x)), holdY);
-      } else {
-        // The offset lastBox was MEASURED at — not the final probe, and not
-        // indexed by how many measurements succeeded. If the first probe failed
-        // to resolve and the second worked, those two disagree, and steering
-        // from a base the reading does not belong to sends the piece somewhere
-        // neither the model nor the screen asked for.
-        let offset = widths[widths.length - 1][0];
-        for (let i = 0; i < SLIDE_MAX_CORRECTIONS; i++) {
-          const pieceCentre = lastBox[2] / scale - pieceWidth / 2;
-          const error = targetX - pieceCentre;
-          if (Math.abs(error) <= SLIDE_TOLERANCE_PX) break;
-          offset += error / ratio;
-          await this.performSmoothMove(page, startX + offset, holdY);
-          await this.human.pause('probe');
-          const box = await this.trackPiece(element, shots[0], shots[3], exclude);
-          if (!box) break;  // ran out of track; release where we are
-          lastBox = box;
+        // THE PAGE FIRST; then the piece the diff RESOLVED; and only then the
+        // piece inferred from the union's width, which carries the union's
+        // bias — see locate_piece in track_piece.py.
+        const live = await measurePieceCentre();
+        const pieceCentre = live !== null
+          ? live
+          : lastPiece !== null
+            ? lastPiece.centre / scale
+            : (lastBox && pieceWidth !== null ? lastBox[2] / scale - pieceWidth / 2 : null);
+        if (pieceCentre === null) {
+          // A spinner, a wholesale redraw, a frame that arrived mid-animation.
+          // Look again rather than give up — the pause above is what clears it
+          // — and if none of them resolves, the opening sweep stands, which is
+          // the best open-loop placement there is.
+          continue;
+        }
+
+        lastCentre = pieceCentre;
+        const error = targetX - pieceCentre;
+        const source = live !== null ? 'the piece element'
+          : lastPiece !== null ? 'the pixel diff' : "the diff's union";
+        console.log(
+          `[slide] ${source} puts it at ${Math.round(pieceCentre)}px, `
+          + `want ${Math.round(targetX)}px, ratio ${ratio.toFixed(2)}`,
+        );
+        if (Math.abs(error) <= SLIDE_TOLERANCE_PX) break;
+        offset += error / ratio;
+        await this.performSmoothMove(page, startX + offset, holdY);
+      }
+      if (lastCentre === null) {
+        console.warn(
+          'Slider: the piece never resolved on screen; released where the opening sweep put it.',
+        );
+      } else if (i >= SLIDE_MAX_CORRECTIONS) {
+        // Only when it actually ended off-target. Spending the whole budget is
+        // not itself a fault — the loop stops correcting once it is inside the
+        // notch, and warning on the budget rather than on the RESIDUAL fired on
+        // five of eleven drags that all seated correctly.
+        const settled = await measurePieceCentre();
+        const left = targetX - (settled !== null ? settled : lastCentre);
+        if (Math.abs(left) > SLIDE_TOLERANCE_PX) {
+          console.warn(
+            `[slide] out of corrections with ${left >= 0 ? '+' : ''}${left.toFixed(1)}px `
+            + `still to go — releasing off-target`,
+          );
         }
       }
 

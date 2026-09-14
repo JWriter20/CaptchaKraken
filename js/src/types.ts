@@ -52,7 +52,7 @@ export interface CaptchaKrakenConfig {
   /**
    * How the driver MOVES — a choice of input DEVICE, not a realism dial.
    *
-   *  - `'mouse'`  (default) Bezier arcs, Fitts's-law durations, overshoot.
+   *  - `'mouse'`  (default) trajectories recorded from real people (Cursory).
    *  - `'mobile'` touch events with finger kinematics. On a touch-only widget
    *               this is the difference between the page's handlers firing and
    *               not; a mousemove there is the wrong event, not a weaker one.
@@ -236,6 +236,39 @@ export interface CaptchaKrakenConfig {
    * Default: 8000
    */
   gridLoadTimeoutMs?: number;
+
+  /**
+   * Poll interval (ms) for the board-paint gate — how often the solver
+   * re-screenshots a panel whose middle is still blank.
+   *
+   * Default: 180
+   */
+  boardPaintPollMs?: number;
+
+  /**
+   * How long (ms) to wait for a widget to paint its puzzle before giving up and
+   * photographing whatever is there.
+   *
+   * Bounded on purpose, and short. A blank board is a transient — the rebuild
+   * between rounds — so a board that is STILL blank after this is a board that
+   * is blank for some other reason, and no amount of extra waiting produces a
+   * picture. Proceeding costs one wasted round; refusing to proceed costs the
+   * whole solve.
+   *
+   * Default: 2500
+   */
+  boardPaintTimeoutMs?: number;
+
+  /**
+   * Share of the panel's centre that must carry structure before the board
+   * counts as painted. See `tool_calls/board_painted.py` for what is measured
+   * and why the floor sits where it does; raise it only with the corpus sweep
+   * in hand, because a floor above a real puzzle's density stalls that puzzle
+   * for `boardPaintTimeoutMs` on every single round.
+   *
+   * Default: the engine's own (0.015)
+   */
+  boardPaintFloor?: number;
 
   /**
    * reCAPTCHA 3x3 dynamic puzzles only. After clicking a round of tiles, the

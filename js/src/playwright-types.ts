@@ -63,6 +63,13 @@ export interface PlaywrightElementHandle {
    * boundary that keeps a generic selector off the rest of the document.
    */
   $(selector: string): Promise<PlaywrightElementHandle | null>;
+  /**
+   * EVERY match within this element's subtree. Needed where "the first visible
+   * hit" is the wrong answer: a generic selector can match a vendor's outer
+   * container before the small thing inside it that was meant — see
+   * `measurePieceBox` in solver.ts.
+   */
+  $$(selector: string): Promise<PlaywrightElementHandle[]>;
 }
 
 /**
@@ -71,6 +78,8 @@ export interface PlaywrightElementHandle {
 export interface PlaywrightFrame {
   /** First matching element handle, or null. */
   $(selector: string): Promise<PlaywrightElementHandle | null>;
+  /** Every matching element handle, in document order. */
+  $$(selector: string): Promise<PlaywrightElementHandle[]>;
   /** Wait for a selector to reach the given state; resolves to the handle (or null). */
   waitForSelector(
     selector: string,
