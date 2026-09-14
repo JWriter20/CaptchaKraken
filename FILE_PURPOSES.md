@@ -283,6 +283,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | File | Purpose |
 |---|---|
 | `python/tests/test_a_blank_board_is_not_photographed.py` | The load gate in front of every inference screenshot, and the fences that stop it stalling a legitimately sparse puzzle. |
+| `python/tests/test_a_board_that_never_repeats_is_animated.py` | A continuous animation never repeats and never settles; the burst calls it animated rather than a still. |
 | `python/tests/test_geetest_accept_is_a_signal.py` | GeeTest's accept banner is a solve; its refuse banner, and its closed popup wrapper, are not. |
 | `python/tests/test_a_missing_prompt_is_not_a_reason_to_wait.py` | A readiness gate must not block on an element that is not there — a board with no `.prompt-text` paid the whole timeout, silently, per board. |
 | `python/tests/test_slide_reads_the_piece_off_the_page.py` | The slider prefers the piece element's own box over the pixel diff, and the diff's measured undershoot is pinned as the fallback's known cost. |

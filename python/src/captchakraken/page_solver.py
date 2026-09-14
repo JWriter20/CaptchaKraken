@@ -120,6 +120,11 @@ class _GridSession:
     screenshot_h: int
 
 
+# Mirrors the JS port: past the floor window, this many distinct screens still arriving is an animation
+# even though no screen has come back yet.
+BURST_ANIMATED_SCREENS = 6
+
+
 def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int,
                    motion_streak: int = 0) -> SettleVerdict:
     """The pixel-settle rule over `(elapsed_ms, moved)` polls.
@@ -1026,7 +1031,7 @@ class PageSolver:
             if not self._animated_probe_armed or self._animated_probe_done:
                 return False
             self._animated_probe_done, self._animated_probe_armed = True, False
-            _log("[animated] the same answer came back twice — recording the challenge")
+            _log("[animated] a second look at a board that did not solve as a still — recording it")
         self._known_animated = True
         if not self.config.video_solve_enabled:
             raise AnimatedChallengeError("the challenge never settles and video_solve_enabled is off")
@@ -1047,9 +1052,11 @@ class PageSolver:
     def _burst(self, element: Any) -> Tuple[List[Any], List[str], bool, float]:
         """Film the widget until a screen comes back (a cycle) or nothing new appears for a floor window.
 
-        Returns `(frames, distinct_digests, cycle_closed, elapsed_ms)`. Both bounds are wall-clock. There is no
-        "enough screens, stop" exit: both spellings were measured on number_with_highest_value_video and
-        failed every seed either way.
+        Returns `(frames, distinct_digests, moved, elapsed_ms)`. `moved` is a closed cycle OR a board still
+        producing new screens past the floor with more than BURST_ANIMATED_SCREENS seen: a continuous animation
+        never repeats and never settles, so without that verdict it read as a still and was clicked as one.
+        Both bounds are wall-clock. There is no "enough screens, stop" exit: both spellings were measured on
+        number_with_highest_value_video and failed every seed either way.
         """
         import cv2
 
@@ -1103,7 +1110,17 @@ class PageSolver:
                     time.sleep(wait)
         finally:
             _unlink(shot)
-        return frames, order, cycle_closed, (time.monotonic() - t0) * 1000.0
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        animating = len(order) > BURST_ANIMATED_SCREENS and elapsed_ms - last_new_ms < floor_ms
+        if cycle_closed:
+            why = "a screen came back"
+        elif animating:
+            why = f"{len(order)} screens and still arriving — animating continuously"
+        else:
+            why = "no new screen for a full floor window — it moved once and settled"
+        _log(f"[animated] burst verdict after {elapsed_ms / 1000:.1f}s: "
+             f"{'ANIMATED' if cycle_closed or animating else 'still'} ({len(order)} screens; {why})")
+        return frames, order, cycle_closed or animating, elapsed_ms
 
     def _slice(self, frames: List[Any], burst_ms: float) -> Tuple[List[str], str]:
         """Cut a burst with the training-side slicer; the model answers with a frame number into it."""
@@ -1147,10 +1164,8 @@ class PageSolver:
         try:
             fut = pool.submit(self._get_solution, shot, puzzle_source, retry_mode, text_mode)
             with self._phase(Phase.BURST):
-                frames, order, cycle_closed, burst_ms = self._burst(element)
-            _log(f"[animated] burst verdict after {burst_ms / 1000:.1f}s: "
-                 f"{'CYCLING' if cycle_closed else 'not cycling'} ({len(order)} screens)")
-            if not cycle_closed:
+                frames, order, moved, burst_ms = self._burst(element)
+            if not moved:
                 with self._phase(Phase.INFERENCE):
                     actions, usage = fut.result()
                 if len(order) > 1:
