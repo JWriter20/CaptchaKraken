@@ -35,8 +35,10 @@ The median is challenge-visible to verified: the span from the puzzle appearing
 to the vendor accepting. Page load, the checkbox and the widget's own boot are
 the site's latency, not ours, and are excluded.
 
-Measured **2026-08-19** against **CaptchaKraken v1.2 Twilight**, the model the
-hosted API serves by default.
+Measured **2026-08-19** against **CaptchaKraken v1.2 Twilight**. Abyss has no
+browser figures yet — driving every vendor end to end is a separate run, and a
+column filled in from the static table would be a projection wearing a
+measurement's clothes. The static table below has both.
 
 | Vendor | Puzzle | Solved | Median |
 |---|---|---|---|
@@ -65,7 +67,7 @@ the thing most worth labelling.
 
 ## On static images
 
-The model answering **1,715 real captured puzzles** it has never trained
+Both models answering the same real captured puzzles they have never trained
 on, one screenshot at a time, with no browser involved. Scored the way a widget
 scores: **exact set match**, pass or fail per puzzle, with the vendor's own
 leeway. No partial credit — a partially-correct grid answer is a rejected
@@ -74,64 +76,88 @@ captcha.
 Every real capture is held out; nothing hand-labelled is trained on. These
 measure skill rather than memorisation.
 
-Measured against **CaptchaKraken v1.2 Twilight**. The `n` column is how many
-held-out captures of that puzzle we hold — where it is small, read the rate
-loosely.
+The two columns are one run. The gate scores the model under test and carries
+the pinned baseline's figure for the same capture beside it, so these are the
+same puzzles, the same held-out split and the same solver — which is what makes
+subtracting one column from the other mean anything.
 
-| Vendor | Puzzle | n | Solved |
-|---|---|---|---|
-| BotDetect | Distorted text | 28 | 96% |
-| GeeTest | Canvas puzzle | 74 | 99% |
-| GeeTest | Gobang | 26 | 96% |
-| GeeTest | Slide jigsaw | 23 | 91% |
-| GeeTest | Ordered icon click | 25 | 88% |
-| GeeTest | Icon crush | 24 | 83% |
-| GeeTest | Nine-tile icon grid | 12 | 83% |
-| GeeTest | Slide to fit (v3) | 11 | 73% |
-| Lemin | Cropped image | 11 | 100% |
-| MTCaptcha | Distorted text | 29 | 97% |
-| Prosopo | 3x3 photo grid | 11 | 73% |
-| Tencent | Slide jigsaw | 12 | 92% |
-| Yandex | Distorted text | 23 | 65% |
-| YiDun | Slide jigsaw | 12 | 100% |
-| YiDun | Ordered icon click | 12 | 92% |
-| YiDun | Picture click | 14 | 79% |
-| hCaptcha | Odd shape out | 1 | 100% |
-| hCaptcha | Click on the path | 2 | 100% |
-| hCaptcha | Different-sized pieces | 1 | 100% |
-| hCaptcha | Drag to target | 10 | 100% |
-| hCaptcha | Connect images | 5 | 100% |
-| hCaptcha | Overlapping lines | 2 | 100% |
-| hCaptcha | Rotating object (animated) | 5 | 100% |
-| hCaptcha | Arc match | 3 | 100% |
-| hCaptcha | Tile flip (animated) | 4 | 100% |
-| hCaptcha | Line ends | 23 | 96% |
-| hCaptcha | Click past the lines | 16 | 94% |
-| hCaptcha | 3x3 property grid | 137 | 92% |
-| hCaptcha | Most similar or different | 71 | 86% |
-| hCaptcha | Click items in a grid | 84 | 83% |
-| hCaptcha | Tower stack (animated) | 12 | 83% |
-| hCaptcha | Numbered pieces | 20 | 80% |
-| hCaptcha | List selection | 38 | 76% |
-| hCaptcha | Click by trait | 87 | 76% |
-| hCaptcha | Shape fit | 15 | 73% |
-| hCaptcha | Odd animal (animated) | 10 | 70% |
-| hCaptcha | Highest jumper | 9 | 67% |
-| hCaptcha | Silhouette match | 46 | 65% |
-| hCaptcha | Line pieces | 5 | 60% |
-| hCaptcha | Highest value (animated) | 14 | 57% |
-| hCaptcha | Odd one out (animated) | 2 | 50% |
-| hCaptcha | Drag into slot | 83 | 42% |
-| hCaptcha | Deviating arrow | 12 | 42% |
-| hCaptcha | Connect the path | 58 | 38% |
-| hCaptcha | Parking lot | 3 | 33% |
-| hCaptcha | Missing piece | 24 | 29% |
-| hCaptcha | Spiral gap | 4 | 25% |
-| hCaptcha | Growing item (animated) | 8 | 0% |
-| reCAPTCHA | 3x3 tile grid | 327 | 71% |
-| reCAPTCHA | 4x4 tile grid | 227 | 44% |
+The `n` column is how many held-out captures of that puzzle we hold. Where it is
+small the rate is one or two puzzles wide: a row at n=2 moving 50 points is one
+puzzle changing its mind, not a trend. Read those loosely, and prefer the rows
+with three figures behind them.
 
-**71.8% overall**, weighted by how many captures of each puzzle we hold.
+<!-- BEGIN GENERATED: static-image table -->
+
+Measured **2026-09-11** on **1,436 held-out captures** across **50 puzzle types** — every one we generate, including the ones both models are bad at.
+
+| Vendor | Puzzle | n | CaptchaKraken v1.2 Twilight | CaptchaKraken v1.2 Abyss |
+|---|---|---:|---:|---:|
+| BotDetect | Distorted text | 28 | 93% | 96% |
+| GeeTest v3 | Slide jigsaw (v3) | 11 | 73% | 73% |
+| GeeTest v4 | 3x3 photo grid | 12 | 83% | 83% |
+| GeeTest v4 | Cycling line art | 74 | 97% | 99% |
+| GeeTest v4 | Five-in-a-row board | 26 | 88% | 100% |
+| GeeTest v4 | Match-three swap | 24 | 83% | 92% |
+| GeeTest v4 | Ordered icon click | 25 | 76% | 80% |
+| GeeTest v4 | Slide jigsaw | 23 | 96% | 87% |
+| Lemin | Cropped piece | 11 | 100% | 100% |
+| MTCaptcha | Distorted text | 29 | 97% | 97% |
+| NetEase Yidun | Icon click | 12 | 75% | 92% |
+| NetEase Yidun | Picture click | 14 | 71% | 71% |
+| NetEase Yidun | Slide jigsaw | 12 | 92% | 100% |
+| Prosopo | 3x3 image grid | 11 | 73% | 73% |
+| Tencent | Slide | 12 | 92% | 92% |
+| Yandex | Distorted text | 23 | 61% | 65% |
+| hCaptcha | 3x3 grid by property | 101 | 60% | 92% |
+| hCaptcha | Assemble the line | 5 | 40% | 60% |
+| hCaptcha | Car in the parking bay | 3 | 67% | 33% |
+| hCaptcha | Click along a path | 2 | 50% | 100% |
+| hCaptcha | Click items in a grid | 84 | 87% | 93% |
+| hCaptcha | Connect the path | 50 | 12% | 48% |
+| hCaptcha | Differently sized pieces | 1 | 100% | 100% |
+| hCaptcha | Drag into the missing slot | 83 | 29% | 45% |
+| hCaptcha | Drag the item onto its target | 10 | 100% | 100% |
+| hCaptcha | Find the missing piece | 24 | 33% | 21% |
+| hCaptcha | Gap in the spiral | 4 | 0% | 25% |
+| hCaptcha | Highest jumper | 9 | 0% | 67% |
+| hCaptcha | Highest number (animated) | 14 | 71% | 71% |
+| hCaptcha | Items from a list | 38 | 76% | 79% |
+| hCaptcha | Line joining two pictures | 5 | 100% | 80% |
+| hCaptcha | Match the semicircle | 3 | 67% | 100% |
+| hCaptcha | Match the silhouette | 46 | 39% | 57% |
+| hCaptcha | Most similar or different | 71 | 76% | 82% |
+| hCaptcha | Object crossed by a line | 16 | 25% | 100% |
+| hCaptcha | Odd animal out (animated) | 10 | 70% | 70% |
+| hCaptcha | Odd shape out, 3D blocks | 1 | 100% | 100% |
+| hCaptcha | Order numbered pieces | 20 | 60% | 70% |
+| hCaptcha | Overlapping lines | 2 | 100% | 100% |
+| hCaptcha | Pick the image by trait | 75 | 57% | 76% |
+| hCaptcha | Rotating object (animated) | 5 | 100% | 80% |
+| hCaptcha | Stack the tower | 12 | 33% | 83% |
+| hCaptcha | Tile flip (animated) | 4 | 100% | 100% |
+| hCaptcha | Where the line ends | 23 | 96% | 96% |
+| hCaptcha | Which arrow points away | 12 | 33% | 42% |
+| hCaptcha | Which item grows | 8 | 0% | 0% |
+| hCaptcha | Which one moves differently | 2 | 0% | 50% |
+| hCaptcha | Which piece fits | 15 | 60% | 47% |
+| reCAPTCHA | 3x3 tile grid | 281 | 68% | 67% |
+| reCAPTCHA | 4x4 tile grid | 50 | 44% | 42% |
+
+**65.3% → 74.1% overall**, weighted by how many captures of each puzzle we hold (+8.8% absolute, +14% relative).
+
+Abyss is ahead by ten points or more on **15** of the 50 types and behind by five or more on **6**. Both counts are here because a table that only showed the wins would not be a measurement.
+
+<!-- END GENERATED: static-image table -->
+
+---
+
+## Which model the hosted API serves
+
+The current client asks for **Abyss** by name and is served it. A client old
+enough not to name it, and any request that names no model at all, is served
+**Twilight**. Abyss is not downloadable — its weights are hosted only, and that
+is not a release schedule. Twilight's are public and free to self-host. See
+[licensing.md](./licensing.md).
 
 ---
 
