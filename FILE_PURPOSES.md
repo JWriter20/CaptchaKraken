@@ -84,7 +84,7 @@ answers with a frame number the driver then waits for on screen.
 |---|---|
 | `.github/scripts/mcp-smoke.mjs` | A twenty-line MCP client, so CI can prove the built server actually speaks the protocol: initialize over stdio, then assert `tools/list` comes back non-empty. |
 | `.github/scripts/check-file-purposes.mjs` | The stage-1 gate: compares `git ls-files` against the entries in this file and exits non-zero on drift in either direction — a tracked file with no entry, an entry naming a path that is gone, or a path listed twice. No dependencies, so it runs before anything is installed. |
-| `.github/workflows/ci.yml` | The hermetic gate on every PR into `main` or `dev` — no GPU, no network, no weights: the whole Python suite on 3.10 and 3.12, the TypeScript driver's type-check and `node:test` suite, and the MCP server's build plus the smoke test above. Also reused by `publish.yml`. |
+| `.github/workflows/ci.yml` | The hermetic gate on every PR into `main` or `dev` — no GPU, no network, no weights: the whole Python suite on 3.11 and 3.12, the TypeScript driver's type-check and `node:test` suite, and the MCP server's build plus the smoke test above. Also reused by `publish.yml`. |
 | `.github/workflows/promote.yml` | The required check that `main` only ever takes a pull request from this repository's own `dev` branch. Branch protection cannot express which branch may be the *source* of a merge, so it lives here. |
 | `.github/workflows/publish.yml` | On a push to `main`: run the CI gate, then publish both ports and the MCP server at the version in their own manifests. Tokenless via OIDC trusted publishing, and idempotent — a version already on the registry is skipped, not failed. |
 | `.github/workflows/tier3-request.yml` | Asks the repository named by the `GATE_REPO` variable to run the Tier 3 driver gate against this pull request's exact commit, and to post a redacted result back: the `tier3/driver-gate` commit status plus a comment with per-port and per-vendor pass rates. The fixtures are not in this repo, so the gate is not run here. |
@@ -273,7 +273,7 @@ something every browser-driver install should pay for.
 
 ### `python/tests/`
 
-The whole suite is hermetic and runs on every PR, on Python 3.10 and 3.12.
+The whole suite is hermetic and runs on every PR, on Python 3.11 and 3.12.
 Files named for a behaviour are regressions: the bug each describes actually
 happened. There is no `conftest.py`: nothing here needs a fixture that
 `pyproject.toml` does not already provide.

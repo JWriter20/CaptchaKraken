@@ -277,6 +277,17 @@ detail. Every other pin was re-checked against 3.10 the same way, and the full
 suite now runs green on real 3.10.20 and 3.12.13 interpreters before the pins
 are believed.
 
+REVERSED IN 3.0.0, and the reasoning above is why it took a major version to do
+it. The floor is now 3.11. `cursory` — the recorded-trajectory mouse — declares
+`Requires-Python >=3.11` and requires `numpy~=2.3.3`, which declares the same,
+so 3.10 could not be kept by choosing a different pin: there is no version of
+either that runs there. Dropping a promised platform is a breaking change, which
+is exactly what a major version is for, and 3.10 reaches end of life in October
+2026. The rule itself is unchanged and still the one that matters — resolve
+against the floor `requires-python` promises, whatever that floor currently is.
+CI's legs moved to 3.11 and 3.12 in the same commit, because a floor nothing
+tests is not a floor.
+
 **The map tool is pinned above the repo's own Node floor, deliberately.** The
 packages and CI run Node 20; `repomix` needs 22 from 1.14.1 onward. Every
 repomix that runs on Node 20 is covered by an unpatched command-injection

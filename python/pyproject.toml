@@ -7,7 +7,7 @@ name = "captchakraken"
 version = "3.0.0"
 description = "Captcha-solving engine and CLI: OpenCV grid detection plus a fine-tuned Qwen3.5-9B vision model, for image grids, click and drag puzzles, sliders, distorted text and animated challenges. Hosted API or self-hosted on vLLM."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # Source-available, NOT GPL. The CaptchaKraken Source-Available License permits
 # commercial use as an internal component but prohibits selling the solve itself,
 # thin-wrapper resale, and bundling it into a stealth browser someone else ships
@@ -23,7 +23,6 @@ classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -44,10 +43,14 @@ classifiers = [
 #
 # EVERY PIN MUST INSTALL ON `requires-python`'s FLOOR, not on the newest
 # interpreter that happens to be on your machine. numpy 2.5.3 was pinned here
-# from a 3.14 box and broke the 3.10 leg outright — it declares
-# `Requires-Python >=3.12`, so pip could not find it at all. 2.2.6 is the newest
-# numpy that still covers 3.10. Resolve against 3.10 before changing any of
-# these, and see TRIBAL_KNOWLEDGE.md.
+# from a 3.14 box and broke the then-3.10 leg outright — it declares
+# `Requires-Python >=3.12`, so pip could not find it at all.
+#
+# The floor is 3.11 as of 3.0.0, and it moved because the MOUSE moved: `cursory`
+# declares `Requires-Python >=3.11` and drags numpy 2.3.x with it, which declares
+# the same. Neither is a pin we could have chosen differently — 2.2.6 was the
+# newest numpy covering 3.10, and cursory does not run there at all. Resolve
+# against the floor before changing any of these, and see TRIBAL_KNOWLEDGE.md.
 dependencies = [
   "pydantic==2.13.5",
   "pillow==12.3.0",
@@ -124,12 +127,12 @@ precision = 2
 #
 # 53 -> 58: dead code removed (the denominator shrank) plus behaviour tests on
 # the overlay, the checkbox detector, the wait-gate metric, the CLI wire format
-# and the worker protocol. Measured 58.33% on 3.10 and 58.31% on 3.12; the floor
+# and the worker protocol. Measured 58.33% on 3.11 and 58.31% on 3.12; the floor
 # is the lower, rounded down.
 fail_under = 58
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = false
 warn_unused_configs = true
 disallow_untyped_defs = false

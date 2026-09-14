@@ -277,7 +277,7 @@ export CAPTCHA_KRAKEN_API_KEY=your-server-key
 
 ### Then install the client and solve
 
-Same for every option above. Python needs 3.10+; neither package installs a
+Same for every option above. Python needs 3.11+; neither package installs a
 browser, so bring your own.
 
 ```bash

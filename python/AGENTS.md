@@ -36,7 +36,7 @@ pip install captchakraken            # the client: grid detection + planner + CL
 pip install "captchakraken[serve]"   # ...and the vLLM serving stack, to host it
 ```
 
-Python 3.10+.
+Python 3.11+.
 
 ## 3. Solve
 

@@ -175,12 +175,12 @@ Every dependency in all four manifests is pinned to an exact version, and CI
 installs from the lockfiles with `npm ci`. Changing a version is a reviewed
 change, never a side effect of installing.
 
-**A Python pin has to install on 3.10**, which is what `requires-python`
+**A Python pin has to install on 3.11**, which is what `requires-python`
 promises — not merely on whatever interpreter you have. Resolve against the
 floor before changing one:
 
 ```bash
-uv venv --python 3.10 /tmp/ck310 && VIRTUAL_ENV=/tmp/ck310 uv pip install -e "python[dev]"
+uv venv --python 3.11 /tmp/ck311 && VIRTUAL_ENV=/tmp/ck311 uv pip install -e "python[dev]"
 ```
 
 The `js` package ships **no browser** — it types its public API against an
@@ -205,7 +205,7 @@ spend a test run discovering it.
 run locally:
 
 ```bash
-# Python: the whole suite, on 3.10 and 3.12 in CI
+# Python: the whole suite, on 3.11 and 3.12 in CI
 cd python && python -m pytest -q
 
 # TypeScript driver: type-check, then the node:test suite

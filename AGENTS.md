@@ -190,7 +190,7 @@ npm install captchakraken     # TypeScript: browser driver
 pip install captchakraken     # Python: engine + `captchakraken` CLI
 ```
 
-Python needs 3.10 or newer. Neither package installs a browser — you bring your
+Python needs 3.11 or newer. Neither package installs a browser — you bring your
 own (Playwright, Patchright, camoufox, or Puppeteer).
 
 ---

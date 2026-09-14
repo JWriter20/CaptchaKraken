@@ -5,6 +5,16 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ## [Unreleased]
 
+### Removed
+
+- **Python 3.10 is no longer supported.** `requires-python` is now `>=3.11`.
+  This is the breaking half of the mouse change rather than a pinning detail:
+  `cursory` declares `Requires-Python >=3.11` and requires `numpy~=2.3.3`, which
+  declares the same, so 3.10 could not be kept by choosing different pins —
+  there is no version of either that runs there. 3.10 reaches end of life in
+  October 2026. If you are on it, stay on 2.10.x until you can move; the two
+  clients are otherwise unchanged in what they ask of you.
+
 ### Changed
 
 - **The mouse now moves like a recording, not like a curve.** `mouse` device
