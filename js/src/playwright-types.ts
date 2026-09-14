@@ -73,6 +73,9 @@ export interface PlaywrightPage {
 
   viewportSize(): ViewportSize | null;
 
+  /** Optional: the mouse humanizer asks the window for its size when `viewportSize()` is null (camoufox). */
+  evaluate?<R>(pageFunction: () => R): Promise<R>;
+
   context?(): { newCDPSession(page: PlaywrightPage): Promise<any> };
 
   touchscreen?: {

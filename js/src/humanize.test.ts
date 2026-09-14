@@ -286,3 +286,39 @@ test('the factory hands the backend its page', async () => {
 
 
 
+
+// camoufox opens its context with `viewport: null`, so `viewportSize()` is null and the window must be asked instead.
+// Clamping to a guessed 1920x1080 pinned coordinates to an edge that was not there and deadlocked its juggler (upstream #225).
+class NoViewportPage extends RecordingPage {
+  inner: { width: number; height: number } | null = null;
+  viewportSize() { return null as unknown as { width: number; height: number }; }
+  evaluate<R>(fn: () => R): Promise<R> {
+    if (!this.inner) return Promise.reject(new Error('no window'));
+    return Promise.resolve(this.inner as unknown as R);
+  }
+  moves() { return this.events.filter((e) => e[0] === 'move').map((e) => [e[1], e[2]] as [number, number]); }
+}
+
+test('no viewport and no window means no clamp at all', async () => {
+  const page = new NoViewportPage();
+  await new MouseHumanizer([10, 10], 1000).move(page.asPage(), [3000, 50]);
+  const last = page.moves()[page.moves().length - 1];
+  assert.deepEqual(last, [3000, 50], 'the path must reach its target, not a guessed 1920 edge');
+});
+
+test('no viewport but a window clamps to the window, like Python', async () => {
+  const page = new NoViewportPage();
+  page.inner = { width: 1366, height: 768 };
+  await new MouseHumanizer([10, 10], 1000).move(page.asPage(), [3000, 50]);
+  for (const [x, y] of page.moves()) {
+    assert.ok(x >= 1 && x <= 1365 && y >= 1 && y <= 767, `(${x}, ${y}) left the 1366x768 window`);
+  }
+  assert.deepEqual(page.moves()[page.moves().length - 1], [1365, 50]);
+});
+
+test('a known viewport clamps to one pixel inside its edge', async () => {
+  const page = new RecordingPage();
+  await new MouseHumanizer([10, 10], 1000).move(page.asPage(), [3000, 50]);
+  const moves = page.events.filter((e) => e[0] === 'move'); const last = moves[moves.length - 1];
+  assert.deepEqual([last[1], last[2]], [799, 50]);
+});

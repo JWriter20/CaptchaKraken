@@ -11,7 +11,7 @@
  * motionless tap is a synthetic one.
  */
 
-import type { Page, PlaywrightElementHandle } from './playwright-types.js';
+import type { ViewportSize, Page, PlaywrightElementHandle } from './playwright-types.js';
 import { generateTrajectory } from 'cursory-js';
 import { HumanizationMode, PauseKind, isOneOf } from './kinds.js';
 export type { HumanizationMode, PauseKind } from './kinds.js';
@@ -107,25 +107,41 @@ export class MouseHumanizer extends BaseHumanizer {
     probe: [40, 80], settle: [90, 210], key: [45, 135],
   };
   private frequency: number;
+  private viewportCache: ViewportSize | null | undefined;
 
   constructor(start: Point = [0, 0], frequency = 60) {
     super(start);
     this.frequency = frequency;
   }
 
+  async reset(_page: Page): Promise<void> { this.viewportCache = undefined; }
+
+  /** The window to keep the cursor inside; null under camoufox, which reports no viewport and whose window we ask instead. */
+  private async viewport(page: Page): Promise<ViewportSize | null> {
+    if (this.viewportCache !== undefined) return this.viewportCache;
+    this.viewportCache = null;
+    const reads: Array<() => ViewportSize | null | Promise<ViewportSize | null>> = [
+      () => page.viewportSize(),
+      () => page.evaluate ? page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })) : null,
+    ];
+    for (const read of reads) {
+      try {
+        const vp = await read();
+        if (vp && vp.width && vp.height) { this.viewportCache = { width: vp.width, height: vp.height }; break; }
+      } catch { /* try the next read */ }
+    }
+    return this.viewportCache;
+  }
+
   async move(page: Page, to: Point): Promise<void> {
     if (samePoint(this.at, to)) return;
     const [points, timings] = trajectory(this.at, to, this.frequency);
-    // KNOWN DIVERGENCE from the Python port, which clamps only when the viewport is known: camoufox reports
-    // null, and clamping to a guessed edge deadlocks its juggler (upstream #225). Worth its own fix and test.
-    let viewport = { width: 1920, height: 1080 };
-    try {
-      viewport = page.viewportSize() ?? viewport;
-    } catch { /* keep the default */ }
+    // Clamp only when the viewport is known: a coordinate pinned to the edge of a guessed one deadlocks camoufox's juggler (upstream #225).
+    const viewport = await this.viewport(page);
     const startTime = Date.now();
     for (let i = 0; i < points.length; i++) {
-      const cx = Math.max(0, Math.min(points[i][0], viewport.width));
-      const cy = Math.max(0, Math.min(points[i][1], viewport.height));
+      const cx = viewport ? Math.max(1, Math.min(points[i][0], viewport.width - 1)) : points[i][0];
+      const cy = viewport ? Math.max(1, Math.min(points[i][1], viewport.height - 1)) : points[i][1];
       try {
         await page.mouse.move(cx, cy);
       } catch (e) {

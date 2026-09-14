@@ -40,6 +40,7 @@ interface PuppeteerPage {
   };
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   viewport(): ViewportSize | null;
+  evaluate<R>(pageFunction: () => R): Promise<R>;
   $(selector: string): Promise<PuppeteerElementHandle | null>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
   $eval(selector: string, pageFunction: (element: Element) => any, ...args: any[]): Promise<any>;
@@ -111,6 +112,7 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     waitForSelector: async (selector, options) =>
       wrapHandle(await page.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
     viewportSize: () => page.viewport(),
+    evaluate: (pageFunction) => page.evaluate(pageFunction),
     $: async (selector) => wrapHandle(await page.$(selector)),
     $$: async (selector) => (await page.$$(selector)).map((h) => wrapHandle(h)!).filter(Boolean),
     $eval: (selector, pageFunction, arg) => page.$eval(selector, pageFunction as any, arg),

@@ -115,6 +115,14 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
+- **The JS mouse no longer guesses a 1920x1080 window under camoufox.** camoufox
+  opens its context with `viewport: null`, so `viewportSize()` is null; the
+  driver now asks the window for `innerWidth`/`innerHeight` and clamps the
+  path only when it knows the edge, exactly as the Python port does. A
+  coordinate pinned to a guessed edge is what deadlocked camoufox's mouse
+  (upstream #225). `PlaywrightPage` gains an optional `evaluate`, forwarded by
+  the Puppeteer adapter.
+
 - **A burst now lasts `videoBurstDurationMs`, not that many frames.** Both
   clients decide "is this board animating?" by watching it for a window long
   enough to outlast one cycle's dwell — a window in milliseconds, which both

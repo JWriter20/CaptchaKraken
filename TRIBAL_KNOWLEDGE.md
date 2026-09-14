@@ -335,7 +335,12 @@ the wrong event type, the page's touch handlers never fire, and the report
 reads as a model that cannot solve mobile puzzles. Mode precedence is code,
 then env, then mouse, the opposite of the model-identity settings, because an
 env var flipping a desktop solve to touch dispatch would break every one
-silently. Typing is per character with a drawn delay, never `type(text,
+silently. Both mouse humanizers clamp the path to the window only when they
+know the window: camoufox opens its context with `viewport: null`, so
+`viewportSize()` is null and the window is asked for `innerWidth`/`innerHeight`
+instead; a coordinate pinned to the edge of a guessed 1920x1080 is what
+deadlocked its juggler (upstream #225), and the JS port carried that guess until
+2026-09-14. Typing is per character with a drawn delay, never `type(text,
 {delay})` or `fill()`: a constant inter-key delay is itself a signal and these
 are the vendors that score typing cadence.
 
@@ -841,9 +846,3 @@ requires `numpy~=2.3.3` and the old pin was OURS — opencv asks only for
 extra (vLLM self-hosting) and is never imported by the solver. And the JS client
 gains its FIRST runtime dependency; it had none, which was a real property of a
 package meant to be embedded, and it is worth knowing that it is gone.
-
-**The JS mouse viewport fallback diverges from Python.** The JS port clamps to
-`{1920, 1080}` when the viewport is unreadable; Python clamps only when the
-viewport is known, because camoufox reports null and clamping to a guessed edge
-deadlocks its juggler (upstream #225). Worth fixing on its own, with its own
-test.
