@@ -1,3 +1,4 @@
+// Humanisation is an input device, not a realism dial: the env var must not flip the mode, W3C touch state is per session, and an unmeasurable scale is refused because it fails silently.
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 

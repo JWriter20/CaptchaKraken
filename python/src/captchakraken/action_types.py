@@ -2,6 +2,8 @@ from typing import List, Literal, Optional, Union, Tuple
 
 from pydantic import BaseModel, RootModel
 
+from .kinds import ActionKind
+
 
 class BoundingBox(RootModel):
     root: Tuple[float, float, float, float]
@@ -17,35 +19,37 @@ class BoundingBox(RootModel):
 
 
 class Action(BaseModel):
-    action: str
+    action: ActionKind
     await_keyframe: Optional[str] = None
     frame: Optional[int] = None
 
 
 class ClickAction(Action):
-    action: Literal["click"]
+    action: Literal[ActionKind.CLICK]
     target_bounding_boxes: List[BoundingBox]
 
 
 class DragAction(Action):
-    action: Literal["drag"]
+    action: Literal[ActionKind.DRAG]
+    # `Optional[...] = None`, never a bare `BoundingBox = None`: pydantic validates a passed value even when it
+    # equals the default, and the bare form made every slide (a drag with no source) raise ValidationError.
     source_bounding_box: Optional[BoundingBox] = None
     target_bounding_box: Optional[BoundingBox] = None
 
 
 class TypeAction(Action):
-    action: Literal["type"]
+    action: Literal[ActionKind.TYPE]
     text: str
     target_bounding_box: Optional[BoundingBox] = None
 
 
 class WaitAction(Action):
-    action: Literal["wait"]
+    action: Literal[ActionKind.WAIT]
     duration_ms: int
 
 
 class DoneAction(Action):
-    action: Literal["done"]
+    action: Literal[ActionKind.DONE]
 
 
 CaptchaAction = Union[ClickAction, DragAction, TypeAction, WaitAction, DoneAction]

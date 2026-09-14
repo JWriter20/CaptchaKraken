@@ -1,3 +1,5 @@
+"""The watcher's loop contract against a fake solver; twin of js/src/watcher.test.ts, driven with a timeout because this port blocks."""
+
 from __future__ import annotations
 
 import sys
@@ -117,6 +119,7 @@ def test_a_failing_solve_backs_off_instead_of_hot_looping() -> None:
 
 
 def test_an_idle_tick_does_not_pay_the_error_backoff() -> None:
+    """If 'no captcha' counted as a failure the first tick would sleep five seconds; the (result, failed) split exists for this."""
     solver = FakeSolver(detect=None)
     w = watcher(solver, FakePage(), interval_ms=1, error_backoff_ms=5000)
 
@@ -185,6 +188,7 @@ def test_a_throwing_callback_does_not_stop_the_watcher() -> None:
 
 
 def test_keyboard_interrupt_propagates() -> None:
+    """Ctrl-C during a solve must reach the caller, not be swallowed as an error."""
 
     def interrupt(_: Any) -> Any:
         raise KeyboardInterrupt

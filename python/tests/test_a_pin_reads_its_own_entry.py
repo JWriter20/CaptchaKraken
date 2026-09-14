@@ -1,3 +1,5 @@
+"""A pin once read base and lora_name off `latest`, downloaded a 9B base for a 27B adapter and failed inside vLLM as a shape mismatch. An unregistered pin still falls back to `latest`; the endpoint is pinned here because base_url() falls through to the credentials file."""
+
 import pytest
 
 from captchakraken import config, prompts

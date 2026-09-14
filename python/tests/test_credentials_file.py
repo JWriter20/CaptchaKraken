@@ -1,3 +1,5 @@
+"""Env wins over the file, and a bare token carries no endpoint: it would hijack a self-hoster who hand-wrote a local key here. The first bare line is the token."""
+
 import pytest
 
 from captchakraken import config

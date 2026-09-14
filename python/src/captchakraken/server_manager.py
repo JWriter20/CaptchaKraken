@@ -43,6 +43,7 @@ def is_healthy(base_url: str, timeout: float = 2.0) -> bool:
 
 
 def _vllm_bin() -> "str | None":
+    """Next to the current interpreter first: the JS driver invokes the venv python without its bin on PATH."""
     sibling = os.path.join(os.path.dirname(sys.executable), "vllm")
     if os.path.exists(sibling) and os.access(sibling, os.X_OK):
         return sibling
@@ -69,6 +70,7 @@ def build_serve_command() -> "list[str]":
     return [
         _vllm_bin() or "vllm", "serve", config.base_model(),
         "--reasoning-parser", "qwen3",
+        # REQUIRED: without it vLLM silently drops the vision-tower half of the LoRA and grid accuracy collapses.
         "--enable-lora", "--enable-tower-connector-lora",
         "--max-lora-rank", str(config.max_lora_rank()),
         "--max-model-len", str(config.max_model_len()),
@@ -83,6 +85,7 @@ def build_serve_command() -> "list[str]":
 def _serve_env() -> dict:
     env = dict(os.environ)
     key = config.api_key()
+    # Only forward a real key; api_key() falls back to "EMPTY", which would lock vLLM to a placeholder.
     if key and key != "EMPTY":
         env["VLLM_API_KEY"] = key
     return env
@@ -128,6 +131,7 @@ def _wait_healthy(base_url: str, timeout: float) -> bool:
 def ensure_server(base_url: "str | None" = None) -> None:
     base_url = base_url or config.base_url()
 
+    # Remote first: /health against a hosted gateway that serves none costs up to 2s, once per ActionPlanner.
     if not is_local(base_url):
         return
     if is_healthy(base_url):
@@ -136,6 +140,7 @@ def ensure_server(base_url: "str | None" = None) -> None:
         return
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # Two solves racing on first use must not both spawn a server; re-check under the lock.
     lock = _FileLock(LOCK_FILE)
     with lock:
         if is_healthy(base_url):

@@ -1,3 +1,5 @@
+"""A Verify press is an interaction: a `done` round that returned False paid a flat post_solve_delay sleep and then aborted as "performed no interactions". The grid-load wait was paid twice (2148ms x2). The round-cap exit must still report none."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List

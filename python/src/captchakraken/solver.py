@@ -10,16 +10,20 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 from PIL import Image
 
 from .action_types import CaptchaAction, ClickAction, DoneAction, DragAction, TypeAction, WaitAction
+from .kinds import ActionKind, PixelAnswerKind, PromptFamily, RetryMode, Vendor
 from .planner import ActionPlanner
 from .tool_calls.find_checkbox import find_checkbox
 from .tool_calls.find_grid import detect_selected_cells, find_grid, get_numbered_grid_overlay
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
+# ~1.2% ≈ ±6px on a 512px challenge.
 _PIXEL_BOX_HALF = float(os.getenv("CAPTCHA_PIXEL_BOX_HALF", "0.012"))
 
-# The only cell counts a trained grid puzzle has, and which of them each named vendor ships.
+# The only cell counts a trained grid puzzle has, and which of them each named vendor ships. UNKNOWN stays
+# permissive in both directions: the driver reports it for GeeTest and Prosopo, and the offline grader defaults
+# to it, so narrowing it would silently stop scoring reCAPTCHA 4x4 in evaluation.
 GRID_CELL_SHAPES = {9: (3, 3), 16: (4, 4)}
-VENDOR_GRID_CELLS = {"hcaptcha": frozenset({9}), "recaptcha": frozenset({9, 16})}
+VENDOR_GRID_CELLS: dict[Vendor, frozenset[int]] = {Vendor.HCAPTCHA: frozenset({9}), Vendor.RECAPTCHA: frozenset({9, 16})}
 # Every true grid measures 0.000 cells out of true; the nearest false lattice measured 0.128.
 _GRID_REGULARITY_TOL = 0.02
 
@@ -53,15 +57,15 @@ def _lattice_irregularity(grid_boxes) -> Optional[float]:
     return max(row_skew, col_skew, size_spread)
 
 
-def _grid_dims(n_cells, puzzle_source="unknown"):
+def _grid_dims(n_cells: int, puzzle_source: Vendor = Vendor.UNKNOWN):
     shape = GRID_CELL_SHAPES.get(n_cells)
-    allowed = VENDOR_GRID_CELLS.get(puzzle_source)
+    allowed = VENDOR_GRID_CELLS.get(Vendor(puzzle_source))
     return None if shape is None or (allowed is not None and n_cells not in allowed) else shape
 
 
 class CaptchaSolver:
     def __init__(self, model: Optional[str] = None, provider: str = "captchaKrakenApi",
-                 api_key: Optional[str] = None, expert: Optional[str] = None):
+                 api_key: Optional[str] = None, expert: Optional[PromptFamily] = None):
         self.planner = ActionPlanner(model=model, api_key=api_key, expert=expert)
         self._image_size: Optional[Tuple[int, int]] = None
         self._temp_files: List[str] = []
@@ -73,8 +77,10 @@ class CaptchaSolver:
             except OSError:
                 pass
 
-    def solve(self, media_path: str, instruction: str = "", puzzle_source: str = "unknown",
-              retry_mode: Optional[str] = None, text_mode: bool = False) -> Union[CaptchaAction, List[CaptchaAction]]:
+    def solve(self, media_path: str, instruction: str = "", puzzle_source: Vendor = Vendor.UNKNOWN,
+              retry_mode: Optional[RetryMode] = None, text_mode: bool = False) -> Union[CaptchaAction, List[CaptchaAction]]:
+        # String defaults stay: the public signature is pinned by contract.json. A bad value raises here.
+        puzzle_source, retry_mode = Vendor(puzzle_source), None if retry_mode is None else RetryMode(retry_mode)
         media_path = str(Path(media_path).resolve())
         if not os.path.exists(media_path):
             raise FileNotFoundError(f"Media not found: {media_path}")
@@ -91,6 +97,7 @@ class CaptchaSolver:
                 return actions
             raise UnsupportedCaptchaError("Could not read the text captcha")
 
+        # The animated path never runs find_grid: it false-positives on the header and footer bands of hCaptcha's click puzzles.
         grid_boxes = find_grid(image_path)
         dims = _grid_dims(len(grid_boxes), puzzle_source) if grid_boxes else None
         if grid_boxes and dims and self._is_real_grid(image_path, grid_boxes):
@@ -102,7 +109,7 @@ class CaptchaSolver:
             checkbox = find_checkbox(image_path)
             if checkbox:
                 x, y, w, h = checkbox
-                return ClickAction(action="click",
+                return ClickAction(action=ActionKind.CLICK,
                                    target_bounding_boxes=[[x / img_w, y / img_h, (x + w) / img_w, (y + h) / img_h]])
 
         actions = self._solve_pixel(image_path)
@@ -134,6 +141,7 @@ class CaptchaSolver:
             return [min(max(v, 0.0), 1.0) for v in (cx - r, cy - r, cx + r, cy + r)]
 
         def wait_for(a: dict) -> dict:
+            # An out-of-range frame is dropped, not clamped: clamping a 7 to 6 would invent an intent.
             frame = a.get("frame")
             if not keyframe_paths or not isinstance(frame, int) or not 1 <= frame <= len(keyframe_paths):
                 return {}
@@ -141,17 +149,17 @@ class CaptchaSolver:
 
         out: List[Union[ClickAction, DragAction]] = []
         for a in raw_actions:
-            kind = a.get("kind")
-            if kind == "click":
+            kind = PixelAnswerKind(a["kind"])
+            if kind == PixelAnswerKind.CLICK:
                 boxes = [box(x, y) for (x, y) in a.get("points", [])]
                 if boxes:
-                    out.append(ClickAction(action="click", target_bounding_boxes=boxes, **wait_for(a)))
-            elif kind in ("drag", "slide"):
-                src = box(*a["src"]) if kind == "drag" else None
-                out.append(DragAction(action="drag", source_bounding_box=src,
+                    out.append(ClickAction(action=ActionKind.CLICK, target_bounding_boxes=boxes, **wait_for(a)))
+            elif kind in (PixelAnswerKind.DRAG, PixelAnswerKind.SLIDE):
+                src = box(*a["src"]) if kind == PixelAnswerKind.DRAG else None
+                out.append(DragAction(action=ActionKind.DRAG, source_bounding_box=src,
                                       target_bounding_box=box(*a["dst"]), **wait_for(a)))
-            elif kind == "type":
-                out.append(TypeAction(action="type", text=a["text"]))
+            elif kind == PixelAnswerKind.TYPE:
+                out.append(TypeAction(action=ActionKind.TYPE, text=a["text"]))
         return out
 
     def solveVideo(self, *args, **kwargs):
@@ -206,7 +214,7 @@ class CaptchaSolver:
             return True
 
     def _solve_grid(self, image_path: str, grid_boxes: List[Tuple[int, int, int, int]], rows: int, cols: int,
-                    retry_mode: Optional[str] = None) -> Union[ClickAction, DoneAction, WaitAction]:
+                    retry_mode: Optional[RetryMode] = None) -> Union[ClickAction, DoneAction, WaitAction]:
         try:
             cv_selected, cv_loading = detect_selected_cells(image_path, grid_boxes)
         except Exception as e:
@@ -229,13 +237,15 @@ class CaptchaSolver:
             if 1 <= v <= len(grid_boxes) and v not in cv_selected and v not in cv_loading:
                 final.append(v)
         if not final:
-            return WaitAction(action="wait", duration_ms=1000) if cv_loading else DoneAction(action="done")
+            return WaitAction(action=ActionKind.WAIT, duration_ms=1000) if cv_loading else DoneAction(action=ActionKind.DONE)
         img_w, img_h = self._image_size
-        return ClickAction(action="click", target_bounding_boxes=[
+        return ClickAction(action=ActionKind.CLICK, target_bounding_boxes=[
             [x1 / img_w, y1 / img_h, x2 / img_w, y2 / img_h] for (x1, y1, x2, y2) in (grid_boxes[v - 1] for v in final)])
 
 
-def solve_captcha(media_path: str, instruction: str = "", *, puzzle_source: str = "unknown",
-                  retry_mode: Optional[str] = None, text_mode: bool = False, **kwargs: Any) -> Any:
+def solve_captcha(media_path: str, instruction: str = "", *, puzzle_source: Vendor = Vendor.UNKNOWN,
+                  retry_mode: Optional[RetryMode] = None, text_mode: bool = False, **kwargs: Any) -> Any:
+    # Solve arguments are spelled out because `**kwargs` go to the constructor: `text_mode=True` once raised
+    # TypeError there, which made a static distorted-text image unsolvable through the public entry point.
     return CaptchaSolver(**kwargs).solve(media_path, instruction, puzzle_source=puzzle_source,
                                          retry_mode=retry_mode, text_mode=text_mode)

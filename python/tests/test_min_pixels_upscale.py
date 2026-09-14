@@ -1,3 +1,5 @@
+"""Measured: predictions 80-105px out at native size against 1-4px once upscaled. A flat band (min == max) normalises every image by design; (w-1)*(h-1) because ceil rounds both sides up."""
+
 from __future__ import annotations
 
 import base64

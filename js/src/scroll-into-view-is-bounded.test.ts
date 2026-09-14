@@ -1,3 +1,4 @@
+// Playwright's default 30s stability wait cost ten of a twelve-second solve; the bound is 2000ms to match the Python port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

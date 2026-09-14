@@ -98,6 +98,7 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     keyboard: {
       type: (text, options) => page.keyboard.type(text, options),
 
+      // Puppeteer has no 'Control+A' combo syntax; the solver speaks Playwright and this side translates.
       press: async (key) => {
         const parts = key.split('+');
         const target = parts.pop() as string;
@@ -113,7 +114,7 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     $: async (selector) => wrapHandle(await page.$(selector)),
     $$: async (selector) => (await page.$$(selector)).map((h) => wrapHandle(h)!).filter(Boolean),
     $eval: (selector, pageFunction, arg) => page.$eval(selector, pageFunction as any, arg),
-
+    // Forwarded explicitly: without it the watcher polls a dead page forever.
     isClosed: () => page.isClosed(),
   };
 }

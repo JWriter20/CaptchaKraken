@@ -1,3 +1,5 @@
+"""The metric the driver holds the mouse on; every failure here is silent (a box over nothing scores a perfect match)."""
+
 import numpy as np
 
 from captchakraken.keyframes import frame_diff_ratio, region_box, region_diff_ratio
@@ -8,6 +10,7 @@ def _frame(w=200, h=120, value=10):
 
 
 def test_a_point_on_the_edge_still_gets_a_box_with_pixels_in_it():
+    """A target flush against the border would clamp to zero area and the gate would open on any frame."""
     for point in [(0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)]:
         x1, y1, x2, y2 = region_box((200, 120), point)
         assert x2 > x1 and y2 > y1, f"empty box for point {point}"
@@ -37,6 +40,7 @@ def test_a_missing_frame_reads_as_completely_different():
 
 
 def test_the_region_gate_ignores_change_outside_its_box():
+    """The whole reason the gate is regional: a cycling board is moving everywhere."""
     a = _frame()
     b = a.copy()
     b[0:20, 0:20] = 250

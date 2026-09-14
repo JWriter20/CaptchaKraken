@@ -1,3 +1,5 @@
+// Unset means ON via `=== false` (`!== true` would make unset off). Idle wander is off while filming: one live burst reported a dozen
+// screens that were the mouse. reCAPTCHA and distorted-text rounds never speculate.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

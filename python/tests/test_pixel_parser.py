@@ -1,3 +1,5 @@
+"""Every answer shape the model has produced. The sourceless shapes were once dropped as "unsupported", which made every slider unsolvable."""
+
 from captchakraken.planner import ActionPlanner
 
 

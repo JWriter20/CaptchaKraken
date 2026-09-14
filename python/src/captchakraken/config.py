@@ -14,6 +14,7 @@ def pinned() -> Dict[str, Any]:
 
 
 def base_url() -> str:
+    """Env, then the credentials file, then localhost: a camoufox user who signed up through the MCP had a valid key and no endpoint, so every solve dialled a local port."""
     return (
         os.getenv("VLLM_BASE_URL")
         or _base_url_from_credentials_file()
@@ -21,6 +22,8 @@ def base_url() -> str:
     )
 
 
+# An exact host list, not "is it remote": a self-hoster's vLLM across the network is remote too, and asking
+# it for the hosted-only model 404s every request.
 _HOSTED_HOSTS = ("api.captchakraken.com",)
 
 
@@ -53,6 +56,7 @@ _BASE_URL_NAMES = ("CAPTCHA_KRAKEN_BASE_URL", "VLLM_BASE_URL")
 
 
 def _read_credentials_file() -> Dict[str, str]:
+    """Two spellings per key because the file doubles as something a user can `source`; the bare-token form stays because dropping it would silently break every existing file."""
     try:
         text = credentials_path().read_text(encoding="utf-8")
     except OSError:
@@ -88,6 +92,9 @@ def _key_from_credentials_file() -> str:
     return _first_present(values, _KEY_NAMES) or values.get("", "").strip()
 
 
+# A bare token yields no endpoint on purpose: it would silently redirect a self-hoster who hand-wrote a local key here.
+
+
 def _base_url_from_credentials_file() -> str:
     return _first_present(_read_credentials_file(), _BASE_URL_NAMES)
 
@@ -102,6 +109,7 @@ def api_key() -> str:
 
 
 def _registry_default(field: str) -> Optional[str]:
+    """The pin decides the registry entry, not just the adapter: reading base/lora_name off `latest` once downloaded a 9B base for a pinned 27B adapter and failed deep in vLLM as a shape mismatch. An unregistered pin still falls back to `latest` for self-hosters."""
     try:
         from . import prompts
 
@@ -136,6 +144,7 @@ def lora_revision() -> str:
 
 
 def lora_name() -> str:
+    # Pin, then the hosted default, then the registry: `latest` leads pinned_model.json so download and prompt advance together.
     pin = os.getenv("CAPTCHA_LORA_NAME")
     if pin:
         return pin
@@ -147,6 +156,7 @@ def lora_name() -> str:
 
 
 def _hosted_default_name() -> Optional[str]:
+    """Send the routing alias, not an arm: `abyss-general` is a lone expert with no `experts` of its own, and naming it would pin every family to the generalist and silently lose the routing."""
     try:
         from . import prompts
 

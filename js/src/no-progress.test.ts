@@ -1,3 +1,5 @@
+// The missed-tiles retry legitimately overlaps the answer before it, coordinates are compared rounded, and the loop cap is the real
+// bound: six rounds at 4-7s each is 24-42s, inside the 45s cap.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

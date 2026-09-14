@@ -1,3 +1,5 @@
+"""Stdout is exactly one JSON document per invocation and refusals go to stderr with a non-zero exit, because the JS driver parses stdout as the answer."""
+
 import json
 
 import cv2

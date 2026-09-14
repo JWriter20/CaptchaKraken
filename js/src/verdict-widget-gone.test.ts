@@ -1,3 +1,5 @@
+// Eight vendors expose no token, so the widget going away is the verdict, but only over two polls: a single poll can catch a re-deal's gap
+// and call it a solve.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

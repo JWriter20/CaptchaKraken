@@ -16,7 +16,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { createHash, randomUUID } from 'crypto';
 import { PhaseBudget, timingsEnabled } from './timing';
-import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, TypeAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector, SolveStepEvent } from './types';
+import { CaptchaKrakenConfig, SolverResult, ClickAction, DragAction, TypeAction, CaptchaAction, SolveResult, CliResponse, TokenUsage, Vector } from './types';
+import { ActionKind, FrameRole, KeyframeMode, Outcome, PaintVerdict, PauseKind, Phase, RecaptchaBanner, RetryMode, SettleVerdict, SolveStage, Vendor, isOneOf } from './kinds';
 import { aggregateTokenUsage } from './token-usage';
 import { parseApiError } from './errors';
 import { DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS } from './limits';
@@ -35,7 +36,6 @@ const sha1 = (f: string) => createHash('sha1').update(fs.readFileSync(f)).digest
 const bboxCenter = (b: [number, number, number, number]): [number, number] => [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
 
 type Box = { x: number; y: number; width: number; height: number };
-type PuzzleSource = 'hcaptcha' | 'recaptcha' | 'unknown';
 
 function commandExists(command: string): boolean {
   try {
@@ -100,42 +100,50 @@ interface TrackedPiece {
   piece: { centre: number, width: number } | null;
 }
 
-export function vendorFromSrc(src: string | null | undefined): PuzzleSource {
+/** Keyed on the `hcaptcha` substring, not the apex host: challenges are served off newassets.hcaptcha.com. */
+export function vendorFromSrc(src: string | null | undefined): Vendor {
   const s = src || '';
-  if (s.includes('hcaptcha')) return 'hcaptcha';
-  if (s.includes('recaptcha/api2')) return 'recaptcha';
-  return 'unknown';
+  if (s.includes('hcaptcha')) return Vendor.HCAPTCHA;
+  if (s.includes('recaptcha/api2')) return Vendor.RECAPTCHA;
+  return Vendor.UNKNOWN;
 }
 
-// Mirrored in page_solver.py; keep both lists in the same order.
-const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: string; selectors: string[] }> = [
-  { puzzleSource: 'geetest', selectors: ['.geetest_box', '.geetest_panel_box', '.geetest_popup_window', '.geetest_widget'] },
-  { puzzleSource: 'tencent', selectors: ['#tcaptcha_transform_dy', '#tCaptchaDyContent', '.tencent-captcha-dy__content', 'iframe#tcaptcha_iframe_dy', 'iframe[id^="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]'] },
-  { puzzleSource: 'yidun', selectors: ['.yidun_panel', '.yidun'] },
-  { puzzleSource: 'yandex', selectors: ['iframe[src*="smartcaptcha.yandexcloud.net/advanced"]', 'iframe[src*="smartcaptcha.yandexcloud.net"]', '.CheckboxCaptcha'] },
-  { puzzleSource: 'lemin', selectors: ['#lemin-cropped-captcha', '.lemin-captcha-popup'] },
-  { puzzleSource: 'prosopo', selectors: ['.prosopo-modalInner', '.procaptcha-checkbox'] },
-  { puzzleSource: 'mtcaptcha', selectors: ['iframe[src*="service.mtcaptcha.com"]', 'iframe[id^="mtcaptcha-iframe"]', '.mtcaptcha', '.mtcap'] },
-  { puzzleSource: 'botdetect', selectors: ['.BDC_CaptchaDiv'] },
+// Mirrored in page_solver.py; keep both lists in the same order. Iframe selectors go first: a class that lives
+// inside the frame document (.CheckboxCaptcha, .mtcap) never matches on the host page and stays for inline embeds only.
+const VENDOR_WIDGET_LOCATORS: ReadonlyArray<{ puzzleSource: Vendor; selectors: string[] }> = [
+  { puzzleSource: Vendor.GEETEST, selectors: ['.geetest_box', '.geetest_panel_box', '.geetest_popup_window', '.geetest_widget'] },
+  // Both in-page and iframe shapes stay (Tencent moved in-host on 2026-08-11; see TRIBAL_KNOWLEDGE.md), and the iframe id
+  // is prefix-anchored: `[id*=tcaptcha]` also matched MTCaptcha's iframe and hid that `.mtcap` matched nothing.
+  { puzzleSource: Vendor.TENCENT, selectors: ['#tcaptcha_transform_dy', '#tCaptchaDyContent', '.tencent-captcha-dy__content', 'iframe#tcaptcha_iframe_dy', 'iframe[id^="tcaptcha"]', 'iframe[src*="captcha.gtimg.com"]', 'iframe[src*="captcha.qq.com"]'] },
+  { puzzleSource: Vendor.YIDUN, selectors: ['.yidun_panel', '.yidun'] },
+  { puzzleSource: Vendor.YANDEX, selectors: ['iframe[src*="smartcaptcha.yandexcloud.net/advanced"]', 'iframe[src*="smartcaptcha.yandexcloud.net"]', '.CheckboxCaptcha'] },
+  { puzzleSource: Vendor.LEMIN, selectors: ['#lemin-cropped-captcha', '.lemin-captcha-popup'] },
+  { puzzleSource: Vendor.PROSOPO, selectors: ['.prosopo-modalInner', '.procaptcha-checkbox'] },
+  { puzzleSource: Vendor.MTCAPTCHA, selectors: ['iframe[src*="service.mtcaptcha.com"]', 'iframe[id^="mtcaptcha-iframe"]', '.mtcaptcha', '.mtcap'] },
+  { puzzleSource: Vendor.BOTDETECT, selectors: ['.BDC_CaptchaDiv'] },
 ];
 
-const VENDORS_WITH_BESPOKE_HANDLING: ReadonlySet<string> = new Set(['hcaptcha', 'recaptcha']);
+// A named set, not `=== UNKNOWN`: naming a new vendor would otherwise silently switch off typed-challenge
+// detection for MTCaptcha/Yandex/BotDetect and the animated probe for GeeTest/Tencent.
+const VENDORS_WITH_BESPOKE_HANDLING: ReadonlySet<Vendor> = new Set<Vendor>([Vendor.HCAPTCHA, Vendor.RECAPTCHA]);
 
-// BotDetect is self-hosted and has no vendor host, so it is deliberately absent.
-const VENDOR_URL_MARKERS: ReadonlyArray<{ puzzleSource: string; hosts: string[] }> = [
-  { puzzleSource: 'hcaptcha', hosts: ['hcaptcha.com'] },
-  { puzzleSource: 'recaptcha', hosts: ['google.com/recaptcha', 'recaptcha.net'] },
-  { puzzleSource: 'turnstile', hosts: ['challenges.cloudflare.com'] },
-  { puzzleSource: 'geetest', hosts: ['geetest.com'] },
-  { puzzleSource: 'tencent', hosts: ['captcha.gtimg.com', 'captcha.qcloud.com'] },
-  { puzzleSource: 'yidun', hosts: ['dun.163.com', 'cstaticdun.126.net', 'necaptcha.nosdn.127.net'] },
-  { puzzleSource: 'yandex', hosts: ['smartcaptcha.yandexcloud.net'] },
-  { puzzleSource: 'lemin', hosts: ['leminnow.com'] },
-  { puzzleSource: 'prosopo', hosts: ['prosopo.io'] },
-  { puzzleSource: 'mtcaptcha', hosts: ['mtcaptcha.com'] },
+// A tripwire, not a detector: the host stays on the wire when a vendor renames its markup, which is how a
+// twelve-day Tencent outage read as "no captcha" (see TRIBAL_KNOWLEDGE.md). BotDetect is self-hosted, so absent.
+const VENDOR_URL_MARKERS: ReadonlyArray<{ puzzleSource: Vendor; hosts: string[] }> = [
+  { puzzleSource: Vendor.HCAPTCHA, hosts: ['hcaptcha.com'] },
+  { puzzleSource: Vendor.RECAPTCHA, hosts: ['google.com/recaptcha', 'recaptcha.net'] },
+  { puzzleSource: Vendor.TURNSTILE, hosts: ['challenges.cloudflare.com'] },
+  { puzzleSource: Vendor.GEETEST, hosts: ['geetest.com'] },
+  { puzzleSource: Vendor.TENCENT, hosts: ['captcha.gtimg.com', 'captcha.qcloud.com'] },
+  { puzzleSource: Vendor.YIDUN, hosts: ['dun.163.com', 'cstaticdun.126.net', 'necaptcha.nosdn.127.net'] },
+  { puzzleSource: Vendor.YANDEX, hosts: ['smartcaptcha.yandexcloud.net'] },
+  { puzzleSource: Vendor.LEMIN, hosts: ['leminnow.com'] },
+  { puzzleSource: Vendor.PROSOPO, hosts: ['prosopo.io'] },
+  { puzzleSource: Vendor.MTCAPTCHA, hosts: ['mtcaptcha.com'] },
 ];
 
-// Vendor-named first, generic last: the driver takes the first visible match.
+// Vendor-named first, generic last: the driver takes the first visible match, and a generic selector
+// reached before the vendor's own is how a captcha's answer ends up in a login form's username box.
 const TEXT_INPUT_VENDOR_SELECTORS: ReadonlyArray<string> = [
   'input[id*=captchaCode]', 'input#captchaCode', 'input[id*=validateCaptcha]', '.BDC_CaptchaDiv input[type=text]',
   'input.mtcap-inputtext', '.mtcap input[type=text]',
@@ -148,6 +156,8 @@ const TEXT_INPUT_GENERIC_SELECTORS: ReadonlyArray<string> = [
 ];
 const TEXT_INPUT_SELECTORS: ReadonlyArray<string> = [...TEXT_INPUT_VENDOR_SELECTORS, ...TEXT_INPUT_GENERIC_SELECTORS];
 
+// The drag must start on the handle; the piece is inert decoration and a drag from it moves nothing. Tencent's
+// redesigned knob is a bare div, so it is named. `[draggable=true]` is absent: HTML5 DnD fires dragstart, not pointermove.
 const SLIDER_HANDLE_SELECTORS: ReadonlyArray<string> = [
   '.geetest_slider_button', '.geetest_btn', '.geetest_slider .geetest_arrow',
   '.tencent-captcha-dy__slider-block', '#tcaptcha_drag_thumb', '.tc-slider-normal', '[id*=slideBlock]',
@@ -157,6 +167,7 @@ const SLIDER_HANDLE_SELECTORS: ReadonlyArray<string> = [
   '[class*="slider"][class*="btn"]', '[class*="slider"][class*="button"]',
   '[class*="slide"][class*="handle"]', '[class*="drag"][class*="thumb"]',
 ];
+// Fallback for Lemin's trackless "cropped" puzzle, where the piece itself is dragged.
 const DRAGGABLE_PIECE_SELECTORS: ReadonlyArray<string> = [
   '.lemin-cropped-puzzle-piece', '#lemin-cropped-captcha canvas + canvas',
   '[class*="puzzle"][class*="piece"]', '[class*="jigsaw"]',
@@ -169,8 +180,9 @@ const SLIDE_PIECE_MEASURE_SELECTORS: ReadonlyArray<string> = [
 const SLIDE_TOLERANCE_PX = 2;
 const SLIDE_MAX_CORRECTIONS = 3;
 
+/** An allow-list of what needs nothing: the other direction raises instead of clicking at the origin. */
 export function answerNeedsElementBox(actions: ReadonlyArray<{ action?: string }>): boolean {
-  return actions.some((a) => a?.action !== 'done');
+  return actions.some((a) => a?.action !== ActionKind.DONE);
 }
 
 /** The widget moved on under us (hCaptcha swapped rounds, GeeTest closed on accept): re-detect, do not fail. */
@@ -180,13 +192,16 @@ export function isStaleHandleError(message: string): boolean {
 
 // Frame-diff thresholds; two screens of one board differ by ~0.0056, a different board by ~0.77.
 const NOT_THIS_BOARD_DIFF = 0.5;
+// Tighter than staleFrameDiffThreshold (0.02), which was blind to GeeTest svg; 0.001 is the noise floor.
 const MOVED_DURING_INFERENCE_DIFF = 0.002;
+// hCaptcha odd-animal showed 38 screens in 4s with no repeat; past DEFAULT_MAX_KEYFRAMES a keyframe answer cannot describe the motion.
 const BURST_ANIMATED_SCREENS = 6;
 const NOT_THIS_BOARD_POLLS = 3;
 
 export const SOLVE_DEFAULTS = {
   maxSolveLoops: 6,
   overallSolveTimeoutMs: 45_000,
+  // 9s holds a 3-screen GeeTest svg cycle at 2.7s a screen; 6s gave up one screen short. videoBudgetMs derives from it on both ports.
   keyframeWaitTimeoutMs: 9_000,
 } as const;
 
@@ -196,11 +211,11 @@ export function burstHangDeadlineMs(cfg: { videoBurstMaxMs?: number }): number {
 }
 
 const GEETEST_ACCEPTED = '.geetest_result_tips.geetest_success, .geetest_captcha.geetest_success, .geetest_captcha.geetest_lock_success';
-const RECAPTCHA_BANNERS = [
-  ['.rc-imageselect-error-select-more', 'select-more'],
-  ['.rc-imageselect-error-dynamic-more', 'dynamic-more'],
-  ['.rc-imageselect-incorrect-response', 'rejected'],
-] as const;
+const RECAPTCHA_BANNERS: ReadonlyArray<readonly [string, RecaptchaBanner]> = [
+  ['.rc-imageselect-error-select-more', RecaptchaBanner.SELECT_MORE],
+  ['.rc-imageselect-error-dynamic-more', RecaptchaBanner.DYNAMIC_MORE],
+  ['.rc-imageselect-incorrect-response', RecaptchaBanner.REJECTED],
+];
 
 export class CaptchaKrakenSolver {
   private config: CaptchaKrakenConfig;
@@ -219,7 +234,7 @@ export class CaptchaKrakenSolver {
   private repeatedAnswerSeen = false;
   /** The one recording and one answer for the animated board on screen. */
   private animatedPlan: { burstDir: string; response: CliResponse } | null = null;
-  private keyframeMode: string | null = null;
+  private keyframeMode: KeyframeMode | null = null;
   private keyframeSteadyScreens = 0;
   private solveDeadlineAt = 0;
   private lastAnswerSig: string | null = null;
@@ -235,7 +250,7 @@ export class CaptchaKrakenSolver {
   private loraNameCache: string | null = null;
   budget: PhaseBudget | null = null;
 
-  private ph<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  private ph<T>(name: Phase, fn: () => Promise<T>): Promise<T> {
     return this.budget ? this.budget.phase(name, fn) : fn();
   }
 
@@ -252,6 +267,7 @@ export class CaptchaKrakenSolver {
     this.human.at = [v.x, v.y];
   }
 
+  /** `disabled` freezes CSS animation, which once sliced GeeTest svg to a static clip; callers filming motion pass `allow`. */
   private shot(el: ElementHandle, p: string, timeout = 2500, animations: 'disabled' | 'allow' = 'disabled'): Promise<Buffer> {
     return el.screenshot({ path: p, timeout, animations });
   }
@@ -277,10 +293,11 @@ export class CaptchaKrakenSolver {
 
   /** Tell the hosted API whether the widget accepted, through the CLI, detached, never awaited. */
   private reportOutcome(sessionId: string | null, solved: boolean): void {
+    // The opt-out is honoured here too: otherwise every solve spawns a process just to be told 404 by a local vLLM.
     if (!sessionId || process.env.CAPTCHA_REPORT_OUTCOME === '0') return;
     try {
       const { cliRoot, py } = this.resolveCli();
-      const child = spawn(py, ['-m', 'captchakraken.cli', 'report-outcome', sessionId, solved ? 'solved' : 'failed'],
+      const child = spawn(py, ['-m', 'captchakraken.cli', 'report-outcome', sessionId, solved ? Outcome.SOLVED : Outcome.FAILED],
         { cwd: cliRoot, env: cliEnv(cliRoot), detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
@@ -304,12 +321,13 @@ export class CaptchaKrakenSolver {
     this.resetSolveState();
     const done = (): SolveResult => ({ isSolved: true, finalMousePosition: this.lastMousePosition, tokenUsage: aggregateTokenUsage(cumulativeTokenUsage) });
 
-    let pendingRetryMode: string | null = null;
+    let pendingRetryMode: RetryMode | null = null;
     let alreadyRetriedRecaptchaError = false;
     let unsupportedRetries = 0;
     let staleElementRetries = 0;
     let hasInteracted = false;
     let renderWaits = 0;
+    // Strictly fewer than the loops, else the reCAPTCHA v3 "no interactive widget" branch never gets a turn.
     const MAX_RENDER_WAITS = Math.min(6, maxSolveLoops - 1);
 
     for (let attempt = 1; attempt <= maxSolveLoops; attempt++) {
@@ -324,7 +342,7 @@ export class CaptchaKrakenSolver {
         return done();
       }
 
-      const captchaElement = await this.ph('detect', () => this.detectCaptcha(page));
+      const captchaElement = await this.ph(Phase.DETECT, () => this.detectCaptcha(page));
       if (!captchaElement) {
         if (hasInteracted) {
           console.log('No supported captcha found (post-interaction); considering solved.');
@@ -354,7 +372,7 @@ export class CaptchaKrakenSolver {
           if (hasInteracted && unsupportedRetries < (cfg.maxUnsupportedReSolves ?? 3)) {
             unsupportedRetries++;
             const el = await this.detectCaptcha(page);
-            if (el && await this.ph('settle', () => this.waitForElementSettled(el)) === 'animated' && cfg.videoSolveEnabled === false) {
+            if (el && await this.ph(Phase.SETTLE, () => this.waitForElementSettled(el)) === SettleVerdict.ANIMATED && cfg.videoSolveEnabled === false) {
               throw new Error('Animated/video challenge detected — the puzzle never settles and videoSolveEnabled is off.');
             }
             console.log(`"unsupported" mid-solve; settled and retrying (${unsupportedRetries}/${cfg.maxUnsupportedReSolves ?? 3}).`);
@@ -379,7 +397,8 @@ export class CaptchaKrakenSolver {
       renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
 
-      // One polled wait per round: the vendor's verdict, the widget going away, or a fresh board.
+      // One polled wait per round, not a flat sleep: the sleep observed nothing and cost 1200-1500ms a round, and
+      // hCaptcha keeps its iframe visible ~2s while verifying, which read as a fresh puzzle and burned ~18s.
       const settleMs = didInteract ? (cfg.postSolveOutcomeTimeoutMs ?? 1000) : (cfg.postSolveDelayMs ?? 1200) + Math.random() * 300;
       const deadline = Date.now() + settleMs;
       const verdictT0 = Date.now();
@@ -396,7 +415,7 @@ export class CaptchaKrakenSolver {
         }
         await delay(cfg.postSolveOutcomePollMs ?? 75);
       }
-      this.budget?.add(didInteract ? 'await-verdict' : 'post-submit-delay', Date.now() - verdictT0);
+      this.budget?.add(didInteract ? Phase.AWAIT_VERDICT : Phase.POST_SUBMIT_DELAY, Date.now() - verdictT0);
       if (solved) {
         console.log(`[verdict] success signal arrived after ${Date.now() - verdictT0}ms`);
         return done();
@@ -407,7 +426,7 @@ export class CaptchaKrakenSolver {
           throw new Error(`reCAPTCHA still showing the under-selection error after retry; aborting (model unable to identify the missed tile). Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
         }
         console.log('reCAPTCHA returned under-selection error; retrying with missed-tiles prompt.');
-        pendingRetryMode = 'missed-tiles';
+        pendingRetryMode = RetryMode.MISSED_TILES;
         alreadyRetriedRecaptchaError = true;
       }
 
@@ -421,8 +440,8 @@ export class CaptchaKrakenSolver {
   }
 
   /** Fire the optional onStep observer with a fresh screenshot; best-effort, never fails the solve. */
-  private async emitStep(captchaElement: ElementHandle, stage: SolveStepEvent['stage'], label: string,
-                         puzzleSource: SolveStepEvent['puzzleSource'], frameRole: SolveStepEvent['frameRole'],
+  private async emitStep(captchaElement: ElementHandle, stage: SolveStage, label: string,
+                         puzzleSource: Vendor, frameRole: FrameRole,
                          attempt: number, meta?: Record<string, any>): Promise<void> {
     const cb = this.config.onStep;
     if (!cb) return;
@@ -441,14 +460,14 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: string | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
+  private async solveSingle(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: RetryMode | null = null): Promise<{ didInteract: boolean, tokenUsage: TokenUsage[] }> {
     const cfg = this.config;
     const src = await captchaElement.getAttribute('src').catch(() => null);
     const puzzleSource = vendorFromSrc(src);
-    const frameRole: SolveStepEvent['frameRole'] =
-      !src ? 'unknown'
-        : src.includes('recaptcha/api2/bframe') || src.includes('frame=challenge') ? 'challenge'
-          : src.includes('recaptcha/api2/anchor') || src.includes('frame=checkbox') ? 'checkbox' : 'unknown';
+    const frameRole: FrameRole =
+      !src ? FrameRole.UNKNOWN
+        : src.includes('recaptcha/api2/bframe') || src.includes('frame=challenge') ? FrameRole.CHALLENGE
+          : src.includes('recaptcha/api2/anchor') || src.includes('frame=checkbox') ? FrameRole.CHECKBOX : FrameRole.UNKNOWN;
     const scope: Frame | ElementHandle = (await captchaElement.contentFrame()) ?? captchaElement;
 
     // Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
@@ -456,20 +475,20 @@ export class CaptchaKrakenSolver {
     if (textMode) console.log('Widget has a text box; solving as a distorted-text captcha.');
 
     let isAnimated = false;
-    if (puzzleSource === 'hcaptcha' && src && src.includes('frame=challenge')) {
+    if (puzzleSource === Vendor.HCAPTCHA && src && src.includes('frame=challenge')) {
       if (this.lastSubmitFrameHash) {
-        await this.ph('await-next-round', () => this.waitForChangeSince(captchaElement, this.lastSubmitFrameHash as string));
+        await this.ph(Phase.AWAIT_NEXT_ROUND, () => this.waitForChangeSince(captchaElement, this.lastSubmitFrameHash as string));
         this.lastSubmitFrameHash = null;
       }
-      await this.ph('hcaptcha-images', () => this.waitForHcaptchaChallengeImages(captchaElement));
+      await this.ph(Phase.HCAPTCHA_IMAGES, () => this.waitForHcaptchaChallengeImages(captchaElement));
       if (cfg.videoSolveEnabled === false) {
-        if (await this.ph('settle', () => this.waitForElementSettled(captchaElement)) === 'animated') {
+        if (await this.ph(Phase.SETTLE, () => this.waitForElementSettled(captchaElement)) === SettleVerdict.ANIMATED) {
           const e: any = new Error('ANIMATED_CHALLENGE: the challenge never settles and videoSolveEnabled is off.');
           e.animated = true;
           throw e;
         }
       } else if (!textMode) {
-        isAnimated = await this.classifyByRecording(captchaElement) === 'animated';
+        isAnimated = await this.classifyByRecording(captchaElement) === SettleVerdict.ANIMATED;
       }
       if (await this.isCaptchaSolved(page)) {
         console.log('[captchakraken] solved while waiting for the next round; skipping inference.');
@@ -477,7 +496,7 @@ export class CaptchaKrakenSolver {
         return { didInteract: false, tokenUsage: [] };
       }
     } else if (!VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && cfg.videoSolveEnabled !== false && !textMode) {
-      isAnimated = await this.classifyByRecording(captchaElement) === 'animated';
+      isAnimated = await this.classifyByRecording(captchaElement) === SettleVerdict.ANIMATED;
     }
 
     if (!isAnimated && this.shouldRetryAsAnimated(puzzleSource)) {
@@ -486,8 +505,9 @@ export class CaptchaKrakenSolver {
     }
 
     let establishedGridSize: number | null = null;
-    if (puzzleSource === 'recaptcha' && !!src && src.includes('recaptcha/api2/bframe')) {
-      await this.ph('grid-load', () => this.waitForGridCellsLoaded(captchaElement));
+    // bframe only: on the anchor this wasted an 8s grid-load timeout plus a find-grid subprocess.
+    if (puzzleSource === Vendor.RECAPTCHA && !!src && src.includes('recaptcha/api2/bframe')) {
+      await this.ph(Phase.GRID_LOAD, () => this.waitForGridCellsLoaded(captchaElement));
       const grid = await this.getGridBoxes(captchaElement);
       if (grid && grid.size === 3) {
         const elementBox = await captchaElement.boundingBox();
@@ -499,7 +519,7 @@ export class CaptchaKrakenSolver {
       establishedGridSize = grid?.size ?? null;
     }
 
-    const painted = await this.ph('board-paint', () => this.waitForBoardPainted(captchaElement));
+    const painted = await this.ph(Phase.BOARD_PAINT, () => this.waitForBoardPainted(captchaElement));
 
     // The classifier's last frame is a settled still, unless the board painted while we watched.
     const screenshotPath = tmp('captcha');
@@ -507,10 +527,10 @@ export class CaptchaKrakenSolver {
     if (settledFrame && fs.existsSync(settledFrame)) {
       fs.copyFileSync(settledFrame, screenshotPath);
     } else {
-      await this.ph('screenshot', () => this.shot(captchaElement, screenshotPath, cfg.elementScreenshotTimeoutMs ?? 8000));
+      await this.ph(Phase.SCREENSHOT, () => this.shot(captchaElement, screenshotPath, cfg.elementScreenshotTimeoutMs ?? 8000));
     }
     if (this.stepIndex === 0) {
-      await this.emitStep(captchaElement, 'initial', 'initial (pre-action)', puzzleSource, frameRole, attempt,
+      await this.emitStep(captchaElement, SolveStage.INITIAL, 'initial (pre-action)', puzzleSource, frameRole, attempt,
         establishedGridSize ? { gridSize: establishedGridSize } : undefined);
     }
 
@@ -523,7 +543,7 @@ export class CaptchaKrakenSolver {
     try {
       let response: CliResponse;
       const ask = (imagePath: string) => this.getSolution(imagePath, puzzleSource, retryMode, textMode);
-      const askAnimated = () => this.ph('inference', () => this.withIdleWander(page, captchaElement, () => this.getAnimatedSolution(burstDir as string)));
+      const askAnimated = () => this.ph(Phase.INFERENCE, () => this.withIdleWander(page, captchaElement, () => this.getAnimatedSolution(burstDir as string)));
       if (isAnimated) {
         if (this.animatedPlan) {
           burstDir = this.animatedPlan.burstDir;
@@ -532,7 +552,7 @@ export class CaptchaKrakenSolver {
         } else {
           const rec = this.pendingBurst;
           this.pendingBurst = null;
-          burstDir = await this.ph('burst', () => rec ? rec.finish() : this.recordKeyframeBurst(captchaElement));
+          burstDir = await this.ph(Phase.BURST, () => rec ? rec.finish() : this.recordKeyframeBurst(captchaElement));
           response = await askAnimated();
           this.animatedPlan = { burstDir, response };
         }
@@ -543,11 +563,11 @@ export class CaptchaKrakenSolver {
         let still: CliResponse | null = null;
         let stillError: unknown = null;
         try {
-          still = await this.ph('inference', () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath, ask, { recordingInFlight: true }));
+          still = await this.ph(Phase.INFERENCE, () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath, ask, { recordingInFlight: true }));
         } catch (e) {
           stillError = e;
         }
-        const cycling = await this.ph('burst', () => rec.verdict());
+        const cycling = await this.ph(Phase.BURST, () => rec.verdict());
         if (!cycling) {
           const movedOnce = rec.screensSeen() > 1;
           await rec.abandon();
@@ -557,7 +577,7 @@ export class CaptchaKrakenSolver {
             console.log('[animated] the board changed once and settled — not a cycle; re-reading the screen it came to rest on.');
             try {
               await this.shot(captchaElement, screenshotPath, cfg.elementScreenshotTimeoutMs ?? 8000);
-              still = await this.ph('inference', () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath, ask));
+              still = await this.ph(Phase.INFERENCE, () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath, ask));
             } catch { /* keep the answer in hand */ }
           }
           response = still as CliResponse;
@@ -565,12 +585,12 @@ export class CaptchaKrakenSolver {
           console.log('[animated] the widget moved while the model was reading it — dropping the still answer and finishing the recording.');
           isAnimated = true;
           this.repeatedAnswerSeen = true;
-          burstDir = await this.ph('burst', () => rec.finish());
+          burstDir = await this.ph(Phase.BURST, () => rec.finish());
           response = await askAnimated();
           this.animatedPlan = { burstDir, response };
         }
       } else {
-        response = await this.ph('inference', () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath,
+        response = await this.ph(Phase.INFERENCE, () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath,
           (imagePath) => this.withIdleWander(page, captchaElement, () => ask(imagePath))));
       }
       const actionList = Array.isArray(response.actions) ? response.actions : [response.actions];
@@ -584,13 +604,14 @@ export class CaptchaKrakenSolver {
         return elementBox;
       };
 
+      // Tier 3 grades this line with Tier 2's grader to split driver bugs from model misses (see TRIBAL_KNOWLEDGE.md).
       console.log('[answer] ' + JSON.stringify({ actions: actionList }));
       this.noteAnswer(actionList, retryMode);
       console.log(`Executing ${actionList.length} actions.`);
       const frame = await captchaElement.contentFrame();
 
       for (const action of actionList) {
-        if (action.action === 'click') {
+        if (action.action === ActionKind.CLICK) {
           const c = action as ClickAction;
           const bboxes = c.target_bounding_boxes ?? (c.target_bounding_box ? [c.target_bounding_box] : []);
           if (!bboxes.length && !c.target_coordinates) {
@@ -602,44 +623,45 @@ export class CaptchaKrakenSolver {
               const one = { ...c, target_bounding_box: bbox } as ClickAction;
               if (c.await_keyframe) await this.clickWhenFrameMatches(page, captchaElement, one, requireBox(), c.await_keyframe);
               else await this.executeClick(page, captchaElement, one, requireBox());
-              await this.human.pause('between');
+              await this.human.pause(PauseKind.BETWEEN);
             }
           } else {
             await this.executeClick(page, captchaElement, c, requireBox());
           }
           performedAction = answered = true;
-          await this.emitStep(captchaElement, 'click', `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
-        } else if (action.action === 'drag' && !(action as DragAction).source_bounding_box) {
+          await this.emitStep(captchaElement, SolveStage.CLICK, `clicked ${bboxes.length || 1} target(s)`, puzzleSource, frameRole, attempt, { bboxes });
+        } else if (action.action === ActionKind.DRAG && !(action as DragAction).source_bounding_box) {
           if (await this.executeSlide(page, captchaElement, scope, action as DragAction, requireBox())) {
             performedAction = slid = true;
-            await this.emitStep(captchaElement, 'drag', 'slid the piece into the slot', puzzleSource, frameRole, attempt, { action });
+            await this.emitStep(captchaElement, SolveStage.DRAG, 'slid the piece into the slot', puzzleSource, frameRole, attempt, { action });
           }
-        } else if (action.action === 'drag') {
+        } else if (action.action === ActionKind.DRAG) {
           const d = action as DragAction;
           if (d.await_keyframe && d.source_bounding_box) await this.waitForKeyframe(captchaElement, d.await_keyframe, ...bboxCenter(d.source_bounding_box));
           await this.executeDrag(page, captchaElement, action as any, requireBox());
           performedAction = answered = true;
-          await this.emitStep(captchaElement, 'drag', 'drag', puzzleSource, frameRole, attempt, { action });
-        } else if (action.action === 'type') {
+          await this.emitStep(captchaElement, SolveStage.DRAG, 'drag', puzzleSource, frameRole, attempt, { action });
+        } else if (action.action === ActionKind.TYPE) {
           if (await this.executeType(page, scope, action as TypeAction, captchaElement)) {
             performedAction = answered = true;
-            await this.emitStep(captchaElement, 'type', 'typed the code', puzzleSource, frameRole, attempt, { action });
+            await this.emitStep(captchaElement, SolveStage.TYPE, 'typed the code', puzzleSource, frameRole, attempt, { action });
           }
-        } else if (action.action === 'wait' && (action as any).duration_ms > 0) {
+        } else if (action.action === ActionKind.WAIT && (action as any).duration_ms > 0) {
           await delay((action as any).duration_ms);
           performedAction = true;
-          await this.emitStep(captchaElement, 'wait', `waited ${(action as any).duration_ms}ms`, puzzleSource, frameRole, attempt, { action });
+          await this.emitStep(captchaElement, SolveStage.WAIT, `waited ${(action as any).duration_ms}ms`, puzzleSource, frameRole, attempt, { action });
         }
       }
 
-      // A slide submits itself on release; an empty or `done` plan still presses Verify/Skip.
+      // A slide submits itself on release, and any Verify found afterwards belongs to the host page and would
+      // submit the guarded form mid-verdict. An empty or `done` plan still presses Verify/Skip.
       const lookup = frame ?? (slid ? null : scope);
       const verifyButton = lookup ? await this.getVerifyButton(lookup) : null;
       if (!slid && (answered || !performedAction) && verifyButton) {
         console.log(`Clicking Verify to submit (${puzzleSource}).`);
         await this.moveAndClick(page, verifyButton);
         performedAction = true;
-        await this.emitStep(captchaElement, 'submit', 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
+        await this.emitStep(captchaElement, SolveStage.SUBMIT, 'submitted (Verify/Next)', puzzleSource, frameRole, attempt);
         this.lastSubmitFrameHash = await this.elementFrameHash(captchaElement);
       }
     } finally {
@@ -677,12 +699,12 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  private bannerIsFatalAfterRetry(kind: string | null): boolean {
-    return kind === 'select-more' || kind === 'rejected';
+  private bannerIsFatalAfterRetry(kind: RecaptchaBanner | null): boolean {
+    return kind === RecaptchaBanner.SELECT_MORE || kind === RecaptchaBanner.REJECTED;
   }
 
   /** Which reCAPTCHA banner shows; `dynamic-more` is the dynamic board's normal flow, not an error. */
-  private async recaptchaBannerKind(page: Page): Promise<'rejected' | 'select-more' | 'dynamic-more' | null> {
+  private async recaptchaBannerKind(page: Page): Promise<RecaptchaBanner | null> {
     try {
       const bframe = await page.$('iframe[src*="recaptcha/api2/bframe"]');
       const frame = bframe && await bframe.contentFrame();
@@ -723,7 +745,11 @@ export class CaptchaKrakenSolver {
     return false;
   }
 
-  /** The vendor's own done signal: a response token, GeeTest's banner, or a checked anchor. */
+  /**
+   * The vendor's own done signal: a response token, GeeTest's banner, or a checked anchor. The token is read first and
+   * unconditionally: it is on the page when hCaptcha's overlay hides the anchor. The anchor's aria-checked stays
+   * because demo pages do not always populate the token.
+   */
   private async isCaptchaSolved(page: Page): Promise<boolean> {
     try {
       for (const name of ['h-captcha-response', 'g-recaptcha-response', 'cf-turnstile-response']) {
@@ -759,7 +785,10 @@ export class CaptchaKrakenSolver {
     return false;
   }
 
-  /** Best-effort: hold until hCaptcha's tiles, canvas or example image have painted. Nothing to wait for is ready. */
+  /**
+   * Best-effort: hold until hCaptcha's tiles, canvas or example image have painted. Nothing to wait for is ready, and
+   * so is no prompt: waiting on `.prompt-text` as a selector rejects when absent and paid the whole timeout per board.
+   */
   private async waitForHcaptchaChallengeImages(challengeIframe: ElementHandle): Promise<void> {
     try {
       const frame = await challengeIframe.contentFrame();
@@ -785,9 +814,10 @@ export class CaptchaKrakenSolver {
   }
 
   /** Which vendors' code the page loaded, from resource timing and linked URLs. A tripwire, not a detector. */
-  public async vendorsOnTheWire(page: Page): Promise<string[]> {
+  public async vendorsOnTheWire(page: Page): Promise<Vendor[]> {
     let names: string[] = [];
     try {
+      // $eval rather than evaluate, so PlaywrightPage need not widen for every adapter.
       names = await page.$eval('html', () => {
         const out: string[] = [];
         try { for (const e of performance.getEntriesByType('resource')) out.push(e.name); } catch (err) { /* buffer unavailable */ }
@@ -812,7 +842,10 @@ export class CaptchaKrakenSolver {
     return `${base}, BUT ${loaded.join('/')} code IS loaded and running on this page. The vendor's markup no longer matches anything in VENDOR_WIDGET_LOCATORS — the selector list needs re-measuring against the vendor's current markup, in both solver ports.`;
   }
 
-  /** Is a widget in the DOM at all, rendered or not? Invisible reCAPTCHA is excluded. */
+  /**
+   * Is a widget in the DOM at all, rendered or not? Invisible reCAPTCHA is excluded. The inline vendors count:
+   * without them this port failed fast in under a second on every GeeTest/Yidun page and disagreed with Python in Tier 3.
+   */
   public async hasInteractiveWidgetInDom(page: Page): Promise<boolean> {
     for (const a of await page.$$('iframe[src*="recaptcha/api2/anchor"]')) {
       if (!/[?&]size=invisible/.test((await a.getAttribute('src')) ?? '')) return true;
@@ -967,12 +1000,12 @@ export class CaptchaKrakenSolver {
   }
 
   /** A still board is not a loaded board: hold until the panel's centre carries structure. Returns how long it waited. */
-  private async waitForBoardPainted(el: ElementHandle, opts?: { pollMs?: number; timeoutMs?: number; floor?: number }): Promise<{ verdict: 'painted' | 'blank' | 'unknown'; waitedMs: number }> {
+  private async waitForBoardPainted(el: ElementHandle, opts?: { pollMs?: number; timeoutMs?: number; floor?: number }): Promise<{ verdict: PaintVerdict; waitedMs: number }> {
     const pollMs = opts?.pollMs ?? this.config.boardPaintPollMs ?? 180;
     const timeout = opts?.timeoutMs ?? this.config.boardPaintTimeoutMs ?? 2500;
     const floor = opts?.floor ?? this.config.boardPaintFloor;
     const start = Date.now();
-    let saw: 'painted' | 'blank' | 'unknown' = 'unknown';
+    let saw: PaintVerdict = PaintVerdict.UNKNOWN;
     for (;;) {
       const f = tmp('paint');
       let got = false;
@@ -981,18 +1014,18 @@ export class CaptchaKrakenSolver {
         got = true;
         const res = await this.runCvTool('board-painted', floor === undefined ? { image: f } : { image: f, floor },
           floor === undefined ? ['board-painted', f] : ['board-painted', f, String(floor)]);
-        saw = res?.painted === true ? 'painted' : res?.painted === false ? 'blank' : 'unknown';
+        saw = res?.painted === true ? PaintVerdict.PAINTED : res?.painted === false ? PaintVerdict.BLANK : PaintVerdict.UNKNOWN;
       } catch { /* a failed grab is a skipped poll, not a verdict */ }
       unlink(f);
-      if (got && saw !== 'blank') break;
+      if (got && saw !== PaintVerdict.BLANK) break;
       if (Date.now() - start >= timeout) {
-        if (saw === 'blank') console.log(`[board] the widget never painted a puzzle in ${timeout}ms — photographing the panel as it is`);
+        if (saw === PaintVerdict.BLANK) console.log(`[board] the widget never painted a puzzle in ${timeout}ms — photographing the panel as it is`);
         break;
       }
       await delay(pollMs);
     }
     const waitedMs = Date.now() - start;
-    if (saw === 'painted' && waitedMs >= pollMs) console.log(`[board] waited ${waitedMs}ms for the widget to paint its puzzle`);
+    if (saw === PaintVerdict.PAINTED && waitedMs >= pollMs) console.log(`[board] waited ${waitedMs}ms for the widget to paint its puzzle`);
     return { verdict: saw, waitedMs };
   }
 
@@ -1094,7 +1127,10 @@ export class CaptchaKrakenSolver {
     return async () => { await this.hoverCell(page, session, cells[i++ % cells.length]).catch(() => {}); };
   }
 
-  /** `chipped`: the photos were kept, press Verify. `loading`: those tiles are being swapped, read the board again. */
+  /**
+   * `chipped`: the photos were kept, press Verify. `loading`: those tiles are being swapped, read the board again.
+   * Chip is tested first: a chip zooms the photo, which reads as `changing` on the very frame that shows it.
+   */
   private async watchClickedTiles(page: Page, captchaElement: ElementHandle, session: GridSession, priority: number[] = []): Promise<{ loading: number[]; chipped: boolean }> {
     const grace = this.config.recaptchaFadeOnsetGraceMs ?? 4000;
     const interval = this.config.recaptchaDynamicFadePollMs ?? 250;
@@ -1121,7 +1157,7 @@ export class CaptchaKrakenSolver {
   }
 
   /** Click, watch the clicked tiles, re-solve while they swap, submit on `done` or a chipped board. */
-  private async solveRecaptchaGrid(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: string | null,
+  private async solveRecaptchaGrid(page: Page, captchaElement: ElementHandle, attempt: number, retryMode: RetryMode | null,
                                    grid: { boxes: number[][]; size: 3 | 4; screenshotW: number; screenshotH: number },
                                    elementBox: Box): Promise<{ didInteract: boolean; tokenUsage: TokenUsage[] }> {
     const maxRounds = this.config.recaptchaMaxDynamicRounds ?? DEFAULT_RECAPTCHA_MAX_DYNAMIC_ROUNDS;
@@ -1134,40 +1170,40 @@ export class CaptchaKrakenSolver {
     let pendingRetry = retryMode;
 
     for (let round = 1; round <= maxRounds; round++) {
-      if (round > 1) await this.ph('grid-load', () => this.waitForGridCellsLoaded(captchaElement));
+      if (round > 1) await this.ph(Phase.GRID_LOAD, () => this.waitForGridCellsLoaded(captchaElement));
       const shotA = tmp('recap');
       try {
-        await this.ph('screenshot', () => this.shot(captchaElement, shotA));
+        await this.ph(Phase.SCREENSHOT, () => this.shot(captchaElement, shotA));
       } catch {
         break;
       }
-      await this.emitStep(captchaElement, round === 1 ? 'initial' : 'round', `round-${round}:pre-solve`, 'recaptcha', 'challenge', attempt, { round });
+      await this.emitStep(captchaElement, round === 1 ? SolveStage.INITIAL : SolveStage.ROUND, `round-${round}:pre-solve`, Vendor.RECAPTCHA, FrameRole.CHALLENGE, attempt, { round });
 
       let action: CaptchaAction | null = null;
       try {
         const retryForThisRound = pendingRetry;
         pendingRetry = null;
-        const response = await this.ph('inference', () => this.solveFrameFreshnessGuarded(captchaElement, shotA,
-          (imagePath) => this.getSolution(imagePath, 'recaptcha', retryForThisRound)));
+        const response = await this.ph(Phase.INFERENCE, () => this.solveFrameFreshnessGuarded(captchaElement, shotA,
+          (imagePath) => this.getSolution(imagePath, Vendor.RECAPTCHA, retryForThisRound)));
         allTokenUsage.push(...response.token_usage);
         action = (Array.isArray(response.actions) ? response.actions : [response.actions])[0] ?? null;
       } finally {
         unlink(shotA);
       }
 
-      if (!action || action.action === 'done') {
+      if (!action || action.action === ActionKind.DONE) {
         console.log(`[recaptcha-grid] round ${round}: done; submitting.`);
         shouldSubmit = true;
         break;
       }
-      if (action.action === 'wait') {
-        await this.ph('fade-wait', async () => {
+      if (action.action === ActionKind.WAIT) {
+        await this.ph(Phase.FADE_WAIT, async () => {
           const { loading } = await this.watchClickedTiles(page, captchaElement, session, clickedOrder);
           await this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading);
         });
         continue;
       }
-      if (action.action !== 'click') {
+      if (action.action !== ActionKind.CLICK) {
         console.warn(`[recaptcha-grid] round ${round}: unexpected action '${(action as any).action}'; re-solving.`);
         continue;
       }
@@ -1180,21 +1216,21 @@ export class CaptchaKrakenSolver {
       const clickedThisRound: number[] = [];
       for (const bbox of bboxes) {
         const cell = this.bboxToCell(bbox, session.gridBoxes, session.screenshotW, session.screenshotH);
-        await this.executeClick(page, captchaElement, { action: 'click', target_bounding_box: bbox } as ClickAction, elementBox);
+        await this.executeClick(page, captchaElement, { action: ActionKind.CLICK, target_bounding_box: bbox } as ClickAction, elementBox);
         if (cell != null) { clickedOrder.push(cell); clickedThisRound.push(cell); }
-        await this.human.pause('between');
+        await this.human.pause(PauseKind.BETWEEN);
       }
       performedAction = true;
       console.log(`[recaptcha-grid] round ${round}: clicked ${bboxes.length} tile(s) -> cells ${JSON.stringify(clickedThisRound)}.`);
-      await this.emitStep(captchaElement, 'click', `round-${round}:clicked ${bboxes.length} tile(s)`, 'recaptcha', 'challenge', attempt, { round, clickedThisRound, bboxes });
+      await this.emitStep(captchaElement, SolveStage.CLICK, `round-${round}:clicked ${bboxes.length} tile(s)`, Vendor.RECAPTCHA, FrameRole.CHALLENGE, attempt, { round, clickedThisRound, bboxes });
 
-      const { loading, chipped } = await this.ph('fade-wait', () => this.watchClickedTiles(page, captchaElement, session, clickedThisRound));
+      const { loading, chipped } = await this.ph(Phase.FADE_WAIT, () => this.watchClickedTiles(page, captchaElement, session, clickedThisRound));
       if (chipped || !loading.length) {
         console.log(`[recaptcha-grid] round ${round}: ${chipped ? 'tiles chipped' : 'no tiles loading'} after click; submitting.`);
         shouldSubmit = true;
         break;
       }
-      await this.ph('fade-wait', () => this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading));
+      await this.ph(Phase.FADE_WAIT, () => this.waitForAnyClickedTileLoaded(page, captchaElement, session, loading));
     }
 
     if (shouldSubmit) {
@@ -1204,7 +1240,7 @@ export class CaptchaKrakenSolver {
         console.log('[recaptcha-grid] clicking Verify to submit.');
         await this.moveAndClick(page, verifyButton);
         performedAction = true;
-        await this.emitStep(captchaElement, 'submit', 'submitted (Verify)', 'recaptcha', 'challenge', attempt);
+        await this.emitStep(captchaElement, SolveStage.SUBMIT, 'submitted (Verify)', Vendor.RECAPTCHA, FrameRole.CHALLENGE, attempt);
         this.lastSubmitFrameHash = await this.elementFrameHash(captchaElement).catch(() => null);
       }
     }
@@ -1218,13 +1254,14 @@ export class CaptchaKrakenSolver {
   /**
    * Start filming now and decide later what it was for: the classifier, the speculative film, or the
    * recording an animated answer is sliced from. Every window is wall-clock. A cycle is a screen that
-   * comes back; a board that shows nothing new for a floor window has settled.
+   * comes back; a board that shows nothing new for a floor window has settled. There is deliberately no
+   * "enough screens, stop" exit: measured on number_with_highest_value_video it failed every seed either way.
    */
   private startKeyframeBurst(captchaElement: ElementHandle): {
     moved: () => boolean;
     screensSeen: () => number;
     stableFrame: () => string | null;
-    ready: () => Promise<'static' | 'animated'>;
+    ready: () => Promise<SettleVerdict>;
     verdict: () => Promise<boolean>;
     abandon: () => Promise<void>;
     finish: () => Promise<string>;
@@ -1255,7 +1292,7 @@ export class CaptchaKrakenSolver {
           break;
         }
         const started = Date.now();
-        const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`);
+        const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`); // zero-padded: the slicer sorts by name
         try {
           await this.shot(captchaElement, frame, cfg.elementScreenshotTimeoutMs ?? 8000, 'allow');
           captured++;
@@ -1296,13 +1333,13 @@ export class CaptchaKrakenSolver {
         const settleWindowMs = Math.max(2 * intervalMs, (cfg.settleFrames ?? 2) * (cfg.settlePollMs ?? 220));
         const earlyScreens = Math.max(2, cfg.animatedMotionStreak ?? 5);
         for (;;) {
-          if (cycleClosed) { console.log('[animated] a screen came back — recording it'); return 'animated' as const; }
+          if (cycleClosed) { console.log('[animated] a screen came back — recording it'); return SettleVerdict.ANIMATED; }
           if (order.length >= earlyScreens) {
             console.log(`[animated] ${order.length} screens in ${(elapsed() / 1000).toFixed(1)}s and still arriving — recording it`);
-            return 'animated' as const;
+            return SettleVerdict.ANIMATED;
           }
-          if (elapsed() >= settleWindowMs && elapsed() - lastChangeMs >= settleWindowMs) return 'static' as const;
-          if (ended || stopped) return order.length > 1 ? ('animated' as const) : ('static' as const);
+          if (elapsed() >= settleWindowMs && elapsed() - lastChangeMs >= settleWindowMs) return SettleVerdict.SETTLED;
+          if (ended || stopped) return order.length > 1 ? SettleVerdict.ANIMATED : SettleVerdict.SETTLED;
           await delay(intervalMs);
         }
       },
@@ -1364,6 +1401,7 @@ export class CaptchaKrakenSolver {
       const { stdout, stderr } = await execFileAsync(py, args, { cwd: cliRoot, env: this.solveEnvironment(cliRoot, apiKey), maxBuffer: 10 * 1024 * 1024 });
       if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
       const parsed = JSON.parse(stdout.trim());
+      if (parsed.keyframe_mode != null && !isOneOf(KeyframeMode, parsed.keyframe_mode)) throw new Error(`engine reported an unknown keyframe_mode '${parsed.keyframe_mode}'`);
       this.keyframeMode = parsed.keyframe_mode ?? null;
       this.keyframeSteadyScreens = parsed.steady_screens ?? 0;
       console.log(`[animated] ${parsed.source_frames} frames -> ${(parsed.keyframes ?? []).length} keyframe(s) (mode=${parsed.keyframe_mode})`);
@@ -1469,7 +1507,8 @@ export class CaptchaKrakenSolver {
     this.videoBudgetGranted = false;
   }
 
-  private static answerSignature(actions: any[], retryMode: string | null): string | null {
+  /** Keyed on the retry mode too: the missed-tiles answer legitimately overlaps the previous one. */
+  private static answerSignature(actions: any[], retryMode: RetryMode | null): string | null {
     const round3 = (v: any): any => typeof v === 'number' ? Math.round(v * 1000) / 1000 : Array.isArray(v) ? v.map(round3) : v ?? null;
     try {
       return JSON.stringify([retryMode ?? null, actions.map((a: any) => [a?.action ?? null, round3(a?.target_bounding_boxes),
@@ -1480,7 +1519,7 @@ export class CaptchaKrakenSolver {
   }
 
   /** A repeated answer already ran and changed nothing: resample, and let the recording path have a go. */
-  private noteAnswer(actions: any[], retryMode: string | null): void {
+  private noteAnswer(actions: any[], retryMode: RetryMode | null): void {
     const sig = CaptchaKrakenSolver.answerSignature(actions, retryMode);
     if (sig !== null && sig === this.lastAnswerSig) {
       this.noProgressRounds++;
@@ -1513,12 +1552,12 @@ export class CaptchaKrakenSolver {
   }
 
   /** Static or animated, decided by filming once. The film stays running for the branch that uses it. */
-  private async classifyByRecording(el: ElementHandle): Promise<'static' | 'animated'> {
+  private async classifyByRecording(el: ElementHandle): Promise<SettleVerdict> {
     // Only on an untouched board: after a click the film cannot tell the board's own motion from our feedback.
-    if (this.actedOnBoard) return 'static';
+    if (this.actedOnBoard) return SettleVerdict.SETTLED;
     await this.releasePendingBurst();
     const rec = this.startKeyframeBurst(el);
-    const kind = await this.ph('settle', () => rec.ready());
+    const kind = await this.ph(Phase.SETTLE, () => rec.ready());
     this.pendingBurst = rec;
     return kind;
   }
@@ -1529,20 +1568,21 @@ export class CaptchaKrakenSolver {
     if (rec) await rec.abandon();
   }
 
-  private shouldSpeculate(puzzleSource: PuzzleSource, textMode: boolean): boolean {
+  private shouldSpeculate(puzzleSource: Vendor, textMode: boolean): boolean {
     if (this.config.videoSolveEnabled === false) return false;
     if (this.config.speculativeBurstEnabled === false) return false;
     if (this.actedOnBoard) return false;
-    if (puzzleSource === 'recaptcha') return false;
+    // reCAPTCHA's dynamic 3x3 replaces tiles in place: a burst there films a fade and calls it a cycle.
+    if (puzzleSource === Vendor.RECAPTCHA) return false;
     if (textMode) return false;
     return true;
   }
 
-  private shouldRetryAsAnimated(puzzleSource: PuzzleSource): boolean {
-    return this.repeatedAnswerSeen && puzzleSource !== 'recaptcha' && this.config.videoSolveEnabled !== false;
+  private shouldRetryAsAnimated(puzzleSource: Vendor): boolean {
+    return this.repeatedAnswerSeen && puzzleSource !== Vendor.RECAPTCHA && this.config.videoSolveEnabled !== false;
   }
 
-  private async getSolution(imagePath: string, puzzleSource: PuzzleSource = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
+  private async getSolution(imagePath: string, puzzleSource: Vendor = Vendor.UNKNOWN, retryMode: RetryMode | null = null, textMode = false): Promise<CliResponse> {
     let cacheKey: string | null = null;
     try {
       cacheKey = `${sha1(imagePath)}|${puzzleSource}|${retryMode ?? ''}|${textMode ? 'text' : ''}`;
@@ -1554,7 +1594,7 @@ export class CaptchaKrakenSolver {
   }
 
   /** One inference through the CLI. */
-  private async askModel(imagePath: string, puzzleSource: PuzzleSource = 'unknown', retryMode: string | null = null, textMode = false): Promise<CliResponse> {
+  private async askModel(imagePath: string, puzzleSource: Vendor = Vendor.UNKNOWN, retryMode: RetryMode | null = null, textMode = false): Promise<CliResponse> {
     const { cliRoot, py } = this.resolveCli();
     const { apiKey = process.env.CAPTCHA_KRAKEN_API_KEY ?? process.env.VLLM_API_KEY } = this.config;
     const args = buildSolveArgs({ imagePath, model: this.modelName(cliRoot), puzzleSource, retryMode, textMode, expert: this.config.expert });
@@ -1575,7 +1615,7 @@ export class CaptchaKrakenSolver {
             break;
           }
           if (Array.isArray(parsed)) actions = parsed;
-          else if (parsed.action && (parsed.target_bounding_box || parsed.target_coordinates || parsed.action === 'wait')) actions = [parsed];
+          else if (parsed.action && (parsed.target_bounding_box || parsed.target_coordinates || parsed.action === ActionKind.WAIT)) actions = [parsed];
         } catch { /* not json or not relevant */ }
       }
       return { actions, token_usage: tokenUsage };
@@ -1668,8 +1708,8 @@ export class CaptchaKrakenSolver {
     }
   }
 
-  /** Poll until the pixels stop changing: 'settled', 'animated', or 'timeout'. */
-  private async waitForElementSettled(el: ElementHandle, opts?: { pollMs?: number; settleFrames?: number; maxMs?: number; animatedAfterMs?: number; motionStreak?: number; threshold?: number }): Promise<'settled' | 'animated' | 'timeout'> {
+  /** Poll until the pixels stop changing. `motionStreak` exits early: rotating_obj_video changes every 133-171ms and once spent 4.5s proving it. */
+  private async waitForElementSettled(el: ElementHandle, opts?: { pollMs?: number; settleFrames?: number; maxMs?: number; animatedAfterMs?: number; motionStreak?: number; threshold?: number }): Promise<SettleVerdict> {
     const cfg = this.config;
     const pollMs = opts?.pollMs ?? cfg.settlePollMs ?? 220;
     const settleFrames = opts?.settleFrames ?? cfg.settleFrames ?? 2;
@@ -1693,14 +1733,14 @@ export class CaptchaKrakenSolver {
           stillStreak = moved ? 0 : stillStreak + 1;
           movedStreak = moved ? movedStreak + 1 : 0;
           unlink(frames.shift());
-          if (stillStreak >= settleFrames) return 'settled';
-          if (moved && (Date.now() - start) >= animatedAfterMs) return 'animated';
-          if (motionStreak && movedStreak >= motionStreak) return 'animated';
+          if (stillStreak >= settleFrames) return SettleVerdict.SETTLED;
+          if (moved && (Date.now() - start) >= animatedAfterMs) return SettleVerdict.ANIMATED;
+          if (motionStreak && movedStreak >= motionStreak) return SettleVerdict.ANIMATED;
         }
         prev = frames[frames.length - 1];
         await delay(pollMs);
       }
-      return 'timeout';
+      return SettleVerdict.TIMEOUT;
     } finally {
       for (const f of frames) unlink(f);
     }
@@ -1770,11 +1810,11 @@ export class CaptchaKrakenSolver {
 
   async moveAndClick(page: Page, element: ElementHandle) {
     await this.move(page, element);
-    await this.ph('mouse', () => this.human.click(page, this.human.at));
+    await this.ph(Phase.MOUSE, () => this.human.click(page, this.human.at));
   }
 
   private async performSmoothMove(page: Page, x: number, y: number) {
-    await this.ph('mouse', () => this.human.move(page, [x, y]));
+    await this.ph(Phase.MOUSE, () => this.human.move(page, [x, y]));
   }
 
   /** Element-relative click point: a random spot inside the box, inset 10% off its border. */
@@ -1797,10 +1837,10 @@ export class CaptchaKrakenSolver {
       return;
     }
     const at: [number, number] = [elementBox.x + rel[0], elementBox.y + rel[1]];
-    await this.ph('mouse', () => this.human.move(page, at));
+    await this.ph(Phase.MOUSE, () => this.human.move(page, at));
     await this.waitForKeyframe(element, awaitKeyframe, rel[0] / elementBox.width, rel[1] / elementBox.height);
     this.actedOnBoard = true;
-    await this.ph('mouse', () => this.human.click(page, at));
+    await this.ph(Phase.MOUSE, () => this.human.click(page, at));
   }
 
   private async executeClick(page: Page, _element: ElementHandle, action: ClickAction, elementBox: Box) {
@@ -1810,7 +1850,7 @@ export class CaptchaKrakenSolver {
       console.warn('Click action received without coordinates or bounding box', action);
       return;
     }
-    await this.ph('mouse', () => this.human.click(page, [elementBox.x + rel[0], elementBox.y + rel[1]]));
+    await this.ph(Phase.MOUSE, () => this.human.click(page, [elementBox.x + rel[0], elementBox.y + rel[1]]));
   }
 
   private async executeDrag(page: Page, _element: ElementHandle,
@@ -1819,10 +1859,13 @@ export class CaptchaKrakenSolver {
     this.actedOnBoard = true;
     const center = (bbox: [number, number, number, number]): [number, number] =>
       [elementBox.x + ((bbox[0] + bbox[2]) / 2) * elementBox.width, elementBox.y + ((bbox[1] + bbox[3]) / 2) * elementBox.height];
-    await this.ph('mouse', () => this.human.drag(page, center(action.source_bounding_box), center(action.target_bounding_box)));
+    await this.ph(Phase.MOUSE, () => this.human.drag(page, center(action.source_bounding_box), center(action.target_bounding_box)));
   }
 
-  /** The slider piece's box: the first visible match small enough to be a piece. */
+  /**
+   * The slider piece's box: the first visible match small enough to be a piece. Runs during detection, so it must
+   * not set `actedOnBoard`: marking there disabled `shouldSpeculate` on every slide solve.
+   */
   private async measurePieceBox(scope: Frame | ElementHandle, widgetWidth: number): Promise<Box | null> {
     for (const selector of SLIDE_PIECE_MEASURE_SELECTORS) {
       let found: ElementHandle[] = [];
@@ -1848,7 +1891,11 @@ export class CaptchaKrakenSolver {
     return null;
   }
 
-  /** The text box inside the widget, else a vendor-named one in its enclosing fieldset/form. */
+  /**
+   * The text box inside the widget, else a vendor-named one in its enclosing fieldset/form, never the page: the generic
+   * tail outside the widget is how a captcha's answer lands in a login form's username box. The widening exists for
+   * BotDetect, whose 280x50 `.BDC_CaptchaDiv` holds only the image while `#captchaCode` sits in a sibling div.
+   */
   private async answerBox(scope: Frame | ElementHandle, element?: ElementHandle | null): Promise<ElementHandle | null> {
     const inside = await this.findControl(scope, TEXT_INPUT_SELECTORS);
     if (inside !== null || !element) return inside;
@@ -1916,14 +1963,15 @@ export class CaptchaKrakenSolver {
     if (!hbox) return false;
     const startX = hbox.x + hbox.width / 2;
     const holdY = hbox.y + hbox.height / 2;
-    // Mask from the handle's band to the widget's bottom: the filled track moves too.
+    // Mask from the handle's band to the widget's bottom, not the handle's bottom: the filled track moves too, and
+    // masked to the band alone the loop once derived a 135.4px piece on Tencent's track against 42.0px masked to the bottom.
     const pad = Math.max(4, hbox.height * 0.35);
     const band: [number, number, number, number] = [0, hbox.y - elementBox.y - pad, elementBox.width, elementBox.height];
     const shots = [tmp('slide_0'), tmp('slide_1')];
     try {
       await this.move(page, handle, { paddingPercentage: 30 });
       await this.human.press(page);
-      await this.human.pause('grab');
+      await this.human.pause(PauseKind.GRAB);
       await this.shot(element, shots[0], this.config.elementScreenshotTimeoutMs ?? 8000);
       const scale = this.shotScale(shots[0], elementBox.width);
       const exclude = band.map((v) => v * scale) as [number, number, number, number];
@@ -1943,7 +1991,7 @@ export class CaptchaKrakenSolver {
       let ratio = 1;
       let i = 0;
       for (; i < SLIDE_MAX_CORRECTIONS; i++) {
-        await this.human.pause('probe');
+        await this.human.pause(PauseKind.PROBE);
         const seen = await this.trackPiece(element, shots[0], shots[1], exclude, offset * ratio * scale);
         if (seen) {
           widths.push([offset, (seen.bbox[2] - seen.bbox[0]) / scale]);
@@ -1971,7 +2019,7 @@ export class CaptchaKrakenSolver {
         const left = targetX - (settled !== null ? settled : lastCentre);
         if (Math.abs(left) > SLIDE_TOLERANCE_PX) console.warn(`[slide] out of corrections with ${left >= 0 ? '+' : ''}${left.toFixed(1)}px still to go — releasing off-target`);
       }
-      await this.human.pause('settle');
+      await this.human.pause(PauseKind.SETTLE);
     } finally {
       try { await this.human.release(page); } catch { /* the page may have navigated */ }
       for (const s of shots) unlink(s);

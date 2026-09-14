@@ -1,3 +1,4 @@
+// Waits on a count rather than a fixed sleep: the sleep flaked under node --test parallelism.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

@@ -1,3 +1,4 @@
+// 'No captcha' is not a failure: treating it as one made the first tick sleep the whole error backoff.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

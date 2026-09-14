@@ -1,3 +1,5 @@
+"""A bad line must be answered and the worker must live on: dying mid-solve leaves the mouse pressed."""
+
 import io
 import json
 

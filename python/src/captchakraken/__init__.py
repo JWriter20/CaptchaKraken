@@ -19,6 +19,18 @@ from .image_processor import ImageProcessor
 from .overlay import add_overlays_to_image
 
 from .errors import CaptchaKrakenAPIError
+from .kinds import (
+    ActionKind,
+    Availability,
+    ErrorCode,
+    HumanizationMode,
+    KeyframeMode,
+    Outcome,
+    PauseKind,
+    PromptFamily,
+    RetryMode,
+    Vendor,
+)
 
 from .humanize import (
     AppiumTouchBackend,
@@ -70,6 +82,16 @@ __all__ = [
     "CdpTouchBackend",
     "AppiumTouchBackend",
     "TouchscreenTouchBackend",
+    "ActionKind",
+    "Availability",
+    "ErrorCode",
+    "HumanizationMode",
+    "KeyframeMode",
+    "Outcome",
+    "PauseKind",
+    "PromptFamily",
+    "RetryMode",
+    "Vendor",
 ]
 
 __version__ = "3.0.0"

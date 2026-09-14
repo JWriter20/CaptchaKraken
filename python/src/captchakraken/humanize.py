@@ -1,7 +1,9 @@
 """How the driver moves: one pluggable object per input device. Mirrors js/src/humanize.ts.
 
-The pointer position lives here, not in the solver, because a touch mode that dispatches no
-motion between taps still has to say where the next gesture starts.
+Humanisation is an interface, not a dial: composing ours with camoufox's own juggler measured
+82.1s against 13.4s on one GeeTest v4 slider, and a mousemove at a touch widget is the wrong
+event type, not weak mimicry. The pointer position lives here, not in the solver, because a
+touch mode that dispatches no motion between taps still has to say where the next gesture starts.
 """
 
 from __future__ import annotations
@@ -13,10 +15,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from cursory import generate_trajectory
 
+from .kinds import HumanizationMode, PauseKind
+
 Point = Tuple[float, float]
 
-# Every inter-gesture wait the driver takes, named, so each device supplies its own table.
-PAUSE_KINDS = ("tap", "between", "grab", "drop", "probe", "settle", "key")
+# Each device supplies its own table. An unknown kind yields no wait rather than raising, so adding
+# a pause site cannot break a custom humanizer written against an older release.
+PAUSE_KINDS = tuple(PauseKind)
 
 
 def _delay(ms: float) -> None:
@@ -29,6 +34,7 @@ def _log(message: str) -> None:
 
 
 def _same_point(a: Point, b: Point) -> bool:
+    """`click` travels then clicks at the landing point; without this every click dispatched one redundant move."""
     return abs(float(a[0]) - float(b[0])) < 1e-6 and abs(float(a[1]) - float(b[1])) < 1e-6
 
 
@@ -43,7 +49,7 @@ class Humanizer:
 
     name = "custom"
     hovers = False
-    PAUSES: Dict[str, Tuple[float, float]] = {}
+    PAUSES: Dict[PauseKind, Tuple[float, float]] = {}
 
     def __init__(self, start: Point = (0.0, 0.0)) -> None:
         self.at: Point = (float(start[0]), float(start[1]))
@@ -63,33 +69,34 @@ class Humanizer:
     def type_text(self, page: Any, field: Any, text: str) -> bool:
         raise NotImplementedError
 
-    def _pause_ms(self, kind: str) -> float:
+    def _pause_ms(self, kind: PauseKind) -> float:
         lo, hi = self.PAUSES.get(kind, (0.0, 0.0))
         return random.uniform(lo, hi)
 
-    def pause(self, kind: str) -> None:
+    def pause(self, kind: PauseKind) -> None:
         _delay(self._pause_ms(kind))
 
     def click(self, page: Any, to: Point) -> None:
         self.move(page, to)
         self.press(page)
-        self.pause("tap")
+        self.pause(PauseKind.TAP)
         self.release(page)
 
     def drag(self, page: Any, src: Point, dst: Point) -> None:
         self.move(page, src)
         self.press(page)
-        self.pause("grab")
+        self.pause(PauseKind.GRAB)
         self.move(page, dst)
-        self.pause("drop")
+        self.pause(PauseKind.DROP)
         self.release(page)
 
 
 class MouseHumanizer(Humanizer):
-    name = "mouse"
+    name = HumanizationMode.MOUSE
     hovers = True
-    PAUSES = {"tap": (20.0, 50.0), "between": (80.0, 160.0), "grab": (50.0, 100.0), "drop": (50.0, 100.0),
-              "probe": (40.0, 80.0), "settle": (90.0, 210.0), "key": (45.0, 135.0)}
+    PAUSES = {PauseKind.TAP: (20.0, 50.0), PauseKind.BETWEEN: (80.0, 160.0), PauseKind.GRAB: (50.0, 100.0),
+              PauseKind.DROP: (50.0, 100.0), PauseKind.PROBE: (40.0, 80.0), PauseKind.SETTLE: (90.0, 210.0),
+              PauseKind.KEY: (45.0, 135.0)}
 
     def __init__(self, start: Point = (0.0, 0.0), frequency: int = 60) -> None:
         super().__init__(start)
@@ -168,17 +175,19 @@ class MouseHumanizer(Humanizer):
         self._down = False
 
     def type_text(self, page: Any, field: Any, text: str) -> bool:
+        # Clear first: a retry round arrives with the previous attempt still in the box, and typing would append.
         try:
             page.keyboard.press("Control+A")
         except Exception:
             pass
+        # Per character, not `type(text, delay=…)`: a constant inter-key delay is itself a signal these vendors score.
         for ch in text:
             try:
                 page.keyboard.type(ch)
             except Exception as exc:
                 _log(f"could not type into the captcha field: {exc}")
                 return False
-            self.pause("key")
+            self.pause(PauseKind.KEY)
         return True
 
 
@@ -198,7 +207,11 @@ class TouchBackend:
 
 
 class CdpTouchBackend(TouchBackend):
-    """`Input.dispatchTouchEvent` over CDP; Chromium-family pages launched with has_touch=True."""
+    """`Input.dispatchTouchEvent` over CDP; Chromium-family pages launched with has_touch=True.
+
+    Checked at construction, not per gesture: WebKit and Firefox expose no touch dispatch, and emitting mouse
+    events at a touch widget instead is worse than not running (the report reads as a model that cannot solve mobile).
+    """
 
     name = "cdp"
 
@@ -232,7 +245,11 @@ class CdpTouchBackend(TouchBackend):
 
 
 class AppiumTouchBackend(TouchBackend):
-    """W3C touch pointer actions for Appium and Selenium, paced by the device from one chain per leg."""
+    """W3C touch pointer actions for Appium and Selenium, paced by the device from one chain per leg.
+
+    Press and release are separate `perform` calls on purpose: W3C input state is per session, which is what
+    lets the slider press, screenshot, steer, screenshot and only then release. Raw protocol payload, so no client import.
+    """
 
     name = "appium"
 
@@ -246,7 +263,10 @@ class AppiumTouchBackend(TouchBackend):
         self._checked = False
 
     def _check_scale(self) -> None:
-        """Refuse an unset scale on a device whose pixel ratio is not 1: the finger would land elsewhere."""
+        """Refuse an unset scale on a device whose pixel ratio is not 1: the finger would land elsewhere, silently.
+
+        Read once, not per gesture (a solve makes hundreds); an unreadable ratio is absent evidence, so identity.
+        """
         self._checked = True
         if self._scale_given or self._page is None or not hasattr(self._page, "evaluate"):
             return
@@ -263,6 +283,7 @@ class AppiumTouchBackend(TouchBackend):
             "are already mapped.")
 
     def _map(self, x: float, y: float) -> Tuple[int, int]:
+        # Unset scale and an explicit 1.0 are different facts; only the first is checked.
         if not self._checked:
             self._check_scale()
         return int(round(self._origin[0] + x * self._scale)), int(round(self._origin[1] + y * self._scale))
@@ -284,6 +305,7 @@ class AppiumTouchBackend(TouchBackend):
                        {"type": "pointerDown", "button": 0}])
 
     def move(self, path: Sequence[Tuple[float, float, float]]) -> None:
+        # The per-sample gap becomes the move's duration, so the device interpolates like a real finger.
         actions = []
         for x, y, dt_ms in path:
             mx, my = self._map(x, y)
@@ -335,10 +357,12 @@ def touch_backend_for(page: Any, driver: Any = None, **kwargs: Any) -> TouchBack
 class MobileHumanizer(Humanizer):
     """A finger on glass: no hover, touch events only, slower and more variable pauses."""
 
-    name = "mobile"
+    name = HumanizationMode.MOBILE
     hovers = False
-    PAUSES = {"tap": (55.0, 130.0), "between": (140.0, 320.0), "grab": (90.0, 190.0), "drop": (80.0, 170.0),
-              "probe": (70.0, 140.0), "settle": (140.0, 300.0), "key": (110.0, 320.0)}
+    # Tap: measured human touch dwell clusters at 60-120ms. Key: a soft keyboard is ~3x slower than a physical one.
+    PAUSES = {PauseKind.TAP: (55.0, 130.0), PauseKind.BETWEEN: (140.0, 320.0), PauseKind.GRAB: (90.0, 190.0),
+              PauseKind.DROP: (80.0, 170.0), PauseKind.PROBE: (70.0, 140.0), PauseKind.SETTLE: (140.0, 300.0),
+              PauseKind.KEY: (110.0, 320.0)}
 
     def __init__(self, start: Point = (0.0, 0.0), backend: Any = None, driver: Any = None,
                  frequency: int = 90, **backend_kwargs: Any) -> None:
@@ -350,6 +374,7 @@ class MobileHumanizer(Humanizer):
         self._down = False
 
     def reset(self, page: Any) -> None:
+        # A solve that timed out mid-gesture leaves a pointer down in the session's input state; lift it.
         if self._down:
             try:
                 self._touch(page).up(*self.at)
@@ -382,7 +407,7 @@ class MobileHumanizer(Humanizer):
         """A tap whose contact patch wobbles a pixel while held; a motionless tap is a synthetic one."""
         self.move(page, to)
         self.press(page)
-        held = self._pause_ms("tap")
+        held = self._pause_ms(PauseKind.TAP)
         _delay(held * 0.5)
         try:
             self._touch(page).move([(self.at[0] + random.gauss(0.0, 0.9), self.at[1] + random.gauss(0.0, 0.9), 0.0)])
@@ -392,6 +417,7 @@ class MobileHumanizer(Humanizer):
         self.release(page)
 
     def type_text(self, page: Any, field: Any, text: str) -> bool:
+        # Cleared through the element: there is no Control key on a phone, and no `page.keyboard` on Appium.
         for clear, arg in (("clear", ()), ("fill", ("",))):
             fn = getattr(field, clear, None)
             if fn is not None:
@@ -407,14 +433,17 @@ class MobileHumanizer(Humanizer):
             except Exception as exc:
                 _log(f"could not type into the captcha field: {exc}")
                 return False
-            self.pause("key")
+            self.pause(PauseKind.KEY)
         return True
 
 
 class NullHumanizer(Humanizer):
-    """No humanisation: one move per gesture and a single fill. Fast, and detectable."""
+    """No humanisation: one move per gesture and a single fill. Fast, and detectable.
 
-    name = "none"
+    Still moves and presses: a click dispatched with no preceding move fails on vendors that need a hover state first.
+    """
+
+    name = HumanizationMode.NONE
     hovers = False
 
     def move(self, page: Any, to: Point) -> None:
@@ -451,20 +480,27 @@ class NullHumanizer(Humanizer):
             return False
 
 
-MODES = {"mouse": MouseHumanizer, "mobile": MobileHumanizer, "none": NullHumanizer}
+MODES = {HumanizationMode.MOUSE: MouseHumanizer, HumanizationMode.MOBILE: MobileHumanizer,
+         HumanizationMode.NONE: NullHumanizer}
 
 
 def resolve(config: Any) -> Humanizer:
-    """`config.humanizer`, else `config.humanization`, else CAPTCHA_HUMANIZATION, else mouse."""
+    """`config.humanizer`, else `config.humanization`, else CAPTCHA_HUMANIZATION, else mouse.
+
+    The env var loses to code, the opposite of the model-identity settings, because the right mode is a
+    property of the page: an env var flipping a desktop solve to touch dispatch would break every one silently.
+    """
     custom = getattr(config, "humanizer", None)
     if custom is not None:
         return custom
-    mode = str(getattr(config, "humanization", None) or os.getenv("CAPTCHA_HUMANIZATION") or "mouse").strip().lower()
-    if mode not in MODES:
-        raise ValueError(f"unknown humanization mode {mode!r}; expected one of {', '.join(sorted(MODES))}, "
-                         "or pass your own object as PageSolverConfig.humanizer")
+    raw = str(getattr(config, "humanization", None) or os.getenv("CAPTCHA_HUMANIZATION") or "mouse").strip().lower()
+    try:
+        mode = HumanizationMode(raw)
+    except ValueError:
+        raise ValueError(f"unknown humanization mode {raw!r}; expected one of {', '.join(sorted(MODES))}, "
+                         "or pass your own object as PageSolverConfig.humanizer") from None
     start = getattr(config, "starting_mouse_position", None) or (0.0, 0.0)
-    if mode == "mobile":
+    if mode is HumanizationMode.MOBILE:
         return MobileHumanizer(start, driver=getattr(config, "touch_driver", None),
                                **(getattr(config, "touch_transform", None) or {}))
     return MODES[mode](start)

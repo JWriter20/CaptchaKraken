@@ -1,3 +1,5 @@
+"""Driver semantics pinned by incidents: an invisible reCAPTCHA anchor is not "still loading"; `unsupported` after an interaction is a round transition; the Verify finder is scoped to the widget so a host form's own Submit is unreachable; camoufox reports viewport None and clamping to an exact edge deadlocks its juggler (upstream #225); the budget is checked mid-attempt after a session ran ten minutes past a 120s timeout; a slide's release is its submit."""
+
 from __future__ import annotations
 
 import struct

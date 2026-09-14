@@ -1,3 +1,5 @@
+"""GeeTest's control is `<div class="geetest_submit geetest_disable">OK</div>` (wrong tag, wrong word) beside decoy tooltips that also say OK. It scored 0/31 and then 0/13, which reads exactly like a puzzle the model cannot do. Pin the finder, not a rate."""
+
 from __future__ import annotations
 
 import sys

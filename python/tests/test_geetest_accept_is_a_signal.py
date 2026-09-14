@@ -1,3 +1,5 @@
+"""GeeTest paints success inside the open panel with no token, and `geetest_popup_wrap` carries the success class at zero height while shut, ahead of the real banner in document order. Before this check, 20 drags cost 34 model calls."""
+
 import os
 import sys
 

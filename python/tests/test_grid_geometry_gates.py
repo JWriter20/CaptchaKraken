@@ -1,3 +1,5 @@
+"""Every test here is a bug that happened; box lists rather than images because the failures were in the arithmetic."""
+
 import os
 import sys
 
@@ -36,11 +38,13 @@ def test_a_grid_with_gutters_is_regular(gap):
 
 
 def test_inter_row_rounding_is_not_a_phantom_separator():
+    """Edges taken as the SET of every box's edge read [110, 1, 110, 1] on any slant and rejected 101 real hCaptcha grids."""
     boxes = grid_boxes(91, 138, 110, 0, 3, 3, jitter=[0, 1, 1])
     assert _boxes_are_regular(boxes, 3, 3), "inter-row rounding read as an uneven grid"
 
 
 def test_duplicate_lines_one_pixel_apart_are_rejected():
+    """A text captcha yielded column edges [206, 254, 255, 303] whose cells each measured a plausible ~50px."""
     boxes = []
     for y in (107, 157, 210):
         for x in (206, 254, 255):
@@ -74,11 +78,13 @@ def test_regularity_tolerance_is_actually_applied():
 
 
 def test_the_coverage_floor_sits_below_every_real_grid():
+    """Measured over 2239 real grids the smallest coverage is 0.348; the floor must stay under it with room."""
     assert MIN_IMAGE_AREA_COVERAGE < 0.348, "coverage floor is above a real grid"
     assert MIN_IMAGE_AREA_COVERAGE >= 0.20, "floor so low it rejects nothing"
 
 
 def test_the_two_coverage_constants_are_not_the_same_knob():
+    """MIN_IMAGE_AREA_COVERAGE was first added under the existing name MIN_GRID_COVERAGE; the area check ran at 0.72 and detection went to 0/2210."""
     assert hasattr(fg, "MIN_IMAGE_AREA_COVERAGE")
     if hasattr(fg, "MIN_GRID_COVERAGE"):
         assert fg.MIN_IMAGE_AREA_COVERAGE != fg.MIN_GRID_COVERAGE, (

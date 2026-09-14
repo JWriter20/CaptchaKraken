@@ -1,3 +1,5 @@
+"""A static check because the path is unreachable in the hermetic tier; the slicer sorts frames by name, so an unnamed stem would interleave clips."""
+
 import ast
 import inspect
 from pathlib import Path

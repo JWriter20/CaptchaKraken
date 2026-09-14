@@ -1,3 +1,5 @@
+// Masked to the handle's band the loop derived a 135.4px piece on Tencent's track; masked to the widget's bottom, 42.0px. The mask must be
+// in the shot's pixel space, not CSS pixels.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

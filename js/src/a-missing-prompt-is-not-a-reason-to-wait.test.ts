@@ -1,3 +1,5 @@
+// `waitForSelector('.prompt-text')` rejects when the element is absent, hCaptcha fixtures draw none, and the many-round types paid
+// 12-18s of timeouts per solve.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 

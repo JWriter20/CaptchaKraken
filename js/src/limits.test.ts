@@ -1,3 +1,4 @@
+// Margin on BOTH sides of 5 < 8 < 10, not just ordering; the server-side constants duplicate the gateway's pricing.ts and must be moved together.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

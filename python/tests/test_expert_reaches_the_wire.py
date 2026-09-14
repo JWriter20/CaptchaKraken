@@ -1,3 +1,5 @@
+"""Routing is proven on the wire, per request; the registry is read once per planner, never per request."""
+
 import json
 import pytest
 

@@ -1,3 +1,9 @@
+"""A gutter that is nearly one colour is still a gutter: vendor gutters are literally constant, so any dither ended the walk.
+
+Fixed by scaling the tolerances to the measured noise floor. Bridging bad pixels collapsed real reCAPTCHA 3x3s 40/40 -> 7/40;
+flat widening to 10/8 cost one real sample and 14/12 four. Fixtures are synthesised so the test needs no private corpus.
+"""
+
 import os
 import sys
 import tempfile
@@ -58,6 +64,7 @@ def test_a_dithered_gutter_is_still_detected(noise):
 
 
 def test_a_pristine_image_keeps_the_original_tolerances():
+    """The safety property: an image with no noise detects exactly as before, so NOISE_GAIN cannot loosen pristine captchas."""
     from captchakraken.tool_calls.find_grid import (
         image_noise, walk_tolerances, SEED_L_TOL, STEP_L_TOL, CONT_TOL)
     import captchakraken.tool_calls.find_grid as fg
@@ -77,6 +84,7 @@ def test_pure_texture_is_still_rejected():
 
 
 def test_a_gutter_that_never_returns_is_not_bridged():
+    """Spike tolerance is bounded: a tile bleeding across the separator must still end the line."""
     img = _grid_image(gutter_noise=0.0, seed=11)
     x = PAD + TILE
     img[SIDE // 2:, x:x + GAP] = 40

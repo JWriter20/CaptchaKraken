@@ -1,3 +1,4 @@
+// NaN serialises to null and an unpriced model must not poison the total; two usage dialects and the nested cached_tokens field all have to add up.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

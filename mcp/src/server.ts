@@ -1,7 +1,11 @@
+/**
+ * NOTHING SPENDS MONEY WITHOUT A HUMAN. `get_topup_link` returns a URL; it does not charge a card, and
+ * there is no tool that can.
+ */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { ApiError, ControlPlane } from './api.js';
+import { ApiError, ControlPlane, NOT_SIGNED_IN } from './api.js';
 import {
   clearCredential,
   credentialPath,
@@ -13,7 +17,24 @@ import {
 } from './credentials.js';
 import type { PendingDevice } from './credentials.js';
 
+// Under the common 60s MCP client timeout: a sign-in that blocks for two minutes gets killed with the device code stranded.
 const SIGN_IN_WAIT_MS = 25_000;
+
+/** What the device-code poll came back with. */
+export const PollKind = { GRANTED: 'granted', WAITING: 'waiting', DENIED: 'denied', DEAD: 'dead' } as const;
+export type PollKind = (typeof PollKind)[keyof typeof PollKind];
+
+/** What `/billing/checkout` returned: a page to pick an amount on, or a Stripe session for one amount. */
+export const TopUpKind = { CHOOSER: 'chooser', CHECKOUT: 'checkout' } as const;
+export type TopUpKind = (typeof TopUpKind)[keyof typeof TopUpKind];
+
+/** RFC 8628 §3.5 device-token error codes this client acts on. */
+const DeviceError = {
+  AUTHORIZATION_PENDING: 'authorization_pending',
+  SLOW_DOWN: 'slow_down',
+  ACCESS_DENIED: 'access_denied',
+  EXPIRED_TOKEN: 'expired_token',
+} as const;
 
 interface DeviceStart {
   device_code: string;
@@ -47,6 +68,7 @@ interface AccountResponse {
     low_balance_threshold: number | null;
     low_balance: boolean;
 
+    // Optional for a control plane older than migration 0008; absent reads as a normal account, the safe way to be wrong.
     unlimited?: boolean;
     is_admin?: boolean;
   };
@@ -114,7 +136,7 @@ function failure(body: string): ToolResult {
 
 function describe(error: unknown): ToolResult {
   if (error instanceof ApiError) {
-    if (error.code === 'not_signed_in' || error.status === 401) {
+    if (error.code === NOT_SIGNED_IN || error.status === 401) {
       return failure('Not signed in to CaptchaKraken. Run the `sign_in` tool first.');
     }
     return failure(`${error.code}: ${error.message}`);
@@ -186,7 +208,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
 
         const outcome = await pollForToken(api, pending);
 
-        if (outcome.kind === 'granted') {
+        if (outcome.kind === PollKind.GRANTED) {
           saveCredential(baseUrl, {
             accessToken: outcome.grant.access_token,
             expiresAt: outcome.grant.expires_at,
@@ -205,7 +227,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           );
         }
 
-        if (outcome.kind === 'waiting') {
+        if (outcome.kind === PollKind.WAITING) {
           return text(
             `Waiting for approval.\n\n` +
               `  Open:  ${pending.verificationUriComplete}\n` +
@@ -218,7 +240,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
         const { pending: _dropped, ...withoutPending } = credential;
         saveCredential(baseUrl, withoutPending);
         return failure(
-          outcome.kind === 'denied'
+          outcome.kind === PollKind.DENIED
             ? 'The sign-in was declined in the browser. Nothing was connected.'
             : 'That sign-in code expired or was already used. Call `sign_in` again for a new one.',
         );
@@ -239,11 +261,12 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     },
     async () => {
       try {
+        // Revoke server-side first; if that fails the file stays, because it is the only copy of the token.
         await api.request('/api/v1/signout', { method: 'POST' });
         clearCredential(baseUrl);
         return text('Signed out. The token has been revoked on the server and removed from disk.');
       } catch (error) {
-        if (error instanceof ApiError && (error.status === 401 || error.code === 'not_signed_in')) {
+        if (error instanceof ApiError && (error.status === 401 || error.code === NOT_SIGNED_IN)) {
           clearCredential(baseUrl);
           return text('There was no live token. Local state cleared.');
         }
@@ -535,7 +558,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
       try {
         const result = await api.request<{
           url: string;
-          kind: 'chooser' | 'checkout';
+          kind: TopUpKind;
           usd?: number;
           credits?: number;
           packs?: Array<{ usd: number; credits: number; bonus_percent?: number }>;
@@ -546,7 +569,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           body: usd === undefined ? {} : { usd },
         });
 
-        if (result.kind === 'checkout') {
+        if (result.kind === TopUpKind.CHECKOUT) {
           return text(
             `Stripe checkout for $${result.usd} (${result.credits?.toLocaleString('en-US')} credits):\n\n  ${result.url}\n\n` +
               'Nothing has been charged. The human completes the payment on that page, and the credits land within seconds of it succeeding.',
@@ -658,6 +681,9 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           }>;
         }>('/api/v1/models', { authenticated: false });
 
+        // `hosted` and `published` are separate flags read for what they say: deriving one from the other
+        // misreported Twilight and Abyss both ways. No video line: animated support is a generation property,
+        // and on 2026-09-06 the control plane had Sunlight flagged false.
         const lines = [`Hosted endpoint: ${listing.base_url}`, ''];
         for (const model of listing.models) {
           lines.push(`${model.name} — ${model.zone}`);
@@ -691,17 +717,18 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
 }
 
 type PollOutcome =
-  | { kind: 'granted'; grant: TokenGrant }
-  | { kind: 'waiting' }
-  | { kind: 'denied' }
-  | { kind: 'dead' };
+  | { kind: typeof PollKind.GRANTED; grant: TokenGrant }
+  | { kind: typeof PollKind.WAITING }
+  | { kind: typeof PollKind.DENIED }
+  | { kind: typeof PollKind.DEAD };
 
+/** The pending code is persisted, so a `waiting` return resumes the same request on the next call. */
 async function pollForToken(api: ControlPlane, pending: PendingDevice): Promise<PollOutcome> {
   const deadline = Date.now() + SIGN_IN_WAIT_MS;
   let interval = Math.max(1, pending.intervalSeconds) * 1000;
 
   while (Date.now() < deadline) {
-    if (pending.expiresAtMs <= Date.now()) return { kind: 'dead' };
+    if (pending.expiresAtMs <= Date.now()) return { kind: PollKind.DEAD };
 
     try {
       const grant = await api.request<TokenGrant>('/api/v1/device/token', {
@@ -709,29 +736,31 @@ async function pollForToken(api: ControlPlane, pending: PendingDevice): Promise<
         authenticated: false,
         body: { device_code: pending.deviceCode },
       });
-      return { kind: 'granted', grant };
+      return { kind: PollKind.GRANTED, grant };
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;
 
       switch (error.code) {
-        case 'authorization_pending':
+        case DeviceError.AUTHORIZATION_PENDING:
           break;
-        case 'slow_down':
+        case DeviceError.SLOW_DOWN:
+          // Doubles for good, per RFC 8628 §3.5; a client that ignores it hammers an unauthenticated endpoint.
           interval *= 2;
           break;
-        case 'access_denied':
-          return { kind: 'denied' };
-        case 'expired_token':
-          return { kind: 'dead' };
+        case DeviceError.ACCESS_DENIED:
+          return { kind: PollKind.DENIED };
+        case DeviceError.EXPIRED_TOKEN:
+          return { kind: PollKind.DEAD };
         default:
           throw error;
       }
     }
 
+    // The final sleep is clipped to the deadline so the tool answers inside the client's timeout.
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await sleep(Math.min(interval, remaining));
   }
 
-  return { kind: 'waiting' };
+  return { kind: PollKind.WAITING };
 }

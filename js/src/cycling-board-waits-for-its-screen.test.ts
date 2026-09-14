@@ -1,3 +1,6 @@
+// The gate keys on steady-screen COUNT, not slicing mode: `even` means the slicer could not prove recurrence, and 32 clips sliced `even`
+// while sitting on 2-3 steady screens. The pointer parks first (a 274-647ms move against a 1500ms dwell), the budget is 2.7s x 3 screens,
+// the local-evidence wait is capped at one burst (uncapped it ran 36s), and a touched board is never re-classified by filming it.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CaptchaKrakenSolver, SOLVE_DEFAULTS } from './solver';
+import { SettleVerdict } from './kinds';
 
 function gated(opts: { mode: string | null; screens: number; matchAfter?: number }) {
   const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
@@ -166,16 +170,16 @@ test('a board we have already touched is not re-classified by filming it', async
     filmed += 1;
     return {
       moved: () => true, screensSeen: () => 9, stableFrame: () => null,
-      ready: async () => 'animated', verdict: async () => true,
+      ready: async () => SettleVerdict.ANIMATED, verdict: async () => true,
       abandon: async () => {}, finish: async () => '/tmp/nope',
     };
   };
   const element: any = { screenshot: async () => undefined };
 
-  assert.equal(await solver.classifyByRecording(element), 'animated');
+  assert.equal(await solver.classifyByRecording(element), SettleVerdict.ANIMATED);
   assert.equal(filmed, 1);
 
   solver.actedOnBoard = true;
-  assert.equal(await solver.classifyByRecording(element), 'static');
+  assert.equal(await solver.classifyByRecording(element), SettleVerdict.SETTLED);
   assert.equal(filmed, 1, 'a touched board must not be filmed to classify it');
 });

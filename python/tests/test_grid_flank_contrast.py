@@ -1,3 +1,9 @@
+"""A chosen lattice must separate something: a video keyframe once produced a confident 12-cell grid over smooth teal.
+
+Probe distances scale with the pitch (hCaptcha gutters are ~13px), the statistic averages both flanks because
+`min` put real grids below the false positives, and the gate runs on the chosen grid only (per-line it added FPs 2 -> 4 -> 6).
+"""
+
 import os
 import sys
 
@@ -56,6 +62,7 @@ def test_a_line_that_separates_nothing_has_no_contrast():
 
 @pytest.mark.parametrize("gutter_px", [4, 13, 20, MAX_THICKNESS + 6])
 def test_a_wide_gutter_is_still_measured_against_the_cells(gutter_px):
+    """The hCaptcha regression: a fixed-offset probe sat inside gutters this wide and reported no contrast."""
     lab, line, pitch = vertical_gutter(gutter_px)
     assert _flank_contrast(lab, line, pitch) > GRID_FLANK_MIN_DE, (
         f"a {gutter_px}px gutter was measured against itself, not against its cells")
@@ -66,6 +73,7 @@ def test_the_probe_clears_any_gutter_the_tracer_would_accept():
 
 
 def test_one_pale_neighbour_does_not_condemn_a_real_gutter():
+    """Why mean, not min: a white gutter with one near-white tile is a real separator, and `min` scored it near zero."""
     pitch, h = 120, 300
     img = image(pitch * 2, h, 0)
     img[:, :pitch] = 245

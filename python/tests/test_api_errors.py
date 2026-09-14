@@ -1,3 +1,7 @@
+"""Hosted refusals must read as CaptchaKraken problems: a camoufox user out of credits once saw `vLLM 402 Payment Required`.
+Self-hosted failures stay untouched, bearer-token hint included.
+"""
+
 import json
 
 import pytest
@@ -75,6 +79,7 @@ def test_429_honours_retry_after():
 
 
 def test_429_without_retry_after_does_not_invent_one():
+    """A confidently wrong 'wait 3 seconds' is worse than saying nothing."""
     exc = errors.from_response(
         gateway(429, "rate_limited", "Too many requests."), "http://x/v1/chat/completions"
     )
@@ -120,6 +125,7 @@ def test_413_request_too_large_suggests_the_fix():
 
 
 def test_401_invalid_key_mentions_the_mcp_path():
+    """Someone onboarded through the MCP has no env var to check."""
     exc = errors.from_response(
         gateway(401, "invalid_api_key", "Invalid API key."), "http://x/v1/chat/completions"
     )
@@ -128,6 +134,7 @@ def test_401_invalid_key_mentions_the_mcp_path():
 
 
 def test_an_unknown_code_carries_the_servers_own_message_through():
+    """The eleventh code must not be reported worse than the ten known ones."""
     exc = errors.from_response(
         gateway(
             400,
@@ -175,6 +182,7 @@ def test_json_without_an_error_object_is_treated_as_self_hosted():
 
 
 def test_payload_round_trips_the_machine_readable_fields():
+    """The JS driver rebuilds the error from exactly this; a dropped field means camoufox users lose the top-up link."""
     exc = CaptchaKrakenAPIError(
         "CaptchaKraken: out of credits.",
         status=402,

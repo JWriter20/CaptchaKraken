@@ -1,3 +1,8 @@
+"""A photo is not a selection badge: pixel counts alone reported 74 phantoms over 3051 fresh corners, each a correct
+tile silently dropped from the model's answer. Requiring the white within 2px of the teal hull leaves 15 while
+still finding all 1200 rendered badges in both drawings; the reCAPTCHA chip measured clean and is unchanged.
+"""
+
 from __future__ import annotations
 
 import os
@@ -76,6 +81,7 @@ _PHANTOM_BUDGET = 0.012
 
 @pytest.mark.skipif(not _CORPUS.is_dir(), reason=f"grid corpus not present at {_CORPUS}")
 def test_fresh_boards_report_almost_no_selections():
+    """The budget is a ratchet set so the previous release fails it (2026-09-06: this tree 1.13%, origin/main 1.41%); re-record both arms on one corpus, only ever downward."""
     tiles = phantoms = 0
     offenders = []
     for path in sorted(_CORPUS.glob("*.png")):

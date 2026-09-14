@@ -1,3 +1,5 @@
+"""Each test is one of the five gates: a false positive clicks the page background, a false negative never starts the solve."""
+
 import cv2
 import numpy as np
 import pytest
@@ -45,11 +47,13 @@ def test_a_wide_rectangle_is_not_a_checkbox(tmp_path):
 
 
 def test_a_tiny_square_is_not_a_checkbox(tmp_path):
+    """Below 20px a glyph is indistinguishable from a box."""
     img = _draw_square(_canvas(tmp_path), 150, 120, 12, thickness=2)
     assert find_checkbox(_save(tmp_path / "tiny.png", img)) is None
 
 
 def test_a_square_full_of_detail_is_not_a_checkbox(tmp_path):
+    """Without the content gate the first tile of a 3x3 grid gets clicked as if it were the widget."""
     img = _canvas(tmp_path)
     x, y, side = 140, 110, 44
     _draw_square(img, x, y, side)

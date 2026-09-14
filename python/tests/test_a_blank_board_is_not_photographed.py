@@ -1,3 +1,5 @@
+"""Measured on gt4.geetest.com over ten live attempts: six of fifty-two requests carried a board under 5% ink and every one came back dead centre. The blank panel is the stillest state, so the settle gate cannot catch it; the middle is measured because chrome paints early; the floor is blank-vs-anything (0.000-0.004 against 0.19-0.56), not puzzle density."""
+
 import os
 import sys
 import tempfile

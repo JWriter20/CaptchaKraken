@@ -47,6 +47,10 @@ export interface PlaywrightFrame {
   ): Promise<unknown>;
 }
 
+/**
+ * Structural on purpose: the package depends on no browser library, and the version skew between
+ * playwright, patchright and camoufox-js makes a nominal import the wrong one for someone.
+ */
 export interface PlaywrightPage {
   mouse: {
     move(x: number, y: number, options?: { steps?: number }): Promise<void>;
@@ -54,6 +58,7 @@ export interface PlaywrightPage {
     up(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
   };
 
+  /** `type` is called per character by the humanizer; a constant `delay` would itself be a signal. */
   keyboard: {
     type(text: string, options?: { delay?: number }): Promise<void>;
     press(key: string, options?: { delay?: number }): Promise<void>;

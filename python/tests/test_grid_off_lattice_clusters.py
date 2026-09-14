@@ -1,3 +1,7 @@
+"""Off-lattice strays are counted as clusters: one busy tile's roofline, eaves and railing (three edges in 34px)
+rejected a reCAPTCHA 4x4 whose lattice had already won scoring.
+"""
+
 import os
 import sys
 
@@ -32,4 +36,5 @@ def test_the_window_is_below_the_minimum_cell_size():
 
 
 def test_the_window_sits_inside_its_measured_plateau():
+    """17..23 all scored 1091/1106 targets at 2/458 false positives; 16 lost both busy-tile 4x4s and 24 added a drag-puzzle FP."""
     assert 17 <= OFF_LATTICE_CLUSTER_PX <= 23

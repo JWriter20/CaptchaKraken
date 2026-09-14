@@ -1,3 +1,5 @@
+"""`done` must not require a box: GeeTest closes the panel on accept, and 22 of 22 across four puzzles died there and were banked as model errors. An allow-list, so a new coordinate action fails loudly."""
+
 from __future__ import annotations
 
 import sys

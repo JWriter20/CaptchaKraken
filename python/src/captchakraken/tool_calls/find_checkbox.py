@@ -1,3 +1,5 @@
+"""Where the driver clicks first, before any model runs. Neither a false positive nor a false negative raises."""
+
 import cv2
 import numpy as np
 from typing import Optional, Tuple
@@ -27,9 +29,11 @@ def find_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:
         if not (0.8 < aspect_ratio < 1.2):
             continue
 
+        # Below 20px a glyph is indistinguishable from a box.
         if w < 20 or h < 20:
             continue
 
+        # Above 5% of the image it is a panel or the challenge frame, not the checkbox inside one.
         if not (0.001 * image_area < area < 0.05 * image_area):
             continue
 
@@ -38,7 +42,8 @@ def find_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:
         if extent < 0.8:
             continue
 
-        roi = gray[y+5:y+h-5, x+5:x+w-5] 
+        # A checkbox is empty inside; without this the first tile of a 3x3 grid gets clicked as the widget.
+        roi = gray[y+5:y+h-5, x+5:x+w-5]
         if roi.size > 0:
             std_dev = np.std(roi)
             if std_dev > 35.0:
@@ -46,6 +51,7 @@ def find_checkbox(image_path: str) -> Optional[Tuple[int, int, int, int]]:
 
         candidates.append((x, y, w, h))
 
+    # Many candidates means a grid, not a checkbox page.
     if len(candidates) > 2:
         return None
 

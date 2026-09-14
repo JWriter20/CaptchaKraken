@@ -1,3 +1,5 @@
+"""wait_for_selector('.prompt-text') throws when the element does not exist, and hCaptcha fixtures draw none: 12s and 18s timeouts per solve on the many-round types."""
+
 import pytest
 
 from captchakraken.page_solver import PageSolver, PageSolverConfig

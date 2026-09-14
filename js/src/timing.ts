@@ -1,16 +1,20 @@
-export const PRODUCTIVE = new Set(['inference', 'mouse']);
+import { Phase } from './kinds.js';
+
+// Always collected, printed only under CAPTCHA_TIMINGS=1: a budget you have to opt into is one nobody has when the slow solve happens.
+export const PRODUCTIVE: ReadonlySet<Phase> = new Set<Phase>([Phase.INFERENCE, Phase.MOUSE]);
 
 export function timingsEnabled(): boolean {
   return process.env.CAPTCHA_TIMINGS === '1';
 }
 
+/** Phases attribute, they do not partition: a nested phase counts under both names, and re-entering an open one counts once. */
 export class PhaseBudget {
-  readonly totals = new Map<string, number>();
-  readonly counts = new Map<string, number>();
-  private readonly open: string[] = [];
+  readonly totals = new Map<Phase, number>();
+  readonly counts = new Map<Phase, number>();
+  private readonly open: Phase[] = [];
   private readonly t0 = Date.now();
 
-  async phase<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  async phase<T>(name: Phase, fn: () => Promise<T>): Promise<T> {
     if (this.open.includes(name)) return fn();
     this.open.push(name);
     const t0 = Date.now();
@@ -22,7 +26,7 @@ export class PhaseBudget {
     }
   }
 
-  add(name: string, ms: number): void {
+  add(name: Phase, ms: number): void {
     this.totals.set(name, (this.totals.get(name) ?? 0) + ms);
     this.counts.set(name, (this.counts.get(name) ?? 0) + 1);
   }

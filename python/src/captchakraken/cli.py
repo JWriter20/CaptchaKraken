@@ -13,6 +13,7 @@ import traceback
 from typing import Any, Callable, Dict, List, Optional
 
 from .errors import CaptchaKrakenAPIError
+from .kinds import Outcome, PromptFamily, RetryMode, Vendor
 from .solver import CaptchaSolver, UnsupportedCaptchaError
 
 
@@ -54,7 +55,10 @@ def grid_cell_states(img_a: str, img_b: str, grid_boxes) -> dict:
 
 
 def match_region(ref: str, live: str, cx: float, cy: float, tolerance: Optional[float] = None) -> dict:
-    """Does `live` look like `ref` around the 0-1 point? The wait gate behind an animated click."""
+    """Does `live` look like `ref` around the 0-1 point? The wait gate behind an animated click.
+
+    The neighbourhood only: a whole-frame match would need every unrelated sprite to align and would essentially never open.
+    """
     import cv2
 
     from .keyframes import MATCH_REGION_TOLERANCE, region_box, region_diff_ratio
@@ -168,12 +172,12 @@ def _track_piece(args):
 
 def _report_outcome(args):
     """Tell the hosted API whether the widget accepted. Always exits 0: this runs after the solve is over."""
-    if len(args) < 2 or args[1] not in ("solved", "failed"):
+    if len(args) < 2 or args[1] not in list(Outcome):
         _fail("Usage: captchakraken report-outcome <session-id> solved|failed")
     try:
         from .planner import ActionPlanner
 
-        return {"reported": bool(ActionPlanner().report_outcome(args[0], args[1] == "solved"))}
+        return {"reported": bool(ActionPlanner().report_outcome(args[0], Outcome(args[1]) == Outcome.SOLVED))}
     except Exception as exc:
         return {"reported": False, "error": str(exc)}
 
@@ -247,7 +251,7 @@ def _solve_animated(args):
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--model", default=None)
     parser.add_argument("--api-key", default=None)
-    parser.add_argument("--expert", default=None, choices=["pixel", "grid", "video", "text"])
+    parser.add_argument("--expert", default=None, type=PromptFamily, choices=list(PromptFamily))
     opts = parser.parse_args(args)
     frames = sorted(p for ext in ("png", "jpg", "jpeg") for p in glob.glob(os.path.join(opts.frames_dir, f"*.{ext}")))
     if not frames:
@@ -352,11 +356,12 @@ def main():
     parser.add_argument("api_provider", nargs="?", default="captchaKrakenApi", choices=["captchaKrakenApi"],
                         help="Kept for argv compatibility.")
     parser.add_argument("api_key", nargs="?", default=None, help="Bearer token (or CAPTCHA_KRAKEN_API_KEY).")
-    parser.add_argument("--puzzle-source", default="unknown", choices=["hcaptcha", "recaptcha", "unknown"],
+    parser.add_argument("--puzzle-source", default=Vendor.UNKNOWN, type=Vendor,
+                        choices=[Vendor.HCAPTCHA, Vendor.RECAPTCHA, Vendor.UNKNOWN],
                         help="Vendor hint; restricts which grid shapes a detection may be solved as.")
-    parser.add_argument("--retry-mode", default=None, choices=["missed-tiles"],
+    parser.add_argument("--retry-mode", default=None, type=RetryMode, choices=list(RetryMode),
                         help="The vendor rejected the previous selection as incomplete.")
-    parser.add_argument("--expert", default=None, choices=["pixel", "grid", "video", "text"],
+    parser.add_argument("--expert", default=None, type=PromptFamily, choices=list(PromptFamily),
                         help="Force one expert of a routed model. Also CAPTCHA_EXPERT.")
     parser.add_argument("--text-mode", action="store_true",
                         help="The widget has a text box, so the answer is typed rather than clicked.")

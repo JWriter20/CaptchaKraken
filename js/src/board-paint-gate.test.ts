@@ -1,3 +1,5 @@
+// A blank rebuild panel is the stillest state, and the model answers it dead centre (6 of 52 requests). Structure is measured from the
+// middle because chrome paints early, the floor is blank-vs-anything, and the freshsolve re-query needs the gate too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

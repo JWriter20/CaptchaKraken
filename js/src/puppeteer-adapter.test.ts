@@ -1,3 +1,4 @@
+// No `.at(-1)` here (ES2020 target), and every mapping is asserted because the header once claimed 'verified' with no test behind it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

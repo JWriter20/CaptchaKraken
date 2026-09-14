@@ -20,12 +20,25 @@ semantic versioning; v2 is a major, **breaking** release.
   stderr. `ImageProcessor` keeps only the frame-diff primitives, `overlay.py`
   only the numbered-box overlay the model reads.
 
+### Added
+
+- **Every closed set of names is an enum, exported from both packages.**
+  `captchakraken.kinds` (Python, `StrEnum`) and the `kinds` exports of the JS
+  package (`as const` objects) carry `Vendor`, `ActionKind`, `RetryMode`,
+  `PromptFamily`, `HumanizationMode`, `PauseKind`, `Outcome`, `ErrorCode` and
+  the driver's verdicts and phases, mirrored one-for-one. The wire is unchanged:
+  every member serialises as the string it always was, and a plain string still
+  type-checks on the JS side. A value off the wire that is not a member now
+  raises instead of passing through.
+
 ### Changed
 
 - **The codebase is about half its former size** with the same public surface
-  and the same behaviour: comments cut to one line, the five screenshot-poll
-  loops in each driver share one, the two burst recorders share one, and the CLI
-  is a dispatch table. `estimatedCost` on the JS `SolveResult` is now computed
+  and the same behaviour: the five screenshot-poll loops in each driver share
+  one, the two burst recorders share one, and the CLI is a dispatch table.
+  Comments are one or two sentences that say why; every measured constant keeps
+  its measurement beside it, and the longer stories moved to
+  `TRIBAL_KNOWLEDGE.md`. `estimatedCost` on the JS `SolveResult` is now computed
   from the gateway's usage rows only; the stale per-model price table is gone.
 
 - **Python 3.10 is no longer supported.** `requires-python` is now `>=3.11`.

@@ -1,3 +1,4 @@
+// Phases attribute rather than partition, a throwing phase is still recorded, and printing is on only under CAPTCHA_TIMINGS=1.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -62,11 +63,11 @@ test('a phase that throws does not leave the name marked as open', async () => {
 test('directly added spans accumulate and count', () => {
   const budget = new PhaseBudget();
 
-  budget.add('wait', 120);
-  budget.add('wait', 80);
+  budget.add('detect', 120);
+  budget.add('detect', 80);
 
-  assert.equal(budget.totals.get('wait'), 200);
-  assert.equal(budget.counts.get('wait'), 2);
+  assert.equal(budget.totals.get('detect'), 200);
+  assert.equal(budget.counts.get('detect'), 2);
 });
 
 test('the reported object carries every phase plus a total', () => {

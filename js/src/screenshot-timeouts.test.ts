@@ -1,3 +1,4 @@
+// Playwright's 30s default hangs on an animating frame, and the poll budget is only consulted between iterations, so each shot bounds itself.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

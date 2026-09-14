@@ -1,3 +1,10 @@
+"""Reduce a recorded clip to the few frames the model is shown.
+
+Ported from the training-side extractor; the model answers with a frame NUMBER into this slicing, so a
+divergence names a picture that does not exist (see TRIBAL_KNOWLEDGE.md). `region_box` / `region_diff_ratio`
+are also the driver's wait-for-state gate, with the same box the label was chosen with.
+"""
+
 from __future__ import annotations
 
 import json
@@ -9,21 +16,32 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from .kinds import KeyframeMode
+
 
 DEFAULT_MAX_KEYFRAMES = 6
 
+# Measured over 20 real clips: same picture <= 0.000067, smallest real state change >= 0.004282. The old 0.005
+# sat ABOVE that change and collapsed ssqr8 to one still; it was calibrated on 64x64 fixtures.
 DEFAULT_STEADY_RATIO = 0.001
 
+# Licenses `cycle`'s collapse, where being generous discards the middle of a clip; deliberately not scaled
+# with steady_ratio, and never applied to steady_screens (GeeTest svg screens are 0.005 apart).
 DEFAULT_DISTINCT_RATIO = 0.02
 
+# A hold is a deliberate resting state, not a frame that repeated mid-animation: 3 frames @ 10 fps ~ 0.3 s.
 DEFAULT_MIN_HOLD_FRAMES = 3
 
+# A 3-state cycle is ~0.9 held, a cross-fade ~0.0; the gap is wide.
 DEFAULT_MIN_STEADY_COVERAGE = 0.5
 
+# The one pixel threshold shared with every other movement check in the project.
 _PIXEL_DELTA = 30
 
+# One constant for both choosing the label's frame and the live wait: the two must ask the same question.
 MATCH_REGION_HALF = 0.06
 
+# Looser than steady_ratio: the live page carries antialiasing and cursor artefacts a keyframe does not.
 MATCH_REGION_TOLERANCE = 0.05
 
 MANIFEST_NAME = "keyframes.json"
@@ -32,6 +50,7 @@ KEYFRAME_DIR_NAME = "keyframes"
 
 @dataclass(frozen=True)
 class KeyframeParams:
+    """Recorded in the manifest so a threshold change re-cuts a set instead of silently mixing two slicings."""
 
     max_keyframes: int = DEFAULT_MAX_KEYFRAMES
     steady_ratio: float = DEFAULT_STEADY_RATIO
@@ -53,6 +72,7 @@ class KeyframeParams:
 
 @dataclass
 class Keyframe:
+    """`number` is 1-based and is what the model returns as `frame`; `source_index` keeps the provenance."""
 
     number: int
     source_index: int
@@ -62,12 +82,14 @@ class Keyframe:
 
 @dataclass
 class KeyframeSet:
-    mode: str
+    mode: KeyframeMode
     keyframes: List[Keyframe]
     source_frames: int
     fps: float
     params: KeyframeParams = field(default_factory=KeyframeParams)
     frame_states: List[int] = field(default_factory=list)
+    # Independent of `mode`: EVEN says recurrence could not be proved from one burst, this says how many
+    # screens the board sits on. Reading `mode` for that put the driver's wait off on 100% of real animated captchas.
     steady_screens: int = 0
 
     def __len__(self) -> int:
@@ -98,6 +120,7 @@ def region_box(
     point_norm: Tuple[float, float],
     half: float = MATCH_REGION_HALF,
 ) -> Tuple[int, int, int, int]:
+    """Never empty: a comparison over no pixels reads as a perfect match and the gate would open on any state."""
     w, h = int(size_wh[0]), int(size_wh[1])
     cx, cy = float(point_norm[0]) * w, float(point_norm[1]) * h
     rx, ry = max(1.0, half * w), max(1.0, half * h)
@@ -136,6 +159,7 @@ def frame_diff_ratio(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _anchor_runs(frames: Sequence[np.ndarray], steady_ratio: float) -> List[Tuple[int, int]]:
+    """Anchored on the run's first frame: a slow pan has every consecutive diff under the threshold."""
     runs: List[Tuple[int, int]] = []
     i = 0
     n = len(frames)
@@ -175,6 +199,11 @@ def _even_indices(n: int, count: int) -> List[int]:
 def _distinct_indices(
     frames: Sequence[np.ndarray], candidates: Sequence[int], params: KeyframeParams
 ) -> List[int]:
+    """Drop repeats, then backfill: a duplicate makes the `frame` label ambiguous, a silently unanswerable question.
+
+    Safer than a better cycle detector (a 2px/frame pan and a real 3-state board score alike on every path
+    statistic tried); the backfill exists because symza holds nine screens and six samples found four.
+    """
     kept: List[int] = []
 
     def is_new(i: int) -> bool:
@@ -224,6 +253,7 @@ def _steady_screens(
     if len(state_reps) < 1:
         return None
 
+    # No distinct_ratio here: the merge above already separated states by the measured noise floor.
     return holds, state_reps, hold_state
 
 
@@ -241,6 +271,8 @@ def _detect_cycle(
         return None
     holds, state_reps, hold_state = got
 
+    # A cycle REVISITS. Equal counts is a one-way progression: a slow fade also decomposes into 2 long holds
+    # (verified), and collapsing that to 2 frames discards the middle of the clip.
     if len(holds) <= len(state_reps) and len(state_reps) > 1:
         return None
 
@@ -259,6 +291,11 @@ def _detect_cycle(
 def _drop_smeared(
     frames: Sequence[np.ndarray], indices: Sequence[int], params: KeyframeParams
 ) -> List[int]:
+    """Drop a sample caught mid-swap when both neighbouring holds are already kept.
+
+    Not a pixel diff: snapping to the nearest hold turned [0, 16, 39] into [0, 16] on six clips, and a
+    distinct_ratio test cut an hCaptcha tile-flip from 6 stills to 3 (two boards differ by one tile).
+    """
     runs = _anchor_runs(frames, params.steady_ratio)
     holds = [(s, e) for (s, e) in runs if (e - s + 1) >= params.min_hold_frames]
     if not holds:
@@ -316,7 +353,7 @@ def extract_keyframes(
     cycle = _detect_cycle(frames, p)
     if cycle is not None:
         reps, per_frame = cycle
-        mode = "static" if len(reps) == 1 else "cycle"
+        mode = KeyframeMode.STATIC if len(reps) == 1 else KeyframeMode.CYCLE
         return KeyframeSet(
             steady_screens=len(reps),
             mode=mode,
@@ -332,13 +369,15 @@ def extract_keyframes(
         )
 
     indices = _even_indices(n, p.max_keyframes)
+    # Before dedup so a smear does not spend budget, and after because the backfill re-picks smears
+    # (measured: filtering only before returned [0, 10, 12, 21, 25] with 10 and 21 the two smears).
     indices = _drop_smeared(frames, indices, p)
     if p.dedupe:
         indices = _distinct_indices(frames, indices, p)
         indices = _drop_smeared(frames, indices, p)
     return KeyframeSet(
         steady_screens=steady_screens(frames, p),
-        mode="even",
+        mode=KeyframeMode.EVEN,
         keyframes=[
             Keyframe(number=k + 1, source_index=idx, timestamp_ms=_ms(idx),
                      image=frames[idx])
@@ -353,6 +392,7 @@ def extract_keyframes(
 
 
 def _frame_filename(number: int) -> str:
+    """Zero-padded because readers sort by name."""
     return f"frame_{number:02d}.png"
 
 
@@ -361,6 +401,7 @@ def write_keyframes(
 ) -> List[Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # A re-slice from 6 to 3 would otherwise leave frame_04..06 for a glob to hand the model.
     for stale in out.glob("frame_*.png"):
         stale.unlink()
 

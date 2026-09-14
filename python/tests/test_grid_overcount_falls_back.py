@@ -1,3 +1,8 @@
+"""Vendor chrome below a board must not turn its 3x3 into a 4x3: comb-reported footer bands dragged the pitch median
+down, the grid's own bottom border corroborated, and one generator went 20/20 -> 5/20 until the pitch was
+estimated over gaps that could actually be a cell.
+"""
+
 import os
 import sys
 import tempfile
@@ -49,6 +54,7 @@ def _boxes(height):
 
 
 def test_a_short_widget_still_reports_its_3x3():
+    """The fourth row overflows the canvas, so the over-count died on _boxes_are_regular outside the loop and took the real grid with it."""
     boxes = _boxes(385)
     assert boxes is not None, "no grid detected on a 3x3 above an ordinary footer"
     assert len(boxes) == 9, f"expected a 3x3, got {len(boxes)} cells"
@@ -67,6 +73,7 @@ def test_a_short_widget_still_reports_its_3x3():
     "returns a 4x3 that is not there, and callers that check the cell count see "
     "'no grid' instead."))
 def test_a_tall_widget_does_not_grow_a_row_into_the_footer():
+    """With room below, the over-count is regular and the caller was handed a 4x3 that does not exist."""
     boxes = _boxes(430)
     assert boxes is not None, "no grid detected"
     assert len(boxes) == 9, f"the footer was read as a fourth row: {len(boxes)} cells"

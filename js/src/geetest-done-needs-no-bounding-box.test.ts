@@ -1,3 +1,5 @@
+// `done` must not require a box: GeeTest closes the panel on accept, and 22 of 22 drags across four puzzles died there and were
+// banked as model errors. Allow-list direction, so a new coordinate-bearing action fails loudly.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

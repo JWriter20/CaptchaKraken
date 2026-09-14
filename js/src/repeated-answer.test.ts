@@ -1,3 +1,5 @@
+// An answer cache keyed on screenshot bytes replayed a failed answer on cycling boards: 81 loops, 12 model calls, 69 cache hits, 0 solves.
+// A repeat is evidence, so it escalates to a recording; reCAPTCHA never is; the flag is per challenge.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

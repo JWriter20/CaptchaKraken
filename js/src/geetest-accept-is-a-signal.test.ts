@@ -1,3 +1,5 @@
+// GeeTest paints success inside the open panel with no token, and `geetest_popup_wrap` carries the same success class at zero
+// height while the panel is shut. Before visibility was part of the test it cost 34 model calls for 20 drags.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

@@ -1,3 +1,5 @@
+"""A named set, not `== "unknown"`: the two were equivalent only while `unknown` was the sole third value, and naming a new vendor would silently switch off typed-challenge detection and the animated probe for it."""
+
 import os
 import re
 import sys
@@ -36,7 +38,7 @@ def test_no_behaviour_is_gated_on_the_literal_unknown(path, port):
 def test_both_ports_name_the_same_two_vendors(path, port):
     src = _source(path)
     assert "VENDORS_WITH_BESPOKE_HANDLING" in src, f"{port}: gate set is missing"
-    block = src[src.index("VENDORS_WITH_BESPOKE_HANDLING"):][:400]
+    block = src[src.index("VENDORS_WITH_BESPOKE_HANDLING"):][:600].lower()
     for vendor in ("hcaptcha", "recaptcha"):
         assert vendor in block, f"{port}: {vendor} is not in the bespoke set"
 

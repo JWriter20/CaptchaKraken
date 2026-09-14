@@ -1,3 +1,5 @@
+"""Granted once per solve (per burst would be unbounded), derived from the burst ceiling (a 4s window cannot hold a 5.3s cycle), never abandoned partway (frame 27 of 40 may not contain the screen), refused before recording with the knobs named. The JS twin once pinned a local 6_000 that kept passing after the default moved to 9_000."""
+
 from __future__ import annotations
 
 import time

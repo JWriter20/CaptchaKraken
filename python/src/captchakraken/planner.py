@@ -12,10 +12,14 @@ import requests
 from PIL import Image
 
 from . import config, errors, prompts
+from .kinds import ActionKind, PixelAnswerKind, PromptFamily, RetryMode
 from .server_manager import ensure_server
 
 DEBUG = os.getenv("CAPTCHA_DEBUG", "0") == "1"
 
+# A floor, not a resize, and the AREA is clamped rather than the sides: predictions on a 277x285 GeeTest
+# board landed 80-105px from the hand label at native size and 1-4px once upscaled, and squashing the
+# aspect moves every tile centre.
 MIN_PIXELS = 448 * 448
 
 
@@ -48,16 +52,22 @@ def _encode_image(path: str,
     im.save(buf, "PNG")
     return "image/png", base64.b64encode(buf.getvalue()).decode()
 
+# A header, deliberately not vLLM's body `priority`: that field is lower-is-higher and already means
+# captcha=0 / apply=100 / label=200 on the primary, so a 10 there would misorder. The gateway routes >5 to
+# the backup GPUs; tier-2 CI sets it.
 _PRIORITY_HEADER = "X-JH-Priority"
 _PRIORITY_ENV = "CAPTCHA_REQUEST_PRIORITY"
 
 _CLIENT_HEADER = "X-CK-Client"
 _CLIENT_ENV = "CAPTCHA_KRAKEN_CLIENT"
+# One id per solve lets the gateway cap an attempt's billable rounds.
 _SESSION_HEADER = "X-CK-Session"
 _SESSION_ENV = "CAPTCHA_KRAKEN_SESSION"
 
+# On by default; `captureOptOut` is the server half. Tier 3 sets it to 0 for ~100 solves a run.
 _REPORT_OUTCOME_ENV = "CAPTCHA_REPORT_OUTCOME"
 
+# Extra headers may not rewrite these: pinning one X-CK-Session forever would escape the per-attempt billing cap.
 _EXTRA_HEADERS_ENV = "CAPTCHA_KRAKEN_EXTRA_HEADERS"
 _PROTECTED_HEADERS = frozenset(
     {"authorization", "content-type", _CLIENT_HEADER.lower(), _SESSION_HEADER.lower()}
@@ -70,6 +80,7 @@ _VALID_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
 def _clean_header_value(raw: str) -> str:
+    # CR/LF would splice arbitrary headers into the request.
     return "".join(c for c in raw.strip() if 0x20 <= ord(c) < 0x7F)[:_HEADER_VALUE_MAX]
 
 
@@ -96,6 +107,7 @@ def _extra_headers(raw: str) -> Dict[str, str]:
 
 
 def routing_headers(env=None) -> Dict[str, str]:
+    """Each header is derived on its own: a malformed priority must not drop the attribution headers and understate a partner's revenue share."""
     env = os.environ if env is None else env
     headers: Dict[str, str] = {}
 
@@ -126,6 +138,9 @@ PIXEL_ACTION_PROMPT = _LATEST.action_prompt
 
 
 
+# Greedy only, by measurement: (0.0, 0.35, 0.7) scored 0/5 against 4/5 and made the median failed attempt
+# 24.0s against 13.9s, because a differing re-ask resets the no-progress counter. The level plumbing stays for
+# a network-refusal trigger. Lives here once so the two ports cannot drift (TRIBAL_KNOWLEDGE.md).
 RESAMPLE_TEMPERATURES = (0.0,)
 
 
@@ -154,7 +169,7 @@ class ActionPlanner:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        expert: Optional[str] = None,
+        expert: Optional[PromptFamily] = None,
         **_: Any,
     ):
         self.token_usage: List[Dict[str, Any]] = []
@@ -176,7 +191,7 @@ class ActionPlanner:
         self._http = requests.Session()
         self._outcome_supported = True
 
-    def _model_for(self, family: Optional[str]) -> str:
+    def _model_for(self, family: Optional[PromptFamily]) -> str:
         if not self.experts:
             return self.model
         return prompts.route(self.model, family, pin=self.expert) or self.model
@@ -185,6 +200,7 @@ class ActionPlanner:
     _OUTCOME_TIMEOUT_S = 3.0
 
     def report_outcome(self, session_id: Optional[str], solved: bool) -> bool:
+        """A 404 disables it for the planner's lifetime: a self-hosted vLLM has no /solve-outcome."""
         if not session_id or not self._outcome_supported:
             return False
         if os.getenv(_REPORT_OUTCOME_ENV, "1") == "0":
@@ -216,14 +232,15 @@ class ActionPlanner:
             print(f"[Planner] {message}", file=sys.stderr)
 
     def _chat_with_image(self, prompt: str, image_path: str, max_tokens: int = 512,
-                         family: Optional[str] = None) -> str:
+                         family: Optional[PromptFamily] = None) -> str:
         return self._chat_with_images(prompt, [image_path], max_tokens=max_tokens,
                                       family=family)
 
     def _chat_with_images(
         self, prompt: str, image_paths: List[str], max_tokens: int = 512,
-        family: Optional[str] = None,
+        family: Optional[PromptFamily] = None,
     ) -> str:
+        """One request per image set, images before the text in one message: the model reads frames positionally, and per-frame queries would cost N billable rounds."""
         if not image_paths:
             raise ValueError("no images to send")
 
@@ -250,6 +267,7 @@ class ActionPlanner:
             "messages": messages,
             "temperature": 0,
             "max_tokens": max_tokens,
+            # Both spellings: Ollama ignores chat_template_kwargs and defaults thinking on; vLLM reads reasoning_effort only when the kwargs are unset.
             "chat_template_kwargs": {"enable_thinking": False},
             "reasoning_effort": "none",
         }
@@ -364,7 +382,7 @@ class ActionPlanner:
         image_path: str,
         rows: int,
         cols: int,
-        retry_mode: Optional[str] = None,
+        retry_mode: Optional[RetryMode] = None,
     ) -> List[int]:
         total = rows * cols
         if rows == 4 and cols == 4:
@@ -375,7 +393,7 @@ class ActionPlanner:
         prompt = self.prompts.grid_prompt(
             rows=rows, cols=cols, grid_hint=grid_hint
         )
-        if retry_mode == "missed-tiles":
+        if retry_mode == RetryMode.MISSED_TILES:
             prompt = (
                 prompt
                 + "\n\nIMPORTANT: A previous submission was rejected because not all "
@@ -385,7 +403,7 @@ class ActionPlanner:
                   "including any matches you may have overlooked."
             )
         raw = self._chat_with_image(prompt, image_path, max_tokens=128,
-                                    family="grid")
+                                    family=PromptFamily.GRID)
         out = self._normalize_grid(self._parse_json(raw), total)
         self._log(f"grid selection -> {out}")
         return out
@@ -414,7 +432,7 @@ class ActionPlanner:
     def get_pixel_actions(self, image_path: str, text_mode: bool = False) -> List[Dict[str, Any]]:
         prompt = self.prompts.text_prompt() if text_mode else self.prompts.action_prompt
         raw = self._chat_with_image(prompt, image_path, max_tokens=512,
-                                    family="text" if text_mode else "pixel")
+                                    family=PromptFamily.TEXT if text_mode else PromptFamily.PIXEL)
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         self._log(f"pixel actions -> {actions}")
@@ -425,7 +443,7 @@ class ActionPlanner:
             return []
         prompt = self.prompts.video_prompt(len(keyframe_paths))
         raw = self._chat_with_images(prompt, list(keyframe_paths), max_tokens=512,
-                                     family="video")
+                                     family=PromptFamily.VIDEO)
         data = self._parse_json(raw)
         actions = self._normalize_pixel(data)
         frame = self._normalize_frame(data, len(keyframe_paths))
@@ -436,6 +454,7 @@ class ActionPlanner:
 
     @staticmethod
     def _normalize_frame(data: Any, n_keyframes: int) -> Optional[int]:
+        """Out of range is None, not clamped: clamping a 7 to 6 would invent an intent."""
         if not isinstance(data, dict):
             return None
         raw = data.get("frame")
@@ -449,6 +468,7 @@ class ActionPlanner:
 
     @staticmethod
     def _normalize_pixel(data: Any) -> List[Dict[str, Any]]:
+        """Every answer shape the model has been seen to produce, oldest last; `kind` is a PixelAnswerKind."""
         def norm_xy(x: Any, y: Any) -> Optional[tuple]:
             try:
                 fx, fy = float(x) / 1000.0, float(y) / 1000.0
@@ -496,13 +516,13 @@ class ActionPlanner:
             return out
 
         act = data.get("action")
-        if isinstance(act, dict) and act.get("action") == "type":
+        if isinstance(act, dict) and act.get("action") == ActionKind.TYPE:
             act = act.get("action")
-        if act == "type" or (isinstance(data.get("text"), str) and "drags" not in data):
+        if act == ActionKind.TYPE or (isinstance(data.get("text"), str) and "drags" not in data):
             container = data if isinstance(data.get("text"), str) else data.get("action")
             text = container.get("text") if isinstance(container, dict) else None
             if isinstance(text, str) and text:
-                return [{"kind": "type", "text": text}]
+                return [{"kind": PixelAnswerKind.TYPE, "text": text}]
 
         content_drags = data.get("drags")
         if content_drags is None and isinstance(data.get("action"), dict):
@@ -523,9 +543,9 @@ class ActionPlanner:
                 if len(snums) >= 2:
                     src = norm_xy(snums[0], snums[1])
                     if src:
-                        out.append({"kind": "drag", "src": src, "dst": dst})
+                        out.append({"kind": PixelAnswerKind.DRAG, "src": src, "dst": dst})
                 else:
-                    out.append({"kind": "slide", "dst": dst})
+                    out.append({"kind": PixelAnswerKind.SLIDE, "dst": dst})
             if out:
                 return out
 
@@ -539,7 +559,7 @@ class ActionPlanner:
                 src = norm_xy(sp.get("x"), sp.get("y")) if isinstance(sp, dict) else None
                 dst = norm_xy(ep.get("x"), ep.get("y")) if isinstance(ep, dict) else None
                 if src and dst:
-                    out.append({"kind": "drag", "src": src, "dst": dst})
+                    out.append({"kind": PixelAnswerKind.DRAG, "src": src, "dst": dst})
             if out:
                 return out
 
@@ -570,7 +590,7 @@ class ActionPlanner:
                     src = norm_xy(snums[0], snums[1])
                     dst = norm_xy(dnums[0], dnums[1])
                     if src and dst:
-                        out.append({"kind": "drag", "src": src, "dst": dst})
+                        out.append({"kind": PixelAnswerKind.DRAG, "src": src, "dst": dst})
             if out:
                 return out
 
@@ -588,11 +608,11 @@ class ActionPlanner:
         points = None
         if isinstance(action, dict):
             points = action.get("points")
-            if points is None and action.get("action") == "drag":
+            if points is None and action.get("action") == ActionKind.DRAG:
                 src = norm_xy(*(action.get("source") or (None, None)))
                 dst = norm_xy(*(action.get("target") or (None, None)))
                 if src and dst:
-                    return [{"kind": "drag", "src": src, "dst": dst}]
+                    return [{"kind": PixelAnswerKind.DRAG, "src": src, "dst": dst}]
         if points is None:
             points = data.get("points")
         if not (isinstance(points, list) and points):
@@ -621,5 +641,5 @@ class ActionPlanner:
                 if xy:
                     pts.append(xy)
             if pts:
-                out.append({"kind": "click", "points": pts})
+                out.append({"kind": PixelAnswerKind.CLICK, "points": pts})
         return out

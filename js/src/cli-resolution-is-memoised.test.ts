@@ -1,3 +1,4 @@
+// The spawnSync probe blocks the event loop and was being paid up to twice per inference before this was memoised.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

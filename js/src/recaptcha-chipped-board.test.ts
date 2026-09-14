@@ -1,3 +1,5 @@
+// A chip is a kept photo (submit); a centred check is a swap (look again). All-or-nothing: calling a swapping board finished submits half
+// an answer, calling a chipped one unfinished costs one inference. A Verify press is an interaction, and the grid-load wait was once paid twice (2148ms x2).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

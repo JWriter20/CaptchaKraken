@@ -1,3 +1,7 @@
+"""The model reads what this draws and was never trained to invent a numbering; a wrong overlay does not error,
+reCAPTCHA 4x4 simply scores zero and looks like a broken model.
+"""
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -35,6 +39,7 @@ def test_a_normalised_box_is_drawn_where_it_was_asked_for(tmp_path):
 
 
 def test_a_pixel_box_is_read_as_x_y_width_height_not_as_corners(tmp_path):
+    """Reading [x, y, w, h] as corners draws a box ending at w, silently."""
     src = _blank(tmp_path / "in.png")
     before = _pixels(src)
     out = str(tmp_path / "out.png")
@@ -76,6 +81,7 @@ def test_an_empty_box_list_still_produces_a_readable_image(tmp_path):
 
 
 def test_the_result_is_rgb_so_a_later_jpeg_save_cannot_fail(tmp_path):
+    """A leftover alpha channel raises 'cannot write mode RGBA as JPEG' a stage away from the overlay that caused it."""
     src = _blank(tmp_path / "in.png")
     out = str(tmp_path / "out.png")
 

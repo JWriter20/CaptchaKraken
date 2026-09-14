@@ -1,3 +1,7 @@
+"""Humanisation is a pluggable input device, not a realism dial: mobile must never touch `page.mouse`, the Appium
+payload is the W3C one built by hand (no Selenium import), and the measured mouse mode did not change.
+"""
+
 from __future__ import annotations
 
 import random
@@ -98,6 +102,7 @@ class TestResolve:
         assert resolve(cfg) is mine
 
     def test_code_beats_the_environment(self, monkeypatch):
+        """Deliberate, and the opposite of the model-identity vars: which mode is right is a property of the page."""
         monkeypatch.setenv("CAPTCHA_HUMANIZATION", "mobile")
         assert resolve(PageSolverConfig(humanization="none")).name == "none"
 
@@ -120,6 +125,7 @@ class TestResolve:
         assert resolve(PageSolverConfig(starting_mouse_position=(30.0, 40.0))).at == (30.0, 40.0)
 
     def test_every_mode_answers_the_whole_pause_vocabulary(self, monkeypatch):
+        """An unknown kind yields no wait rather than raising, so a pause site added later cannot break an older custom humanizer."""
         for mode in (MouseHumanizer(), MobileHumanizer(), NullHumanizer()):
             for kind in PAUSE_KINDS + ("a-kind-added-next-year",):
                 assert mode._pause_ms(kind) >= 0.0
@@ -172,6 +178,7 @@ class TestMobile:
         assert MobileHumanizer().hovers is False
 
     def test_reset_lifts_a_finger_a_previous_solve_left_down(self):
+        """W3C input state is per session: a solve that timed out inside the slider leaves the pointer down."""
         human, backend = self._human()
         human.press(RecordingPage())
         backend.events.clear()
@@ -236,6 +243,7 @@ class TestAppiumBackend:
         assert [a["duration"] for a in actions] == [11, 13]
 
     def test_press_and_release_are_separate_performs(self):
+        """Per-session input state is what lets the slider press, screenshot, steer, screenshot and only then release."""
         driver = RecordingDriver()
         backend = AppiumTouchBackend(driver)
         backend.down(0.0, 0.0)
@@ -257,6 +265,7 @@ class TestAppiumBackend:
 
 
 class TestAppiumScaleIsNotGuessed:
+    """A wrong scale fails silently on both sides of the wire and looks exactly like a model that cannot read the puzzle."""
 
     def test_a_hidpi_session_with_no_transform_refuses(self):
         driver = RecordingDriver()

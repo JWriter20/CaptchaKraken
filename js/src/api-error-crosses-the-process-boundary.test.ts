@@ -1,3 +1,4 @@
+// A snake_case field dropped at the boundary arrives undefined, and a customer out of credits then gets an infinite retry loop instead of a top-up link.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

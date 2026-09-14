@@ -1,3 +1,4 @@
+// The key rides in env because argv is world-readable; the args are an array so no shell ever sees them; the LEVEL travels, not a temperature.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -7,14 +8,17 @@ import {
   buildSolveArgs,
   redactCommand,
   solveEnv,
+  type SolveInvocation,
 } from './cli-invocation';
+import { RetryMode, Vendor } from './kinds';
 
+// Hardcoded, not read from the env: with both undefined every assertion here would pass while testing nothing.
 const TRACER = 'not-a-key-just-a-string-this-test-follows';
 
-const invocation = {
+const invocation: SolveInvocation = {
   imagePath: '/tmp/captcha_123.png',
   model: 'captcha-v12',
-  puzzleSource: 'hcaptcha',
+  puzzleSource: Vendor.HCAPTCHA,
 };
 
 test('the api key never appears in argv', () => {
@@ -57,11 +61,11 @@ test('args are an array for execFile, not a shell string', () => {
 test('vendor hint, retry mode and text mode still reach the CLI', () => {
   const args = buildSolveArgs({
     ...invocation,
-    retryMode: 'fresh',
+    retryMode: RetryMode.MISSED_TILES,
     textMode: true,
   });
   assert.ok(args.includes('--puzzle-source=hcaptcha'));
-  assert.ok(args.includes('--retry-mode=fresh'));
+  assert.ok(args.includes('--retry-mode=missed-tiles'));
   assert.ok(args.includes('--text-mode'));
   assert.ok(args.includes('captcha-v12'));
 });

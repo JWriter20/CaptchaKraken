@@ -1,3 +1,5 @@
+"""Unset means on, via `is False` rather than `is not True`; idle wander must be off during the burst (one live burst filmed a dozen screens made by the mouse); reCAPTCHA and text never speculate."""
+
 import re
 import sys
 from pathlib import Path

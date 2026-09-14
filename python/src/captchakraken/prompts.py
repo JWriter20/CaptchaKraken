@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .kinds import Availability, PromptFamily
+
 _MODELS_PATH = Path(__file__).with_name("models.json")
 _PROMPTS_FILE_ENV = "CAPTCHA_PROMPTS_FILE"
 _DISABLE_FETCH_ENV = "CAPTCHA_PROMPTS_NO_FETCH"
@@ -14,6 +16,8 @@ _DISABLE_FETCH_ENV = "CAPTCHA_PROMPTS_NO_FETCH"
 LATEST_PROMPT_VERSION = "2"
 
 
+# Pure literals only, no f-strings, joins or constant references: the training repo's release parity gate reads
+# this dict by AST without importing the package, and the gate going quiet is how prompt drift shipped once.
 BUILTIN_PROMPTS = {
     "1": {
         "action_pixel": (
@@ -178,24 +182,33 @@ def canonical_model_id(model: Optional[str]) -> Optional[str]:
     return alias if isinstance(alias, str) else None
 
 
-PUBLIC = "public"
-PRIVATE = "private"
-LICENSED = "licensed"
+PUBLIC = Availability.PUBLIC
+PRIVATE = Availability.PRIVATE
+LICENSED = Availability.LICENSED
+# String literals, like BUILTIN_PROMPTS: the parity gate reads this tuple by AST, and enum references are not literals to it.
 AVAILABILITIES = ("public", "private", "licensed")
 
 
-def availability(model: Optional[str]) -> str:
+def availability(model: Optional[str]) -> Availability:
+    """Unset reads as public; an unrecognised value fails closed as licensed, never as a softer licence."""
     entry = registered_models().get(canonical_model_id(model) or "") or {}
     value = entry.get("availability")
-    return value if isinstance(value, str) and value else PUBLIC
+    if not (isinstance(value, str) and value):
+        return Availability.PUBLIC
+    try:
+        return Availability(value)
+    except ValueError:
+        return Availability.LICENSED
 
 
 def is_licensed(model: Optional[str]) -> bool:
-    return availability(model) not in (PUBLIC, PRIVATE)
+    # PRIVATE is not a softer LICENSED: refusing a licensed model early replaces a RepositoryNotFoundError that
+    # reads as "not logged in" with the truth, but refusing a private one would stop our own token pulling weights.
+    return availability(model) == Availability.LICENSED
 
 
 def requires_auth(model: Optional[str]) -> bool:
-    return availability(model) == PRIVATE
+    return availability(model) == Availability.PRIVATE
 
 
 @dataclass
@@ -279,6 +292,7 @@ def _warn(msg: str) -> None:
 
 
 def resolve(model: Optional[str]) -> PromptSet:
+    """File, then registry, then the Hub: the registry is the only source that works for a private model (the production adapter is gated and 401s)."""
     key = model or ""
     if key in _cache:
         return _cache[key]
@@ -355,6 +369,7 @@ def _env_int(name: str) -> Optional[int]:
 
 
 def pixel_budget(model: Optional[str]) -> PixelBudget:
+    # Deliberately no Hub fetch here: a wrong budget degrades quality silently.
     env_min, env_max = _env_int(MIN_PIXELS_ENV), _env_int(MAX_PIXELS_ENV)
     if env_min or env_max:
         return PixelBudget(
@@ -375,17 +390,19 @@ def pixel_budget(model: Optional[str]) -> PixelBudget:
 
 EXPERT_ENV = "CAPTCHA_EXPERT"
 
+# String literals: the parity gate reads this tuple by AST. The enum is PromptFamily.
 PROMPT_FAMILIES = ("pixel", "grid", "video", "text")
 
 
-def experts(model: Optional[str]) -> Dict[str, str]:
+def experts(model: Optional[str]) -> Dict[PromptFamily, str]:
+    """Unknown family keys are dropped with a warning, never raised: the day the `text` family reached ckgate without a marker, refusing it cost every distorted-text solve for a day."""
     repo_id = canonical_model_id(model)
     entry = (registered_models().get(repo_id) or {}) if repo_id else {}
     mapping = entry.get("experts")
     if not isinstance(mapping, dict):
         return {}
-    out = {}
-    for family in PROMPT_FAMILIES:
+    out: Dict[PromptFamily, str] = {}
+    for family in PromptFamily:
         name = mapping.get(family)
         if isinstance(name, str) and name:
             out[family] = name
@@ -397,15 +414,16 @@ def experts(model: Optional[str]) -> Dict[str, str]:
     return out
 
 
-def route(model: Optional[str], family: Optional[str], *,
+def route(model: Optional[str], family: Optional[PromptFamily], *,
           pin: Optional[str] = None) -> str:
+    """An unknown pin raises (a benchmark that silently measured the generalist is a number nobody can catch); an unknown family degrades to the generalist."""
     if pin is not None:
         pin = pin.strip()
     if pin:
         if pin not in PROMPT_FAMILIES:
             raise ValueError(
                 f"unknown expert {pin!r}; have {', '.join(PROMPT_FAMILIES)}")
-        family = pin
+        family = PromptFamily(pin)
     mapping = experts(model)
     if not mapping:
         if pin:
@@ -418,11 +436,13 @@ def route(model: Optional[str], family: Optional[str], *,
 
 
 def _env_str(name: str) -> Optional[str]:
+    # The indirection matters: test_public_contract greps environ reads by name, and reading EXPERT_ENV inline would record the constant as a variable.
     return (os.environ.get(name) or "").strip() or None
 
 
-def expert_pin() -> Optional[str]:
-    return _env_str(EXPERT_ENV)
+def expert_pin() -> Optional[PromptFamily]:
+    raw = _env_str(EXPERT_ENV)
+    return PromptFamily(raw) if raw else None
 
 
 def clear_cache() -> None:

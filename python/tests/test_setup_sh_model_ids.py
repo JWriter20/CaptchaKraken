@@ -1,3 +1,5 @@
+"""setup.sh once shipped a repo that 401s on the Hub for everyone outside the org; its env file overrides the client defaults, so it must name what the registry serves."""
+
 import re
 from pathlib import Path
 

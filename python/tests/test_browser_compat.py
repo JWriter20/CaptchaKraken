@@ -1,3 +1,9 @@
+"""The compatibility claim against a REAL browser: a fake cannot catch Playwright changing a method the driver calls.
+
+The launch walks every installed Chromium build because the pinned-build check once reported four errors on a box
+that had a browser; skipping is reserved for a box with none.
+"""
+
 from __future__ import annotations
 
 import sys
@@ -151,6 +157,7 @@ def test_poll_once_drives_a_real_page_without_blocking(page: Any) -> None:
 
 
 def test_one_watcher_covers_every_navigation_on_the_page(page: Any) -> None:
+    """The claim the per-page design rests on: installed once, the watcher must keep working across every `goto`."""
     solved: List[Any] = []
 
     class Solver:

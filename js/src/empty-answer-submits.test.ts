@@ -1,3 +1,4 @@
+// Structural on purpose: `none_present` boards read as SKIP, and the regression surfaced with the macOS font fix and read as that fix's fault.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs';

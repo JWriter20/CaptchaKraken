@@ -1,3 +1,5 @@
+// Granted once per solve (per burst would be unbounded) and derived from the burst ceiling, because a 4s window cannot contain a 5.3s cycle;
+// a burst is never abandoned partway. A local 6_000 here once kept passing after the real default moved to 9_000, hence SOLVE_DEFAULTS.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 

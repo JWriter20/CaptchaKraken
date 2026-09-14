@@ -1,3 +1,5 @@
+// Keyed on the same `hcaptcha` substring as the DOM selectors, not the apex host (challenges come off newassets.hcaptcha.com), and
+// `unknown` must stay permissive for every grid shape: GeeTest, Prosopo and the offline grader all report it.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';

@@ -1,3 +1,5 @@
+"""Both `chat_template_kwargs.enable_thinking` and `reasoning_effort` go out: Ollama ignores the kwargs and defaults thinking on, and vLLM reads reasoning_effort only when the kwargs are unset."""
+
 import json
 import pytest
 

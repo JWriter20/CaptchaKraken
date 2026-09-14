@@ -1,3 +1,6 @@
+import type { PromptFamily, RetryMode, Vendor } from './kinds.js';
+
+// The key travels in env, never argv: argv is world-readable on Linux via /proc/<pid>/cmdline and `ps`. See TRIBAL_KNOWLEDGE.md.
 export const API_KEY_ENV = 'CAPTCHA_KRAKEN_API_KEY';
 
 export const RESAMPLE_LEVEL_ENV = 'CAPTCHA_RESAMPLE_LEVEL';
@@ -8,18 +11,20 @@ export interface SolveInvocation {
   imagePath: string;
 
   model?: string;
-  puzzleSource: string;
-  retryMode?: string | null;
+  puzzleSource: Vendor;
+  retryMode?: RetryMode | null;
   textMode?: boolean;
 
-  expert?: string | null;
+  expert?: PromptFamily | null;
 }
 
+/** An argv array for execFile, never a shell string. */
 export function buildSolveArgs(invocation: SolveInvocation): string[] {
   const { imagePath, model, puzzleSource, retryMode, textMode, expert } =
     invocation;
 
   const args = ['-m', 'captchakraken.cli', imagePath];
+  // Both positionals or neither: the provider passed alone would bind to `model`.
   if (model) args.push(model, API_PROVIDER);
   args.push(`--puzzle-source=${puzzleSource}`);
   if (retryMode) args.push(`--retry-mode=${retryMode}`);
@@ -29,6 +34,7 @@ export function buildSolveArgs(invocation: SolveInvocation): string[] {
   return args;
 }
 
+/** The resample LEVEL travels, not a temperature: the schedule lives once in planner.RESAMPLE_TEMPERATURES, and a fresh CLI process cannot know the round count. */
 export function solveEnv(
   base: NodeJS.ProcessEnv,
   apiKey?: string,

@@ -1,3 +1,5 @@
+"""`private` is not a softer `licensed`: refusing it early would stop an authorised token fetching weights it is entitled to. The served alias must resolve its own prompts."""
+
 import pytest
 
 from captchakraken import prompts, updater

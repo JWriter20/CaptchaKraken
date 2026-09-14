@@ -65,11 +65,10 @@ def _cli_subcommands() -> list:
 
 
 def _error_codes() -> list:
+    from captchakraken.kinds import ErrorCode
+
     src = (PKG / "errors.py").read_text()
-    out = set(re.findall(r'code\s*==\s*["\']([a-z_]+)["\']', src))
-    for group in re.findall(r'code\s+in\s*\(([^)]*)\)', src):
-        out |= set(re.findall(r'["\']([a-z_]+)["\']', group))
-    return sorted(out)
+    return sorted(c.value for c in ErrorCode if f"ErrorCode.{c.name}" in src)
 
 
 def _solve_parser_flags() -> list:

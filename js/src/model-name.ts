@@ -12,6 +12,7 @@ function readJson(cliRoot: string, name: string): any {
     fs.readFileSync(path.join(cliRoot, 'src', 'captchakraken', name), 'utf-8'));
 }
 
+// An exact host list, not "is it remote": a self-hoster's vLLM across the network is remote too, and the hosted-only model 404s there.
 const HOSTED_HOSTS = ['api.captchakraken.com'];
 
 export function isHostedEndpoint(baseUrl: string | undefined,
@@ -26,6 +27,7 @@ export function isHostedEndpoint(baseUrl: string | undefined,
   }
 }
 
+/** Hosted: the routing alias, not an arm's `lora_name`, because a routed mixture is several names and only the alias routes. A missing or broken registry falls through to the pin, never throws. */
 export function resolveLoraName(
   { cliRoot = getBundledCliRoot(), env = process.env, baseUrl }:
     { cliRoot?: string; env?: NodeJS.ProcessEnv; baseUrl?: string } = {},

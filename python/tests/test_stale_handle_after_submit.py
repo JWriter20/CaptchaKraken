@@ -1,3 +1,5 @@
+""""Target closed" is terminal, not stale: retried as stale, a dead page was re-detected three times. Solved is checked before spending another round on a stale handle after submit."""
+
 import sys
 from pathlib import Path
 

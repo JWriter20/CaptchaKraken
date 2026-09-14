@@ -4,70 +4,107 @@ import os
 import tempfile
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+from ..kinds import LabelPosition
 from ..overlay import add_overlays_to_image
 
+# Grid detection: trace every gutter as a consistent-colour walk, cluster the traces, form an evenly spaced
+# lattice, then gate it on structure and on cell content. The colour comb and seal test are the second cue
+# (see _comb_lines and TRIBAL_KNOWLEDGE.md). Every threshold below is measured; each gate has a test named for it.
 
 COLOR_TOL = 10.0
+# Tolerates JPEG and lighting jitter along a real gutter; a real tile edge is far beyond it.
 CONT_TOL = 14.0
 CONT_TOL2 = CONT_TOL * CONT_TOL
+# Gate on L alone: a gutter's L span is ~3 while grass drifts ~32, and a/b are JPEG chroma noise that CIE76
+# over-weights (it wrongly dropped real tinted-grey gutters).
 SEED_L_TOL = 6.0
+# A gutter never jumps between consecutive pixels (|dL| <= ~2); grass jumps up to ~16.
 STEP_L_TOL = 4.0
 MIN_RUN = 10
+# No longer a hard reject: a white gutter adjacent to white tile content reads as one band far thicker.
 MAX_THICKNESS = 14
 PERP_SCAN = 60
+# On a miss, look this far perpendicular for the gutter colour before calling it a wall; ~3px tolerates ~25 deg.
 PERP_REFIND = 3
+# How far the walk tolerances widen per unit of measured noise; 0 restores the fixed thresholds exactly.
 NOISE_GAIN = 2.0
 MAX_PERP_JUMP = 6.0
 MERGE_PX = 8.0
 MERGE_ANGLE = 0.07
 MIN_CELL = 36
+# Fractions of the cell PITCH, not pixels: hCaptcha gutters are ~13px median, so a fixed offset probed gutter
+# against gutter and read zero contrast.
 FLANK_PITCH_FRACS = (0.18, 0.26, 0.34, 0.42)
+# Per grid and as a MEAN of both flanks: under `min` the lowest true hCaptcha grid scored 2.7 against false
+# positives at 9.0, under mean 17.4 against 18.0/14.1. 18.1 clears both but sits 0.3 under a real reCAPTCHA 4x4.
 GRID_FLANK_MIN_DE = 16.0
 LINE_STD_TOL = 7.0
 STEP = 1
 SLANT_CAP = 0.47
 SUPPORT_FRAC = 0.42
 TERM_FRAC = 0.30
+# A gutter spans the full image so a central band seeds it; narrowing from 0.46 cut trace attempts ~25%.
 MAX_SEED_FRAC = 0.34
 EDGE_MARGIN = 0.02
 GRID_COLOR_TOL = 8.0
 GRID_THICK_TOL = 4.0
 GRID_ANGLE_TOL = 0.09
+# Real grids share one gutter colour across both axes; photo "grids" pair an H edge of one colour with a V edge of another.
 XAXIS_COLOR_TOL = 6.0
 LATTICE_TOL = 0.18
 MAX_OFF_LATTICE = 1
 EVEN_TOL = 0.18
+# Measured floor over 2239 real grids is 0.348. Deliberately not 0.33: that also catches one observed video
+# false positive at 0.322 but leaves 5% headroom, buying a false-positive fix with a future missed grid.
 MIN_IMAGE_AREA_COVERAGE = 0.30
+# Applied to the EMITTED cells: the line check cannot see degenerate boxes built from near-duplicate lines.
 CELL_REGULARITY_TOL = 0.12
 MIN_GRID_DIM = 3
+# A true internal line has perpendicular gutters running ~a full cell past it on both sides; a frame line does not.
 CORROB_FRAC = 0.9
 GRID_OVERSHOOT = 0.35
 FULL_SPAN_MARGIN = 0.5
 MIN_GRID_COVERAGE = 0.72
 CELL_INSET = 0.22
+# A flat region (white wall, sky, watermark haze) has "cells" the same colour as its "gutters".
 CELL_DIVERGE_TOL = 12.0
 CELL_DIVERGE_FRAC = 0.6
+# Real-grid gutters measure color_std ~0-2; textured-photo pseudo-gutters run ~3-6.
 CLEAN_GUTTER_STD = 2.3
+# Only when the gutters are clean: a painted-gutter grid with sky tiles legitimately has fewer content cells.
 CELL_DIVERGE_FRAC_CLEAN = 0.42
+# A gutter's ridge run covers >= 0.88 of the scan, content fragments p90 ~0.35; drops ~95% of dead seeds (~73% of walk steps).
 SEED_RUN_FRAC = 0.5
 SEED_DECIMATE = 2
 CLEAN_LATTICE_STD = 2.0
 MAX_VIRTUAL_FRAC = 0.5
 MAX_VIRTUAL_NODES = 2
+# Per corroborated internal line a candidate leaves out, so a 4x4's [r1,r2,r3] is not dropped to [r2,r3].
 UNUSED_LINE_PENALTY = 400.0
 VIRTUAL_NODE_PENALTY = 600.0
+# Outweighs the virtual-node penalty so a completed 4x4 beats the 3-row subset whose gutters run a cell past the border.
 SPAN_FIT_PENALTY = 900.0
+# hCaptcha's V gutters reach the submit bar (~0.65 cell) without implying another cell.
 MISSING_LINE_FRAC = 0.8
+# Real grids are inset ~60-120px; a gutter reaching the image edge is bleeding into a margin, not a cell.
 EDGE_BLEED_PX = 6
+# Count clusters, not lines: the plateau on the real corpus is 17..23; at 24 a textured drag puzzle becomes a false positive.
 OFF_LATTICE_CLUSTER_PX = 20
 MAX_OFF_LATTICE_CLEAN = 1
+# Tight on purpose: on the failing 4x4s the gutter is pure white (L 100.0) against sky at L 95-97.
 COMB_TOL = 3.0
+# The scan band crosses the vendor's header/footer chrome, which costs a true gutter ~8% of its scan.
 COMB_COVER = 0.9
+# Taking the strictly contiguous run reported a full-width 520px gutter as a 43px stub (JPEG ringing).
 COMB_GAP = 8
+# Not zero: a blank canvas seals every lattice and its cells read exactly 0.0; a 4x4 of open sky reads 2.3-11.2.
 SEALED_DIVERGE_TOL = 2.0
+# Real 4x4s over unbroken sky measure 6.x-7.1; at 8.0 two stayed undetected. Free on the FP side (16 at 6/7/8 alike).
 SEALED_FLANK_MIN_DE = 6.0
 GRID_SEAL_MIN = 0.85
+# Above UNUSED_LINE_PENALTY, or a candidate that swallowed a half-width sky belt outscores the true lattice.
 UNSEALED_PENALTY = 700.0
+# Real comb blocks are 2-12px; chrome bands 19-83.
 COMB_MAX_THICK = MAX_THICKNESS
 OFF_LATTICE_CLEAN_STD = 2.6
 
@@ -119,6 +156,7 @@ def _cell_divergences(lab, boxes, gutter_color):
 
 
 def _cells_have_content(lab, boxes, rows, cols, gutter_lines, sealed=False):
+    """The false-positive killer. Not every row must have content: a reCAPTCHA 4x4's top row can reach into the header."""
     if lab is None:
         return True
     gutter_color = np.mean([l.color_lab for l in gutter_lines], axis=0)
@@ -131,6 +169,7 @@ def _cells_have_content(lab, boxes, rows, cols, gutter_lines, sealed=False):
     return sum(1 for d in divs if d > tol) >= frac * len(divs)
 
 
+# OKLab scaled onto CIELAB units so every tuned constant keeps its meaning.
 _OK_L_SCALE = 100.0
 _OK_AB_SCALE = 300.0
 
@@ -149,6 +188,7 @@ _SRGB_TO_LINEAR = np.where(
 
 
 def _to_lab(img_bgr):
+    """OKLab: CIE76 over-weights a/b, which is why the walk gates on L alone. ~2-3ms against find_grid's ~53ms; a GPU was rejected."""
     rgb_lin = _SRGB_TO_LINEAR[img_bgr[:, :, ::-1]]
     lms = rgb_lin @ _OK_M1.T
     np.cbrt(lms, out=lms)
@@ -236,6 +276,7 @@ def _batch_gather(lab, axis, along_i, perp_i):
 
 
 def image_noise(lab):
+    """p90 lightness step between adjacent BRIGHT pixels: ~0 for a compositor-painted gutter, higher after JPEG or rescaling."""
     L = lab[:, :, 0]
     bright = L > 85
     dh = np.abs(np.diff(L, axis=1)); mh = bright[:, :-1] & bright[:, 1:]
@@ -247,6 +288,7 @@ def image_noise(lab):
 
 
 def walk_tolerances(noise):
+    """Scaled, not raised: a flat SEED_L/STEP_L of 10/8 drops a pristine sample and 14/12 drops four."""
     return (SEED_L_TOL + NOISE_GAIN * noise,
             STEP_L_TOL + NOISE_GAIN * noise,
             (CONT_TOL + NOISE_GAIN * noise) ** 2)
@@ -484,6 +526,7 @@ def _trace_lines(lab, axis, seed_bias, tols=None):
 
 
 def _merge_lines(lines):
+    """Cluster by position only: angle-gating left noisy fragments of one gutter as separate near-duplicates."""
     if not lines:
         return []
     lines = sorted(lines, key=lambda l: l.midline_pos)
@@ -499,6 +542,11 @@ def _merge_lines(lines):
 
 
 def _pick(group):
+    """Position is the support-weighted mean; colour comes from the cleanest member of comparable support.
+
+    The longest trace is often seeded at the gutter's edge and runs along tile content (ice_cream4: 11px off,
+    std 2.80 vs 0.55-0.80 on-centre, 2026-08-11); nearest-to-centre swapped a 0.00 trace for a 3.43 one on rhitt.
+    """
     best = max(group, key=lambda l: l.support)
     wsum = sum(l.support for l in group)
     centre = sum(l.midline_pos * l.support for l in group) / wsum
@@ -512,6 +560,11 @@ def _pick(group):
 
 
 def _comb_lines(lab, axis, color):
+    """Second cue: full-span lines every pixel of which is the gutter colour the tracer already proved is painted.
+
+    The local walk loses a gutter whose neighbours are nearly its colour (rrv7m: gutters at 103/200/297 came
+    back as 66/96/215). Axis-aligned by construction, so tilted grids stay the tracer's.
+    """
     h, w = lab.shape[:2]
     d = lab - color
     m = (d * d).sum(axis=2) < COMB_TOL * COMB_TOL
@@ -528,6 +581,7 @@ def _comb_lines(lab, axis, color):
         if len(blk) > COMB_MAX_THICK:
             continue
         pos = float(blk.mean())
+        # The page margin is the gutter colour too; left in, it corroborates every line on the other axis and a 3x3 reads as 4x3.
         if not (total * EDGE_MARGIN < pos < total * (1 - EDGE_MARGIN)):
             continue
         i = int(round(pos))
@@ -552,6 +606,7 @@ def _comb_lines(lab, axis, color):
 
 
 def _comb_axis(lines, comb):
+    """The comb wins on position only; extent comes from the longer trace (a comb extent stops at the first off-colour stretch)."""
     out, used = [], set()
     for c in comb:
         near = [l for l in lines if abs(l.midline_pos - c.midline_pos) < MERGE_PX]
@@ -566,6 +621,7 @@ def _comb_axis(lines, comb):
 
 
 def _add_comb_lines(lab, h_lines, v_lines):
+    """Colour is the median of the clean traces of BOTH axes, so a starved axis is rescued by the other's evidence."""
     clean = [l for l in h_lines + v_lines if l.color_std < CLEAN_LATTICE_STD]
     if not clean:
         return h_lines, v_lines
@@ -605,6 +661,11 @@ def _internal(lines, total):
 
 
 def _boxes_are_regular(boxes, rows, cols):
+    """The last word on geometry: an observed false positive had column pitches [1, 1, 151, 1, 1, 151, 1, 1].
+
+    Edges come from ONE row / ONE column: the union of every box's edge invents a 1px phantom separator from
+    inter-row rounding on any slant, which rejected 101 real hCaptcha grids.
+    """
     if not boxes or rows < 1 or cols < 1:
         return False
 
@@ -653,6 +714,7 @@ def _even_spacing_ok(positions, total):
 
 
 def _flank_contrast(lab, line, pitch):
+    """Median over the line of the mean of both flanks' distance to the line colour: does this separator separate anything?"""
     h, w = lab.shape[:2]
     (x0, y0), (x1, y1) = line.start, line.end
     if line.orientation == 'h':
@@ -681,6 +743,7 @@ def _flank_contrast(lab, line, pitch):
 
 
 def _seal_fraction(lab, color, orientation, pos, angle, lo, hi):
+    """Share of the CANDIDATE's extent along which the line is the gutter colour: the same line seals a 3x3 and fails a 4x4."""
     h, w = lab.shape[:2]
     a = np.arange(max(0.0, lo), min(float(w if orientation == 'h' else h), hi), 2.0)
     if a.size < 3:
@@ -711,6 +774,9 @@ def _corroborate(lines, perp_lines, total):
         return lines
     pos = [l.midline_pos for l in lines]
     gaps = np.diff(pos)
+    # Pitch over gaps that could be a cell: comb-reported footer bands took the median from 87 to 55.8 and detection
+    # 20/20 -> 5/20. The guard below still reads the RAW median: filtering first skipped the perpendicular rescue
+    # and cost a 4x4 its fourth row (ttvu9: raw 34.5, filtered 80.9, perpendicular 97.0).
     raw_cell = float(np.median(gaps)) if len(gaps) else 0.0
     cell_gaps = [g for g in gaps if g >= MIN_CELL]
     cell = float(np.median(cell_gaps)) if cell_gaps else 0.0
@@ -785,6 +851,7 @@ def _complete_one_run(positions, grp, pitch, total):
 
 
 def _completed_candidates(lines, total, real_cand):
+    """Lattice completion for a missing sky-bordered gutter; only clean painted anchors, never arbitrary clean pairs."""
     out = {}
     seen = set()
     for dim, runs in real_cand.items():
@@ -837,6 +904,7 @@ def _axis_candidates(lines, total):
                 run_idx.append(best_k)
                 pos = lines[best_k].midline_pos
                 jj = best_k
+            # Every prefix, not just the maximal run: the last line may be a geetest/prosopo panel border.
             for end in range(2, len(run_idx) + 1):
                 sub = run_idx[:end]
                 positions = [lines[r].midline_pos for r in sub]
@@ -870,10 +938,12 @@ def _axis_candidates(lines, total):
 
 
 def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
+    """Every colour gate is RELATIVE, so a grid of any uniform border colour is detectable."""
     h_keep = _corroborate(h_lines, v_lines, h)
     v_keep = _corroborate(v_lines, h_lines, w)
     h_keep_int = _internal(h_keep, h)
     v_keep_int = _internal(v_keep, w)
+    # One painted reference colour for every seal test (the one the comb looked for), so answers cache across candidates.
     clean = [l for l in h_lines + v_lines if l.color_std < CLEAN_LATTICE_STD]
     seal_col = np.median(np.array([l.color_lab for l in clean]), axis=0) if clean else None
     seal_cache = {}
@@ -935,6 +1005,7 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                     v_bot_edge = vy_hi >= h - EDGE_BLEED_PX
                     h_lft_edge = hx_lo <= EDGE_BLEED_PX
                     h_rgt_edge = hx_hi >= w - EDGE_BLEED_PX
+                    # A one-sided edge bleed (hCaptcha's white footer) is not a missing row; a grid that fills an axis reaches both edges.
                     def _missing(uncov, pitch, bleed):
                         if bleed:
                             return 0.0
@@ -951,6 +1022,9 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                                         else (row_top, row_bot)))
                     unsealed = sum(1 for l in alll
                                    if not _seal(l.orientation, l.midline_pos, l.angle))
+                    # Refund the invention charge for INTERIOR nodes the image seals (a missed gutter, not a guess): without it
+                    # the true 4x4 on every sky-backed reCAPTCHA lost by ~470. Extrapolated nodes seal trivially on a white
+                    # margin and refunding them turned a correct 3x3 into a 3x4.
                     def _confirm(pos, lns, orientation, angle):
                         if len(lns) < 2:
                             return 0
@@ -962,6 +1036,7 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                                    and _seal(orientation, p, angle))
                     confirmed = (_confirm(hpos, hlns, 'h', h_ang)
                                  + _confirm(vpos, vlns, 'v', v_ang))
+                    # Only SEALED lines count as unused: the comb hands over clean sky belts that are not cell boundaries.
                     chosen = {id(l) for l in alll}
                     unused = (sum(1 for l in h_keep_int if id(l) not in chosen
                                   and _seal('h', l.midline_pos, l.angle))
@@ -972,6 +1047,7 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                              + unsealed * UNSEALED_PENALTY
                              - confirmed * VIRTUAL_NODE_PENALTY)
                     if score < best_score:
+                        # Content gate IN the loop so a rejected over-count lets a smaller valid candidate win.
                         boxes = _generate_grid(rows, cols, hpos, vpos, hd, vd, h, w, slant)
                         if boxes and _cells_have_content(lab, boxes, rows, cols,
                                                          hlns + vlns, unsealed == 0):
@@ -986,6 +1062,7 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
     grid_gutters_clean = (float(np.mean([l.color_std for l in chosen_lns]))
                           < CLEAN_GUTTER_STD) if chosen_lns else False
     def _off_lattice(lines, total, anchors, pitch, orientation, ext):
+        """Same-colour lines off the pitch inside the grid's own span; the textured-photo false-positive killer."""
         off_pos = []
         clean_skipped = 0
         lo, hi = anchors[0], anchors[-1]
@@ -994,11 +1071,13 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
                 continue
             if _de(l.color_lab, gutter_color) > GRID_COLOR_TOL:
                 continue
+            # Gutter-coloured for only part of the width divides nothing; three such belts once rejected a correct 4x4.
             if not sealed(orientation, l.midline_pos, l.angle, *ext):
                 continue
             off = min(abs((l.midline_pos - anchors[0]) - round((l.midline_pos - anchors[0]) / pitch) * pitch),
                       abs((l.midline_pos - anchors[-1]) - round((l.midline_pos - anchors[-1]) / pitch) * pitch))
             if off > LATTICE_TOL * pitch:
+                # On a proven clean grid forgive a few clean strays (a horizon, a UI rule); noisy strays always count.
                 if (grid_gutters_clean and l.color_std < OFF_LATTICE_CLEAN_STD
                         and clean_skipped < MAX_OFF_LATTICE_CLEAN):
                     clean_skipped += 1
@@ -1014,6 +1093,7 @@ def extract_grid_from_lines(h_lines, v_lines, h, w, lab=None):
         return None, None, None
     if not _boxes_are_regular(boxes, rows, cols):
         return None, None, None
+    # On the chosen grid only: as a per-line filter it deleted the strays the off-lattice gate counts (FP 2 -> 4 -> 6).
     if lab is not None:
         if float(np.median([_flank_contrast(lab, l, hd if l.orientation == 'h' else vd)
                             for l in chosen_lns])) < (SEALED_FLANK_MIN_DE if fully_sealed
@@ -1035,6 +1115,7 @@ def _detect_grid(image_path, seed_bias=0.0):
     tols = walk_tolerances(image_noise(lab))
     h_lines = _trace_lines(lab, axis=1, seed_bias=seed_bias, tols=tols)
     v_lines = _trace_lines(lab, axis=0, seed_bias=-seed_bias, tols=tols)
+    # Both axes traced before either is judged: the comb takes its colour from whichever axis found a clean line.
     h_lines, v_lines = _add_comb_lines(lab, h_lines, v_lines)
     if len(_internal(h_lines, h)) < 2 or len(_internal(v_lines, w)) < 2:
         return None
@@ -1109,13 +1190,16 @@ def is_cell_opacity_changing(image_path_a, image_path_b, grid_boxes,
     return ratio > change_thresh
 
 
+# Two, not zero: the ringed rendering draws the white on the rim and fragments the teal. At 4px the phantom rate doubles for ~1 point of recall.
 _HCAPTCHA_GLYPH_SLACK_PX = 2.0
 
 
 def _has_hcaptcha_check(roi):
+    """The white glyph must BELONG to the teal mark: pixel counts alone called blue sky with a white pole a selection (74 phantoms over 3051 corners)."""
     if roi is None or roi.size == 0:
         return False
     flat = roi.reshape(-1, 3).astype(np.int32)
+    # Deliberately loose: pinning the badge colour to a delta-E costs more real badges than it saves phantoms.
     teal = (
         (flat[:, 0] > 120)
         & (flat[:, 1] > 80)
@@ -1127,6 +1211,7 @@ def _has_hcaptcha_check(roi):
         return False
 
     h, w = roi.shape[:2]
+    # Close first: the glyph cuts the disc into pieces, and the largest blob must be the whole mark.
     mask = cv2.morphologyEx(
         teal.reshape(h, w).astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
     )
@@ -1172,5 +1257,5 @@ def get_numbered_grid_overlay(image_path, grid_boxes, output_path=None):
     ov = [{"bbox": [b[0], b[1], b[2]-b[0], b[3]-b[1]], "number": i+1, "color": "#FF0000", "box_style": "solid"} for i, b in enumerate(grid_boxes)]
     if output_path is None:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf: output_path = tf.name
-    add_overlays_to_image(image_path, ov, output_path=output_path, label_position="top-right")
+    add_overlays_to_image(image_path, ov, output_path=output_path, label_position=LabelPosition.TOP_RIGHT)
     return output_path

@@ -1,3 +1,5 @@
+// A ratio from a redraw (~0.02) once meant thousands of px and a camoufox mouse move that never returned; the widest pair is used because
+// 1px rounding between the last two readings gave 0.5.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

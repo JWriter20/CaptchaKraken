@@ -1,15 +1,16 @@
-import type { Humanizer, HumanizationMode, TouchTransform } from './humanize.js';
+import type { Humanizer, TouchTransform } from './humanize.js';
+import type { ActionKind, FrameRole, HumanizationMode, PromptFamily, SolveStage, Vendor } from './kinds';
 
 /** One intermediate stage of a solve, handed to `CaptchaKrakenConfig.onStep`. */
 export interface SolveStepEvent {
   /** 1-based, increasing across the whole solve. */
   index: number;
-  stage: 'initial' | 'click' | 'drag' | 'type' | 'wait' | 'submit' | 'round';
+  stage: SolveStage;
   label: string;
   /** PNG of the captcha element at this step; owned by the callback. Null if the screenshot failed. */
   screenshotPath: string | null;
-  puzzleSource?: 'hcaptcha' | 'recaptcha' | 'unknown';
-  frameRole?: 'checkbox' | 'challenge' | 'unknown';
+  puzzleSource?: Vendor;
+  frameRole?: FrameRole;
   attempt: number;
   elapsedMs: number;
   meta?: Record<string, any>;
@@ -17,7 +18,7 @@ export interface SolveStepEvent {
 
 /** Tunables. Every field mirrors a `PageSolverConfig` field on the Python port; defaults are in SOLVE_DEFAULTS. */
 export interface CaptchaKrakenConfig {
-  /** Input device: `mouse` (default), `mobile` (touch events), or `none` (no humanisation). Falls back to CAPTCHA_HUMANIZATION. */
+  /** Input device; default `mouse`. Falls back to CAPTCHA_HUMANIZATION. */
   humanization?: HumanizationMode;
   /** Your own gesture implementation; overrides `humanization`. */
   humanizer?: Humanizer;
@@ -33,8 +34,8 @@ export interface CaptchaKrakenConfig {
   pythonCommand?: string;
   /** Served model name. Default: resolved from models.json for the endpoint in use. */
   model?: string;
-  /** Force one expert of a routed model: 'pixel' | 'grid' | 'video' | 'text'. Also CAPTCHA_EXPERT. */
-  expert?: string;
+  /** Force one expert of a routed model. Also CAPTCHA_EXPERT. */
+  expert?: PromptFamily;
   /** Bearer token; also read from CAPTCHA_KRAKEN_API_KEY / VLLM_API_KEY. */
   apiKey?: string;
   /** Where the pointer starts. Default { x: 100, y: 100 }. */
@@ -61,7 +62,7 @@ export interface CaptchaKrakenConfig {
   recaptchaDynamicFadeWaitMs?: number;
   /** reCAPTCHA 3x3: gap between the two frames the fade detectors diff. Default 250. */
   recaptchaDynamicFadePollMs?: number;
-  /** reCAPTCHA 3x3: grace window after a click for the fade to begin. Default 4000. */
+  /** reCAPTCHA 3x3: grace window after a click for the fade to begin. Default 4000. A window, not a snapshot: a clicked tile stays selected 1-3s and only then blanks. */
   recaptchaFadeOnsetGraceMs?: number;
   /** reCAPTCHA 3x3: cap on click/refresh rounds per puzzle. Default 8. */
   recaptchaMaxDynamicRounds?: number;
@@ -97,7 +98,7 @@ export interface CaptchaKrakenConfig {
   videoBurstDurationMs?: number;
   /** Burst frame rate. Default 10; matches the training corpus. */
   videoBurstFps?: number;
-  /** How long to hold a click waiting for the chosen keyframe. Default 9000. */
+  /** How long to hold a click waiting for the chosen keyframe. Default 9000: GeeTest svg dwells up to 2.7s a screen, so a 3-screen cycle is 8.1s worst case and 6s gave up one screen short. */
   keyframeWaitTimeoutMs?: number;
   /** Poll interval while waiting. Default 120. */
   keyframeWaitPollMs?: number;
@@ -137,7 +138,7 @@ export interface AnimatedActionFields {
 }
 
 export interface ClickAction extends AnimatedActionFields {
-  action: 'click';
+  action: typeof ActionKind.CLICK;
   /** Normalised [x1, y1, x2, y2] boxes, one click each. */
   target_bounding_boxes?: Array<[number, number, number, number]>;
   target_number?: number | null;
@@ -146,23 +147,23 @@ export interface ClickAction extends AnimatedActionFields {
 }
 
 export interface DragAction extends AnimatedActionFields {
-  action: 'drag';
+  action: typeof ActionKind.DRAG;
   /** Null on a puzzle-piece slider: the driver finds the handle and closes the loop on the piece. */
   source_bounding_box: [number, number, number, number] | null;
   target_bounding_box: [number, number, number, number];
 }
 
 export interface TypeAction {
-  action: 'type';
+  action: typeof ActionKind.TYPE;
   text: string;
 }
 
 export interface DoneAction {
-  action: 'done';
+  action: typeof ActionKind.DONE;
 }
 
 export interface WaitAction {
-  action: 'wait';
+  action: typeof ActionKind.WAIT;
   duration_ms: number;
 }
 

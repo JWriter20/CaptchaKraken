@@ -3,16 +3,25 @@
  *
  * The pointer position lives here, not in the solver, because a touch mode that dispatches no
  * motion between taps still has to say where the next gesture starts.
+ *
+ * Pluggable because camoufox's juggler re-humanises every mouse.move() it is handed, and running
+ * both measured 82s against 13s on one GeeTest slider; and a touch widget needs touch events, not
+ * mousemove. See TRIBAL_KNOWLEDGE.md. The 2026-09 cut removed our drag-overshoot redraw and swipe
+ * wobble in favour of Cursory's raw recordings; the one-pixel tap wobble stayed because a
+ * motionless tap is a synthetic one.
  */
 
 import type { Page, PlaywrightElementHandle } from './playwright-types.js';
 import { generateTrajectory } from 'cursory-js';
+import { HumanizationMode, PauseKind, isOneOf } from './kinds.js';
+export type { HumanizationMode, PauseKind } from './kinds.js';
 
 export type Point = [number, number];
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms)));
 const log = (m: string) => console.log(`[captchakraken] ${m}`);
 const uniform = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
+// moveAndClick clicks at the landing point; without this every click would dispatch one redundant move.
 const samePoint = (a: Point, b: Point) => Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6;
 const gauss = (sigma: number) => {
   let u = 0;
@@ -28,8 +37,7 @@ export function trajectory(start: Point, end: Point, frequency: number): [Point[
 }
 
 /** Every inter-gesture wait the driver takes, named, so each device supplies its own table. */
-export type PauseKind = 'tap' | 'between' | 'grab' | 'drop' | 'probe' | 'settle' | 'key';
-export const PAUSE_KINDS: readonly PauseKind[] = ['tap', 'between', 'grab', 'drop', 'probe', 'settle', 'key'] as const;
+export const PAUSE_KINDS: readonly PauseKind[] = Object.values(PauseKind);
 
 export interface Humanizer {
   readonly name: string;
@@ -46,7 +54,7 @@ export interface Humanizer {
   pause(kind: PauseKind): Promise<void>;
 }
 
-type PauseTable = Record<string, [number, number]>;
+type PauseTable = Partial<Record<PauseKind, [number, number]>>;
 
 export abstract class BaseHumanizer implements Humanizer {
   abstract readonly name: string;
@@ -64,6 +72,7 @@ export abstract class BaseHumanizer implements Humanizer {
   abstract release(page: Page): Promise<void>;
   abstract typeText(page: Page, field: PlaywrightElementHandle, text: string): Promise<boolean>;
 
+  /** An unknown kind waits nothing, so adding a pause site cannot break a custom humanizer written against an older release. */
   protected pauseMs(kind: PauseKind): number {
     const range = this.pauses[kind];
     return range ? uniform(range[0], range[1]) : 0;
@@ -76,22 +85,22 @@ export abstract class BaseHumanizer implements Humanizer {
   async click(page: Page, to: Point): Promise<void> {
     await this.move(page, to);
     await this.press(page);
-    await this.pause('tap');
+    await this.pause(PauseKind.TAP);
     await this.release(page);
   }
 
   async drag(page: Page, src: Point, dst: Point): Promise<void> {
     await this.move(page, src);
     await this.press(page);
-    await this.pause('grab');
+    await this.pause(PauseKind.GRAB);
     await this.move(page, dst);
-    await this.pause('drop');
+    await this.pause(PauseKind.DROP);
     await this.release(page);
   }
 }
 
 export class MouseHumanizer extends BaseHumanizer {
-  readonly name = 'mouse';
+  readonly name: HumanizationMode = HumanizationMode.MOUSE;
   readonly hovers = true;
   protected readonly pauses: PauseTable = {
     tap: [20, 50], between: [80, 160], grab: [50, 100], drop: [50, 100],
@@ -107,6 +116,8 @@ export class MouseHumanizer extends BaseHumanizer {
   async move(page: Page, to: Point): Promise<void> {
     if (samePoint(this.at, to)) return;
     const [points, timings] = trajectory(this.at, to, this.frequency);
+    // KNOWN DIVERGENCE from the Python port, which clamps only when the viewport is known: camoufox reports
+    // null, and clamping to a guessed edge deadlocks its juggler (upstream #225). Worth its own fix and test.
     let viewport = { width: 1920, height: 1080 };
     try {
       viewport = page.viewportSize() ?? viewport;
@@ -129,7 +140,9 @@ export class MouseHumanizer extends BaseHumanizer {
   async press(page: Page): Promise<void> { await page.mouse.down(); }
   async release(page: Page): Promise<void> { await page.mouse.up(); }
 
+  /** Per character with a humanised pause, not type(text, {delay}): a constant inter-key delay is itself a signal these vendors score. */
   async typeText(page: Page, _field: PlaywrightElementHandle, text: string): Promise<boolean> {
+    // Clear first: a retry round arrives with the previous attempt still in the box, and typing would append.
     try { await page.keyboard.press('Control+A'); } catch { /* the type below still replaces on most */ }
     for (const ch of text) {
       try {
@@ -138,7 +151,7 @@ export class MouseHumanizer extends BaseHumanizer {
         log(`could not type into the captcha field: ${e}`);
         return false;
       }
-      await this.pause('key');
+      await this.pause(PauseKind.KEY);
     }
     return true;
   }
@@ -160,6 +173,11 @@ export class CdpTouchBackend implements TouchBackend {
   readonly name = 'cdp';
   private constructor(private session: any) {}
 
+  /**
+   * Checked at construction, not per gesture. WebKit and Firefox expose no touch dispatch, and emitting
+   * mouse events instead is worse than not running: the page's touch handlers never fire and the report
+   * reads as a model that cannot solve mobile puzzles.
+   */
   static async open(page: Page): Promise<CdpTouchBackend> {
     try {
       return new CdpTouchBackend(await (page as any).context().newCDPSession(page));
@@ -197,7 +215,11 @@ export interface TouchTransform {
   origin?: Point;
 }
 
-/** W3C touch pointer actions for Appium and WebdriverIO, paced by the device from one chain per leg. */
+/**
+ * W3C touch pointer actions for Appium and WebdriverIO, paced by the device from one chain per leg.
+ * Raw protocol payloads so this imports no client. Press and release are separate performs because W3C
+ * input state is per session: that is what lets the slider driver press, screenshot, steer, then release.
+ */
 export class AppiumTouchBackend implements TouchBackend {
   readonly name = 'appium';
   private scale: number;
@@ -211,7 +233,11 @@ export class AppiumTouchBackend implements TouchBackend {
     this.origin = transform.origin ?? [0, 0];
   }
 
-  /** Refuse an unset scale on a device whose pixel ratio is not 1: the finger would land elsewhere. */
+  /**
+   * Refuse an unset scale on a device whose pixel ratio is not 1: the finger would land elsewhere. An
+   * explicit scale of 1 is the caller's word and is not re-checked; the ratio is read once, since a solve
+   * makes hundreds of these, and an unreadable ratio is taken as 1.
+   */
   private async checkScale(): Promise<void> {
     this.checked = true;
     if (this.scaleGiven || !this.page) return;
@@ -247,6 +273,7 @@ export class AppiumTouchBackend implements TouchBackend {
     ]);
   }
 
+  /** The per-sample gap becomes the move's `duration`, so the device interpolates the leg itself. */
   async move(path: TouchSample[]): Promise<void> {
     if (!this.checked) await this.checkScale();
     if (!path.length) return;
@@ -298,8 +325,9 @@ export async function touchBackendFor(page: Page, driver?: any, transform?: Touc
 
 /** A finger on glass: no hover, touch events only, slower and more variable pauses. */
 export class MobileHumanizer extends BaseHumanizer {
-  readonly name = 'mobile';
+  readonly name: HumanizationMode = HumanizationMode.MOBILE;
   readonly hovers = false;
+  // tap: measured human touch dwell clusters at 60-120ms. key: a soft keyboard is ~3x slower than a physical one.
   protected readonly pauses: PauseTable = {
     tap: [55, 130], between: [140, 320], grab: [90, 190], drop: [80, 170],
     probe: [70, 140], settle: [140, 300], key: [110, 320],
@@ -319,6 +347,7 @@ export class MobileHumanizer extends BaseHumanizer {
     this.frequency = options.frequency ?? 90;
   }
 
+  /** A solve that ended mid-gesture leaves a pointer down in the session's input state; lift it before the next one. */
   async reset(page: Page): Promise<void> {
     if (!this.down) return;
     try { await (await this.touch(page)).up(this.at[0], this.at[1]); } catch { /* a stale pointer must not fail a solve */ }
@@ -353,7 +382,7 @@ export class MobileHumanizer extends BaseHumanizer {
   async click(page: Page, to: Point): Promise<void> {
     await this.move(page, to);
     await this.press(page);
-    const held = this.pauseMs('tap');
+    const held = this.pauseMs(PauseKind.TAP);
     await delay(held / 2);
     try {
       await (await this.touch(page)).move([[this.at[0] + gauss(0.9), this.at[1] + gauss(0.9), 0]]);
@@ -362,6 +391,7 @@ export class MobileHumanizer extends BaseHumanizer {
     await this.release(page);
   }
 
+  /** Clears through the element: there is no Control key on a phone and no `page.keyboard` on Appium. */
   async typeText(page: Page, field: PlaywrightElementHandle, text: string): Promise<boolean> {
     const f = field as any;
     for (const [name, arg] of [['clear', undefined], ['fill', '']] as const) {
@@ -376,15 +406,18 @@ export class MobileHumanizer extends BaseHumanizer {
         log(`could not type into the captcha field: ${e}`);
         return false;
       }
-      await this.pause('key');
+      await this.pause(PauseKind.KEY);
     }
     return true;
   }
 }
 
-/** No humanisation: one move per gesture and a single fill. Fast, and detectable. */
+/**
+ * No humanisation: one move per gesture and a single fill. Fast, and detectable. It still moves before
+ * it presses, because a click with no preceding move fails on the vendors that require a hover state first.
+ */
 export class NullHumanizer extends BaseHumanizer {
-  readonly name = 'none';
+  readonly name: HumanizationMode = HumanizationMode.NONE;
   readonly hovers = false;
   protected readonly pauses: PauseTable = {};
 
@@ -414,8 +447,7 @@ export class NullHumanizer extends BaseHumanizer {
   }
 }
 
-export type HumanizationMode = 'mouse' | 'mobile' | 'none';
-export const MODES: readonly HumanizationMode[] = ['mouse', 'mobile', 'none'] as const;
+export const MODES: readonly HumanizationMode[] = Object.values(HumanizationMode);
 
 export interface HumanizerOptions {
   humanization?: HumanizationMode;
@@ -425,17 +457,21 @@ export interface HumanizerOptions {
   startingMousePosition?: { x: number; y: number };
 }
 
-/** `config.humanizer`, else `config.humanization`, else CAPTCHA_HUMANIZATION, else mouse. */
+/**
+ * `config.humanizer`, else `config.humanization`, else CAPTCHA_HUMANIZATION, else mouse. The env var loses
+ * to code, the opposite of the model settings, on purpose: an env var flipping a desktop solve to touch
+ * dispatch would break every one of them silently.
+ */
 export function resolveHumanizer(config: HumanizerOptions = {}): Humanizer {
   if (config.humanizer) return config.humanizer;
-  const raw = (config.humanization ?? process.env.CAPTCHA_HUMANIZATION ?? 'mouse').toString().trim().toLowerCase() as HumanizationMode;
-  if (!MODES.includes(raw)) {
+  const raw = (config.humanization ?? process.env.CAPTCHA_HUMANIZATION ?? HumanizationMode.MOUSE).toString().trim().toLowerCase();
+  if (!isOneOf(HumanizationMode, raw)) {
     throw new Error(`unknown humanization mode '${raw}'; expected one of ${MODES.join(', ')}, ` +
       'or pass your own object as CaptchaKrakenConfig.humanizer');
   }
   const p = config.startingMousePosition;
   const start: Point = p ? [p.x, p.y] : [0, 0];
-  if (raw === 'mobile') return new MobileHumanizer(start, { driver: config.touchDriver, transform: config.touchTransform });
-  if (raw === 'none') return new NullHumanizer(start);
+  if (raw === HumanizationMode.MOBILE) return new MobileHumanizer(start, { driver: config.touchDriver, transform: config.touchTransform });
+  if (raw === HumanizationMode.NONE) return new NullHumanizer(start);
   return new MouseHumanizer(start);
 }

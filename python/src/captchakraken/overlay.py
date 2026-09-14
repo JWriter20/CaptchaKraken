@@ -4,6 +4,8 @@ from typing import Any, Dict
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .kinds import LabelPosition
+
 _FONT_CACHE: Dict[int, Any] = {}
 _FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -46,13 +48,13 @@ def _draw_box(draw, bbox, label, image_size, color, label_position, box_style):
     tb = draw.textbbox((0, 0), label, font=font) if font else draw.textbbox((0, 0), label)
     tw, th = tb[2] - tb[0], tb[3] - tb[1]
     cw, ch = tw + 4, th + 4
-    if label_position == "center":
+    if label_position is LabelPosition.CENTER:
         bx1, by1 = (x1 + x2) / 2 - cw / 2, (y1 + y2) / 2 - ch / 2
-    elif label_position == "bottom-right":
+    elif label_position is LabelPosition.BOTTOM_RIGHT:
         bx1, by1 = x2 - 4 - cw, y2 - 4 - ch
-    elif label_position == "bottom-left":
+    elif label_position is LabelPosition.BOTTOM_LEFT:
         bx1, by1 = x1 + 4, y2 - 4 - ch
-    elif label_position == "top-right":
+    elif label_position is LabelPosition.TOP_RIGHT:
         bx1, by1 = x2 - 4 - cw, y1 + 4
     else:
         bx1, by1 = x1 + 4, y1 + 4
@@ -63,8 +65,10 @@ def _draw_box(draw, bbox, label, image_size, color, label_position, box_style):
     draw.text((tx, ty), label, fill="white", font=font, stroke_width=2, stroke_fill="black")
 
 
-def add_overlays_to_image(image_path: str, boxes: list, output_path: str = None, label_position="top-left"):
+def add_overlays_to_image(image_path: str, boxes: list, output_path: str = None,
+                          label_position: LabelPosition = LabelPosition.TOP_LEFT):
     """Draw each box (normalised [x1,y1,x2,y2] or pixel [x,y,w,h]) with its number/text label and save."""
+    label_position = LabelPosition(label_position)
     with Image.open(image_path) as img:
         img = img.convert("RGBA")
         draw = ImageDraw.Draw(img)
@@ -79,4 +83,5 @@ def add_overlays_to_image(image_path: str, boxes: list, output_path: str = None,
             label = " ".join(str(v) for v in (box.get("number"), box.get("text")) if v not in (None, ""))
             _draw_box(draw, coords, label, img.size, box.get("color", "#FF6B6B"), label_position,
                       box.get("box_style") or box.get("style") or "thin")
+        # RGBA cannot be saved as JPEG; the failure would surface a stage later.
         img.convert("RGB").save(output_path or image_path)

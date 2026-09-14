@@ -1,20 +1,12 @@
-export type CaptchaKrakenErrorCode =
-  | 'missing_api_key'
-  | 'invalid_api_key'
-  | 'account_suspended'
-  | 'insufficient_credits'
-  | 'rate_limited'
-  | 'solve_abandoned'
-  | 'unrecognized_prompt'
-  | 'invalid_request'
-  | 'request_too_large'
-  | 'upstream_unavailable'
+import { ErrorCode } from './kinds.js';
 
-  | 'model_not_licensed'
-  | 'model_not_serving'
+/** Open on purpose: a code the server adds tomorrow must arrive intact, not be coerced to undefined. */
+export type CaptchaKrakenErrorCode = ErrorCode | (string & {});
 
-  | (string & {});
-
+/**
+ * The Python port words every message once and this side repeats it verbatim: two copies of the same
+ * sentence drift. Before this class a customer out of credits read `vLLM 402 Payment Required at ...`.
+ */
 export class CaptchaKrakenAPIError extends Error {
   readonly status: number | undefined;
   readonly code: CaptchaKrakenErrorCode | undefined;
@@ -43,6 +35,10 @@ export class CaptchaKrakenAPIError extends Error {
   }
 }
 
+/**
+ * Line by line, because stderr also carries timing records. Anything unrecognised is null, never a guess:
+ * an unparseable stderr must not become a confident but wrong billing message.
+ */
 export function parseApiError(stderr: string): CaptchaKrakenAPIError | null {
   if (!stderr || !stderr.includes('ck_error')) return null;
 

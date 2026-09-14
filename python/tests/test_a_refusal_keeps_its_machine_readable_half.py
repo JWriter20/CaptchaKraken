@@ -1,3 +1,7 @@
+"""'Branch on e.code' only holds if code, status, URL and retry-after survive the process boundary to the TS driver;
+otherwise an out-of-credits caller wraps a retry loop around a refusal that will never succeed.
+"""
+
 import json
 
 import pytest

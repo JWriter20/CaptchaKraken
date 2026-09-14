@@ -1,3 +1,4 @@
+// JS once defaulted to 'captcha' (gen-1) while Python resolved gen-2, losing 22 of the port's 44 puzzle types; the default comes from the registry now.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

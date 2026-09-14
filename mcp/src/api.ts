@@ -2,6 +2,9 @@ import { loadCredential, saveCredential } from './credentials.js';
 
 const TIMEOUT_MS = 20_000;
 
+/** The one code this client mints itself; every other code is the control plane's. */
+export const NOT_SIGNED_IN = 'not_signed_in';
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -41,7 +44,7 @@ export class ControlPlane {
     if (authenticated) {
       const credential = loadCredential(this.baseUrl);
       if (!credential.accessToken) {
-        throw new ApiError(401, 'not_signed_in', 'Not signed in. Run the sign_in tool first.');
+        throw new ApiError(401, NOT_SIGNED_IN, 'Not signed in. Run the sign_in tool first.');
       }
       headers.authorization = `Bearer ${credential.accessToken}`;
     }
@@ -76,6 +79,8 @@ export class ControlPlane {
           ? payload.message
           : `${this.baseUrl}${path} returned ${response.status}`;
 
+      // A 401 on an authenticated call drops the stored token so the next sign_in starts clean. Not on the
+      // device endpoints: they answer 400/401 for reasons that have nothing to do with a stored token.
       if (response.status === 401 && authenticated) {
         const credential = loadCredential(this.baseUrl);
         delete credential.accessToken;

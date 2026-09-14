@@ -1,3 +1,5 @@
+"""Greedy only: (0.0, 0.35, 0.7) scored 0/5 against 4/5 and made the median failed attempt 24.0s against 13.9s, because a differing re-ask resets the give-up counter. The level plumbing stays for a network-refusal trigger."""
+
 import sys
 from pathlib import Path
 

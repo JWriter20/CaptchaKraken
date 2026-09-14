@@ -1,3 +1,5 @@
+"""The 2026-07-18 retrain shipped a prompt drift that failed every drag as "unsupported" with CI green; the hashes resolve through models.json, not module constants."""
+
 import hashlib
 
 from captchakraken import config, prompts

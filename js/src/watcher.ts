@@ -1,16 +1,23 @@
+/**
+ * Polls; injects nothing. An exposed binding or a MutationObserver is script the page can enumerate under
+ * vanilla Playwright or Puppeteer, and a captcha vendor is exactly the party that looks. See TRIBAL_KNOWLEDGE.md.
+ */
 import { PlaywrightPage as Page } from './playwright-types';
 import { SolveResult } from './types';
 
+/** Structural, not the solver class: a real import here would be a CommonJS cycle. Detection reuses detectCaptcha because a copied selector union drifted the first time a vendor was added. */
 export interface WatchableSolver {
   detectCaptcha(page: Page): Promise<unknown | null>;
   solve(page: Page): Promise<SolveResult | void>;
 }
 
 export interface WatchOptions {
+  /** Default 1000; below ~250 is wasted CPU. */
   intervalMs?: number;
 
   maxSolves?: number;
 
+  /** Default 5000. Without it a permanently unsupported challenge is a hot loop that re-attempts and re-bills every interval forever. */
   errorBackoffMs?: number;
 
   onSolved?: (result: SolveResult) => void | Promise<void>;

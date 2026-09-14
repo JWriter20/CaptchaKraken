@@ -1,11 +1,22 @@
+"""Has the widget painted its puzzle yet, or are we photographing the rebuild hole?
+
+Measured on gt4.geetest.com's slide demo (2026-09-12): 6 of 52 requests carried a board with under 5% ink and
+every one came back dead centre. The settle gate cannot catch it because a blank panel is perfectly still.
+Structure is measured, not ink, because geetest_v4_svg is line art on white. A caller must treat False as
+"wait a moment longer", never "give up": a gate that can refuse to ever take a picture is worse than the blank one.
+"""
+
 from __future__ import annotations
 
 from typing import Optional, Sequence
 
+# Trimmed in from every edge: the caption and icon row are chrome that paints early, on a blank board too.
 CENTRE_BOX = (0.15, 0.25, 0.85, 0.75)
 
+# Below this is JPEG noise and anti-aliasing on a flat fill.
 LEVEL_DELTA = 12
 
+# Blank-versus-anything, not a puzzle density: measured 0.000-0.004 blank against 0.19-0.56 painted.
 TEXTURE_FLOOR = 0.015
 
 

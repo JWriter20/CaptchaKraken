@@ -1,3 +1,5 @@
+"""A structural (AST) test, because `none_present` boards read as SKIP in the fixture suite: the regression surfaced beside the macOS font fix and read as the font fix causing it."""
+
 from __future__ import annotations
 
 import ast

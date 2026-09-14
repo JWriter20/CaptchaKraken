@@ -1,3 +1,5 @@
+// GeeTest's control is `<div class="geetest_submit geetest_disable">OK</div>` (wrong tag, wrong word) beside decoy tooltips that also
+// say OK; it scored 0/31 then 0/13, which reads exactly like a puzzle the model cannot do. Pins the finder, not a rate.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

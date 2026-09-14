@@ -131,6 +131,7 @@ answers with a frame number the driver then waits for on screen.
 |---|---|
 | `js/src/index.ts` | The package's public surface, and the worked examples in its doc comments. |
 | `js/src/solver.ts` | `CaptchaKrakenSolver`: the driver. Finds the widget, screenshots it, asks the engine for a plan, performs it, decides whether the vendor accepted, and goes round again if not. |
+| `js/src/kinds.ts` | Every closed set of names the driver uses — vendors, action kinds, verdicts, phases, error codes — as `as const` objects mirrored one-for-one in `kinds.py`. |
 | `js/src/types.ts` | `SolveResult`, the per-step lifecycle event, and the whole configuration surface with a doc comment per knob. |
 | `js/src/watcher.ts` | `watchPage()`: a background poller that solves captchas as they appear and hands back a `stop()`. Injects nothing into the page. |
 | `js/src/cli-invocation.ts` | How a solve request is handed to the bundled Python CLI: the argv, the environment the bearer token travels in, and the redaction applied to anything printed. |
@@ -254,6 +255,7 @@ something every browser-driver install should pay for.
 | `python/src/captchakraken/models.json` | The model registry: every published model, the prompt generation it was trained on, its pixel budget, and whether its weights are downloadable. |
 | `python/src/captchakraken/pinned_model.json` | The adapter this release was validated against, so a client can say what it was proved with rather than what happens to be latest. |
 | `python/src/captchakraken/action_types.py` | The typed actions the model may return — click, drag, type, wait — and the normalised `BoundingBox` they carry. |
+| `python/src/captchakraken/kinds.py` | Every closed set of names the engine uses — vendors, action kinds, verdicts, phases, error codes — as `StrEnum`s mirrored one-for-one in `kinds.ts`. |
 | `python/src/captchakraken/image_processor.py` | Image manipulation and the grid-detection entry points the solver calls. |
 | `python/src/captchakraken/overlay.py` | Draws the numbered cell labels onto a grid screenshot. The model reads those labels; it was never trained to invent a numbering. |
 | `python/src/captchakraken/keyframes.py` | Reduces a recorded clip to the few frames the model is shown. A verbatim port of the extractor the model was trained with — if this copy sliced differently, the frame number the model answers with would name a picture that does not exist. Its region-diff metric is also the driver's wait-for-state gate. |
@@ -337,6 +339,8 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_fetch_command.py` | The `fetch` command's plan: what it would pull, upgrade and restart, without doing any of it. |
 | `python/tests/test_overlay_is_what_the_model_reads.py` | `add_overlays_to_image` is exported API and the model reads what it draws. Pins where marks land for each of the two accepted bbox forms, that the source is not overwritten when an output path is given, that the result is RGB, and that an unusable box raises instead of writing a wrong overlay. |
 | `python/tests/test_find_checkbox_rejects_what_is_not_a_checkbox.py` | One test per gate in the checkbox detector, on synthetic images: squareness, absolute size, relative area and content variance. A false positive here clicks the page background; a false negative reports no widget on a page that has one. |
+| `python/tests/test_the_two_ports_share_one_mouse.py` | The mouse is a port, not a rewrite, so the two drivers agree on a seed exactly rather than statistically. |
+| `python/tests/fixtures/cursory_cross_port.json` | The recorded JS-port trajectories `test_the_two_ports_share_one_mouse.py` checks the Python port against: four seeds, points and timings. |
 | `python/tests/test_the_wait_gate_metric.py` | `region_box` and `region_diff_ratio`, the metric the driver holds the mouse on. Pins that an edge point never yields an empty box (which would read as a perfect match and open the gate immediately), that mismatched shapes read as completely different, and that the box is what bounds the comparison. |
 | `python/tests/test_thinking_is_off_on_every_runtime.py` | Both fields that turn thinking off reach the wire. vLLM and llama.cpp read `chat_template_kwargs`; Ollama reads `reasoning_effort` and ignores the other, so one alone leaves the answer in `reasoning` with an empty `content` on whichever runtime the user picked. |
 | `python/tests/test_cli_stdout_is_the_wire_between_the_ports.py` | The CLI's stdout is a wire protocol the TypeScript driver `JSON.parse`s. Pins one JSON document on stdout and nothing else, diagnostics on stderr, a non-zero exit on refusal, and that each handler declines a command that is not its own. |

@@ -1,3 +1,4 @@
+// The stop flag was once read only between 180-540ms dwells; best-of-five because timing under node --test parallelism is noisy.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

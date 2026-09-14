@@ -1,3 +1,5 @@
+"""The edge proxy compares X-JH-Priority as an int and routes >5 to the backups. A malformed priority must not drop the attribution headers (that understates a partner's revenue share); credential and attribution headers are not env-overridable, or one pinned session id could escape the per-attempt billing cap; CR/LF cannot splice a header."""
+
 from captchakraken.planner import (
     _CLIENT_HEADER,
     _PRIORITY_HEADER,

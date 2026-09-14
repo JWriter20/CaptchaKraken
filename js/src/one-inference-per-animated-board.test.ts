@@ -1,3 +1,5 @@
+// The plan is reused across rounds and dropped only when the gate never saw its screen; per-round cleanup must not delete the
+// keyframe dir the plan still holds.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

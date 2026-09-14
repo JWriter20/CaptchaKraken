@@ -1,3 +1,5 @@
+"""A licensed model is refused in plan(), before any download, so --dry-run shows it; the alternative is a RepositoryNotFoundError that reads as "you are not logged in". --engine-only is unguarded on purpose."""
+
 import pytest
 
 from captchakraken import prompts, updater

@@ -1,3 +1,5 @@
+"""Hermetic synthetic grids: the fast guard that a clean NxN white-gutter grid is detected as NxN, with no corpus."""
+
 import os
 import sys
 import tempfile
@@ -97,6 +99,7 @@ def _make_low_contrast_grid(n: int, tile: int = 110, gutter: int = 4,
 @pytest.mark.skipif(cv2 is None, reason="cv2 not installed")
 @pytest.mark.parametrize("n", [3, 4])
 def test_find_grid_detects_low_contrast_gutters(n):
+    """The miss the colour comb closes: before it, this returned None for every tile value from 240 down to 220."""
     path = _make_low_contrast_grid(n)
     try:
         boxes = find_grid(path)
@@ -119,6 +122,7 @@ def test_find_grid_detects_low_contrast_gutters(n):
         0, 255).astype(np.uint8)),
 ])
 def test_find_grid_rejects_near_uniform_canvas(name, make):
+    """A near-uniform canvas seals every lattice drawn on it; the cell-divergence floor stops the seal relaxation hallucinating grids."""
     fd, path = tempfile.mkstemp(suffix="_uniform.png")
     os.close(fd)
     cv2.imwrite(path, make(np.random.default_rng(3)))

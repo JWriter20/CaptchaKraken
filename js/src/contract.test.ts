@@ -45,13 +45,10 @@ const live = {
   humanization_modes: (Array.isArray(MODES) ? [...MODES] : Object.keys(MODES)).sort(),
   config_fields: interfaceFields('types.ts', 'CaptchaKrakenConfig'),
   solve_result_fields: interfaceFields('types.ts', 'SolveResult'),
+  // Read off the source, not the runtime object, so a code that stops being a literal is caught here.
   error_codes: [
-    ...readFileSync(resolve(ROOT, 'js', 'src', 'errors.ts'), 'utf8')
-      .slice(
-        readFileSync(resolve(ROOT, 'js', 'src', 'errors.ts'), 'utf8').indexOf(
-          'export type CaptchaKrakenErrorCode',
-        ),
-      )
+    ...readFileSync(resolve(ROOT, 'js', 'src', 'kinds.ts'), 'utf8')
+      .slice(readFileSync(resolve(ROOT, 'js', 'src', 'kinds.ts'), 'utf8').indexOf('export const ErrorCode'))
       .split(';')[0]
       .matchAll(/'([a-z_]+)'/g),
   ]

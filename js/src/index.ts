@@ -1,4 +1,5 @@
 export * from './types';
+export * from './kinds';
 export { CaptchaKrakenSolver } from './solver';
 
 export { resolveLoraName } from './model-name';

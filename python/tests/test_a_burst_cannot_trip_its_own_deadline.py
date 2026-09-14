@@ -1,3 +1,5 @@
+"""The hang detector must be slack against the work it supervises: 16 of the Python port's 69 failed attempts were this deadline firing on a still board."""
+
 import sys
 from pathlib import Path
 

@@ -1,3 +1,5 @@
+// The pixel diff sees the vacated left edge inset ~17px while the right edge is sharp, and every one of fourteen refused drags undershot;
+// the DOM piece is read first and the diff stays as the fallback.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

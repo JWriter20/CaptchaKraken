@@ -10,6 +10,7 @@ ENGINE_PACKAGES = ["vllm", "huggingface_hub"]
 
 
 def _hf_bin() -> "str | None":
+    """Next to the current interpreter first: the JS driver invokes the venv python without its bin on PATH."""
     here = os.path.dirname(sys.executable)
     for name in ("hf", "huggingface-cli"):
         sibling = os.path.join(here, name)
@@ -39,6 +40,11 @@ class LicensedModelError(RuntimeError):
 
 
 def _refuse_licensed(repo_id: str) -> None:
+    """A licensed model has no Hub repo; the Hub's RepositoryNotFoundError reads as "you are not logged in".
+
+    A `private` model is deliberately NOT refused: its 401 is the true answer, and pre-empting it would stop
+    the holder of an authorised token from fetching weights they are entitled to.
+    """
     from . import prompts
 
     if not prompts.is_licensed(repo_id):
@@ -55,6 +61,7 @@ def _refuse_licensed(repo_id: str) -> None:
 
 
 def _needs_auth(*repo_ids: "str | None") -> "list[str]":
+    """Reported by `plan()` so `--dry-run` says "this needs a token" before the download, not after a 401."""
     from . import prompts
 
     return [r for r in repo_ids if r and prompts.requires_auth(r)]

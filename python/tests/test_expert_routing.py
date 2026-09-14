@@ -1,3 +1,5 @@
+"""`text` is left out of the fixture map on purpose: the day that family reached ckgate without a marker, refusing it cost every distorted-text solve in production for a day. An unknown pin raises; arms are never public; the routed models are spelled out so a second one needs an edit."""
+
 import json
 import os
 from pathlib import Path

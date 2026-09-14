@@ -1,3 +1,11 @@
+"""Auto-solve watcher, the Python mirror of `js/src/watcher.ts`.
+
+A poll, not an injected MutationObserver: an exposed binding is a function on `window` a captcha vendor can
+enumerate on vanilla Playwright or patchright, so this injects nothing and drives `detect_captcha()` on a timer.
+It blocks where the TS port does not because a sync Playwright handle is bound to the greenlet that created it.
+One watcher covers a page for its whole life, across every `goto` (pinned in test_browser_compat.py).
+"""
+
 from __future__ import annotations
 
 import time
@@ -32,10 +40,13 @@ class CaptchaWatcher:
 
     solver: Any
     page: Any
+    # Below ~250ms is real CPU for latency the solve itself (seconds) makes irrelevant.
     interval_ms: int = 1000
     max_solves: Optional[int] = None
+    # Without it a permanently unsupported challenge (an invisible reCAPTCHA v3) re-attempts and re-bills forever.
     error_backoff_ms: int = 5000
     on_solved: Optional[Callable[[Any], Any]] = None
+    # Never fatal: NoCaptchaFoundError fires routinely when a widget vanishes between the probe and the solve.
     on_error: Optional[Callable[[BaseException], Any]] = None
 
     solves: int = field(default=0, init=False)
@@ -54,8 +65,10 @@ class CaptchaWatcher:
         return self._attempt()[0]
 
     def _attempt(self) -> Tuple[Optional[Any], bool]:
+        """`(result, failed)`: `poll_once` conflates "nothing" and "raised", and only the latter backs off."""
         if not self.running:
             return None, False
+        # KeyboardInterrupt / SystemExit are deliberately not caught: Ctrl-C during a solve must reach the caller.
         try:
             if not self.solver.detect_captcha(self.page):
                 return None, False

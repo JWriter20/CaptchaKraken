@@ -1,4 +1,13 @@
+"""What the hosted API's refusals mean, in words a user can act on.
+
+Before this, a camoufox user out of credits read `vLLM 402 Payment Required at https://api.captchakraken.com/...`.
+Branch on `code`, never on prose; an unknown code carries the server's own message through, so the eleventh
+code is never reported worse than the ten. The self-hosted path (no envelope) is untouched.
+"""
+
 from typing import Any, Dict, Optional
+
+from .kinds import ErrorCode
 
 _DASHBOARD = "https://captchakraken.com/dashboard"
 _SUPPORT = "https://captchakraken.com/support"
@@ -34,6 +43,7 @@ class CaptchaKrakenAPIError(RuntimeError):
 
 
 def _retry_after(headers: Any) -> Optional[float]:
+    """Numeric form only: guessing wrong about an HTTP-date would produce a confident "wait 3 seconds"."""
     try:
         raw = headers.get("Retry-After")
     except Exception:
@@ -47,13 +57,13 @@ def _retry_after(headers: Any) -> Optional[float]:
 
 
 def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float]) -> str:
-    if code == "insufficient_credits":
+    if code == ErrorCode.INSUFFICIENT_CREDITS:
         return (
             "CaptchaKraken: your account is out of credits, so this solve was refused. "
             f"Top up at {url or _DASHBOARD} and retry."
         )
 
-    if code == "solve_abandoned":
+    if code == ErrorCode.SOLVE_ABANDONED:
         return (
             "CaptchaKraken: this captcha attempt was served too many times without "
             "settling and has been abandoned. That usually means the IP reputation or "
@@ -62,24 +72,24 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             "one per solve() call, so a new solve is enough)."
         )
 
-    if code == "rate_limited":
+    if code == ErrorCode.RATE_LIMITED:
         wait = f" Retry in about {retry:g}s." if retry else " Back off and retry."
         return f"CaptchaKraken: too many requests.{wait}"
 
-    if code == "account_suspended":
+    if code == ErrorCode.ACCOUNT_SUSPENDED:
         return (
             "CaptchaKraken: this account is suspended, so solving is disabled. "
             f"Contact support at {url or _SUPPORT}."
         )
 
-    if code == "request_too_large":
+    if code == ErrorCode.REQUEST_TOO_LARGE:
         return (
             "CaptchaKraken: the screenshot sent for this solve exceeded the request "
             f"size limit. ({message}) Capture the captcha element rather than the "
             "whole page if you are not already."
         )
 
-    if code in ("missing_api_key", "invalid_api_key"):
+    if code in (ErrorCode.MISSING_API_KEY, ErrorCode.INVALID_API_KEY):
         return (
             "CaptchaKraken: the API key was missing or not accepted. Set "
             "CAPTCHA_KRAKEN_API_KEY, or run the CaptchaKraken MCP server's "
@@ -87,13 +97,15 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             f"Manage keys at {url or _DASHBOARD}."
         )
 
-    if code == "upstream_unavailable":
+    if code == ErrorCode.UPSTREAM_UNAVAILABLE:
         return (
             "CaptchaKraken: the solver fleet is temporarily unreachable. This is on "
             "our side, not yours — retry shortly."
         )
 
-    if code == "model_not_licensed":
+    # Two licensed-model codes, kept separate: one is a licence to obtain, the other a fleet not serving yet.
+    # Collapsing them is the reading that sends someone to buy a licence they already hold.
+    if code == ErrorCode.MODEL_NOT_LICENSED:
         return (
             "CaptchaKraken: the model this request named is licensed, and this "
             "account is not licensed for it. The request was refused rather than "
@@ -103,7 +115,7 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             f"Licensing: {url or _SUPPORT}."
         )
 
-    if code == "model_not_serving":
+    if code == ErrorCode.MODEL_NOT_SERVING:
         return (
             "CaptchaKraken: this account IS licensed for the model it named, but "
             "the fleet is not serving it yet. Nothing is wrong with your account "
@@ -111,6 +123,7 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             f"client's `model`) to use the standard hosted model meanwhile. {message}"
         )
 
+    # Anything added after this was written: the server's message is the best thing available.
     tail = f" See {url}." if url else ""
     return f"CaptchaKraken: {message}{tail}"
 
@@ -140,6 +153,7 @@ def from_response(resp: Any, url: str) -> Exception:
             retry_after_seconds=retry,
         )
 
+    # No gateway envelope: a local vLLM, a proxy, or an HTML error page. Self-hosted debugging is unchanged.
     hint = ""
     if status in (401, 403):
         hint = " — check CAPTCHA_KRAKEN_API_KEY is set and forwarded to the CLI"

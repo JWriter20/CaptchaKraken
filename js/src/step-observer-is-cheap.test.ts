@@ -1,3 +1,4 @@
+// `animations: 'disabled'` waits for stillness, which once made every step snapshot cost 8s on a trace.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
