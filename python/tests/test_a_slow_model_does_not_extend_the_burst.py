@@ -1,3 +1,5 @@
+# The burst runs on a virtual clock: a loop that waited on the model would film to the ceiling in virtual time while the
+# model's real wait ran, so the count still tells them apart, and the test no longer measures the runner's cadence.
 import sys
 import time
 from pathlib import Path
@@ -5,7 +7,9 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
+from captchakraken import page_solver
 from captchakraken.page_solver import PageSolver, PageSolverConfig
+from virtual_clock import install
 
 _STILL = b"one-screen-forever" + b"\x00" * 64
 
@@ -21,6 +25,7 @@ def _run(monkeypatch, model_seconds):
     import cv2
     import numpy as np
 
+    clock = install(monkeypatch, page_solver)
     solver = PageSolver(config=PageSolverConfig())
     solver._reset_animated_state()
     solver._deadline_ms = None
@@ -29,6 +34,7 @@ def _run(monkeypatch, model_seconds):
 
     def fake_shot(element, path, animations="allow", **_kw):
         shots["n"] += 1
+        clock.now += 0.005
         with open(path, "wb") as fh:
             fh.write(_STILL)
 
@@ -69,8 +75,8 @@ def _floor_and_ceiling():
 def test_a_still_board_films_the_floor_however_slow_the_model_is(monkeypatch):
     floor, ceiling = _floor_and_ceiling()
     assert ceiling > floor, "this test is meaningless if the two are equal"
-    filmed, _ = _run(monkeypatch, model_seconds=(floor / 10.0) + 1.5)
-    assert filmed <= floor + 1, (
+    filmed, _ = _run(monkeypatch, model_seconds=0.3)
+    assert filmed == floor + 1, (
         f"a still board filmed {filmed} frames against a {floor}-frame floor "
         f"and a {ceiling}-frame ceiling — the burst is still waiting on the "
         f"model rather than on the board")
@@ -79,7 +85,7 @@ def test_a_still_board_films_the_floor_however_slow_the_model_is(monkeypatch):
 def test_the_floor_is_still_filmed(monkeypatch):
     floor, _ = _floor_and_ceiling()
     filmed, _ = _run(monkeypatch, model_seconds=0.0)
-    assert filmed >= floor, f"filmed {filmed} frames, under the {floor}-frame floor"
+    assert filmed == floor + 1, f"filmed {filmed} frames against a {floor}-frame floor"
 
 
 def test_the_wait_for_the_model_is_named(monkeypatch):

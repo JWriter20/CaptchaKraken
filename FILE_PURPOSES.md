@@ -332,7 +332,8 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_animated_solve_budget.py` | The overall timeout was sized for rounds, and recording an animated challenge is not a round. |
 | `python/tests/test_vendor_hint_decides_the_expert.py` | The vendor hint is whichever `SELECTORS` row detection matched, and it feeds `solver._grid_dims`: hCaptcha must be named off the same `hcaptcha` substring its selectors use, or a click board can be read as a lattice. |
 | `python/tests/test_a_still_board_is_not_filmed.py` | A board is only recorded when it is actually moving; filming a still picture spent the budget for nothing. |
-| `python/tests/test_a_still_burst_stops_at_the_floor.py` | A burst of a board that is not cycling stops at its floor instead of running to the ceiling. |
+| `python/tests/test_a_still_burst_stops_at_the_floor.py` | A burst of a board that is not cycling stops at its floor instead of running to the ceiling, and a stalled frame drops its slot rather than bunching. Exact counts, on a virtual clock. |
+| `python/tests/virtual_clock.py` | The clock the burst tests drive `page_solver` on: sleeping advances it and nothing else does, so a frame count is about the pacing code, not the runner. |
 | `python/tests/test_a_slow_model_does_not_extend_the_burst.py` | Filming while the model is asked is only free if the camera stops at the floor rather than waiting for the answer. |
 | `python/tests/test_a_slow_camera_does_not_stretch_the_burst.py` | The burst's windows are budgets in milliseconds, so a camera slower than the interval must not spend more of the solve than a fast one. |
 | `python/tests/test_a_refused_clip_is_not_re_asked.py` | A recording with no steady screen cannot answer differently, so a refusal must throw the frames away rather than re-ask them. |
