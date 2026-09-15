@@ -1,13 +1,15 @@
 {
   "name": "captchakraken",
-  "version": "2.9.0",
-  "description": "Captcha solver for Playwright and Puppeteer. Finds the captcha, reads the puzzle with a fine-tuned Qwen3.5-9B vision model, and clicks, drags, slides or types through to a token — reCAPTCHA, hCaptcha, GeeTest, NetEase Yidun, Tencent, Lemin, Prosopo, Turnstile and distorted text. Hosted API or self-hosted.",
+  "version": "3.0.0",
+  "description": "Captcha solver for Playwright and Puppeteer. Finds the captcha, reads the puzzle with a fine-tuned Qwen3.5-9B vision model, and clicks, drags, slides or types through to a token \u2014 reCAPTCHA, hCaptcha, GeeTest, NetEase Yidun, Tencent, Lemin, Prosopo, Turnstile and distorted text. Hosted API or self-hosted.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
+    "NOTICE",
     "python",
     "scripts",
+    "AGENTS.md",
     "LICENSE"
   ],
   "scripts": {
@@ -16,6 +18,7 @@
     "demo": "tsx examples/demoSites.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --test .test-build/*.test.js",
+    "coverage": "tsc -p tsconfig.test.json && c8 node --test .test-build/*.test.js",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup-python.js"
   },
@@ -49,8 +52,12 @@
     "url": "https://github.com/JWriter20/CaptchaKraken/issues"
   },
   "homepage": "https://github.com/JWriter20/CaptchaKraken#readme",
+  "dependencies": {
+    "cursory-js": "2.0.1"
+  },
   "devDependencies": {
-    "@types/node": "^24.10.2",
-    "typescript": "^5.9.3"
+    "@types/node": "24.10.2",
+    "c8": "12.0.0",
+    "typescript": "5.9.3"
   }
 }

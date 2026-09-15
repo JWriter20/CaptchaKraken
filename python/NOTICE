@@ -1,0 +1,36 @@
+CaptchaKraken
+Copyright (c) 2026 CaptchaKraken LLC. All rights reserved.
+
+This product includes third-party software. The notices below are required by
+those components' licences and do not change the terms of the CaptchaKraken
+Source-Available License, which governs everything in this repository that is
+not listed here.
+
+────────────────────────────────────────────────────────────────────────────
+Cursory  —  mouse trajectory generation
+────────────────────────────────────────────────────────────────────────────
+
+  cursory      https://github.com/Vinyzu/cursory      (Python, PyPI: cursory)
+  cursory-js   https://github.com/JWriter20/cursory-js  (TypeScript, npm: cursory-js)
+
+  Copyright (c) Vinyzu and the cursory-js contributors.
+  Licensed under the GNU Lesser General Public License, version 3 or later
+  (LGPL-3.0-or-later). A copy is available at https://www.gnu.org/licenses/lgpl-3.0.html
+
+  HOW WE USE IT, AND WHY THAT MATTERS. Both are ORDINARY INSTALLED
+  DEPENDENCIES — `cursory` is declared in python/pyproject.toml and `cursory-js`
+  in js/package.json, and each is resolved by the user's own package manager at
+  install time. Neither is vendored into this repository, copied into our
+  sources, or bundled into a build artifact: the TypeScript build is `tsc`, which
+  leaves `require('cursory-js')` as a runtime import rather than inlining it, and
+  `js/scripts/copy-python.mjs` copies only our own `python/` tree.
+
+  That arrangement is the one the LGPL is written for, and it is what lets this
+  product remain under its own licence. It also means a user may replace either
+  library with a modified version of their own — reinstall the package, and the
+  driver picks it up — which is the freedom section 4 of the LGPL requires be
+  preserved. Do not vendor, inline, or bundle either one without taking legal
+  advice first; doing so is the change that would put this obligation somewhere
+  other than where it now sits.
+
+  We have not modified either library.

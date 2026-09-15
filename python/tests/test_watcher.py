@@ -1,16 +1,4 @@
-"""
-The auto-solve watcher's contract, driven against a fake solver.
-
-A fake rather than a browser for the same reason the page-driver tests use one:
-everything worth pinning here — does it stop, does it re-arm, does it back off,
-does a caller's own exception kill the loop — is a property of the LOOP, and a
-real page would make each assertion slow and flaky without testing anything
-extra.
-
-Twin of `js/src/watcher.test.ts`. The two ports differ in one deliberate way
-(this one blocks; see watcher.py), so the cases are matched but `run()` is
-driven with a timeout where the TS twin awaits a background handle.
-"""
+"""The watcher's loop contract against a fake solver; twin of js/src/watcher.test.ts, driven with a timeout because this port blocks."""
 
 from __future__ import annotations
 
@@ -23,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from captchakraken.watcher import CaptchaWatcher  # noqa: E402
+from captchakraken.watcher import CaptchaWatcher
 
 RESULT = object()
 
@@ -40,7 +28,6 @@ class FakePage:
 
 
 class FakeSolver:
-    """Detects a captcha every time and solves it, unless told otherwise."""
 
     def __init__(self, detect: Any = True, solve: Any = RESULT) -> None:
         self._detect = detect
@@ -128,20 +115,16 @@ def test_a_failing_solve_backs_off_instead_of_hot_looping() -> None:
 
     w.run(timeout_ms=250)
 
-    # Without the backoff this runs on every 1ms tick. The assertion is about
-    # the order of magnitude, not an exact count.
     assert solver.solve_calls <= 5, f"backoff not applied: {solver.solve_calls} attempts"
 
 
 def test_an_idle_tick_does_not_pay_the_error_backoff() -> None:
-    """The bug the `(result, failed)` split in _attempt() exists to prevent."""
+    """If 'no captcha' counted as a failure the first tick would sleep five seconds; the (result, failed) split exists for this."""
     solver = FakeSolver(detect=None)
     w = watcher(solver, FakePage(), interval_ms=1, error_backoff_ms=5000)
 
     w.run(timeout_ms=120)
 
-    # If "no captcha" were treated as a failure, the first tick would sleep for
-    # five seconds and this would probe once.
     assert solver.detects > 3, f"idle ticks are paying the error backoff: {solver.detects} probes"
 
 
@@ -225,7 +208,6 @@ def test_stop_is_idempotent_and_safe_before_the_first_tick() -> None:
 
 
 def test_a_launcher_without_is_closed_is_treated_as_open() -> None:
-    """Duck-typing: not every Playwright-compatible page exposes is_closed."""
 
     class Bare:
         pass

@@ -41,11 +41,11 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.25.76"
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1",
-    "typescript": "^5.9.3"
+    "@types/node": "22.20.1",
+    "typescript": "5.9.3"
   }
 }

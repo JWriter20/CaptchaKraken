@@ -12,7 +12,12 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "outDir": "./.test-build",
-    "declaration": false
+    "declaration": false,
+    // Source maps exist only for the coverage run: c8 reads them to attribute
+    // executed lines back to src/*.ts, so Codecov sees the TypeScript this repo
+    // actually contains rather than the compiled output nobody reads. dist/ is
+    // built by tsconfig.json and carries no maps.
+    "sourceMap": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules"]

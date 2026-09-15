@@ -263,8 +263,8 @@ stays up. Hardware notes, server commands, and updating:
 
 > `setup.sh` installs a **LoRA adapter**, which needs vLLM. If you use another
 > runtime — or just want one file and no adapter flags — serve the merged
-> **Sunlight v1.2** (4-bit) or **Twilight v1.2** (8-bit) builds instead. Both
-> are public.
+> **Sunlight v1.2** (4-bit) or **Twilight v1.2** (8-bit) builds instead. On
+> **Ollama**, or with no GPU at all, take the **GGUF** build. All are public.
 > See [The models](#the-models).
 
 **Already run your own vLLM server?** Point at it and skip all of the above. A
@@ -277,7 +277,7 @@ export CAPTCHA_KRAKEN_API_KEY=your-server-key
 
 ### Then install the client and solve
 
-Same for every option above. Python needs 3.10+; neither package installs a
+Same for every option above. Python needs 3.11+; neither package installs a
 browser, so bring your own.
 
 ```bash
@@ -416,9 +416,12 @@ accuracy: **[docs/performance.md](./docs/performance.md)**.
 
 ## The models
 
-Two public releases. Within each, the same weights in three shapes: the **LoRA
-adapter** (strongest, needs vLLM and two downloads) and two **merged** builds
-that are one self-contained file any safetensors runtime will serve.
+Two public releases. Within each, the same weights in several shapes: the
+**LoRA adapter** (strongest, needs vLLM and two downloads), two **merged**
+builds that are one self-contained file any safetensors runtime will serve,
+and — for v1.2 — a **GGUF** build for Ollama, LM Studio and llama.cpp that
+needs no vLLM
+and no GPU.
 
 ### v1.2 — current
 
@@ -432,8 +435,14 @@ Prosopo — and it is the first generation to handle **animated challenges** and
 | **LoRA adapter** | bf16 on a stock base | ~0.4 GB + base | depends on base | [`CaptchaKraken-Lora-v1.2`](https://huggingface.co/CaptchaKraken/CaptchaKraken-Lora-v1.2) |
 | 🟦 **Twilight** | 8-bit (FP8) | 13 GB | ~22 GB | [`Twilight-v1.2-FP8`](https://huggingface.co/CaptchaKraken/Twilight-v1.2-FP8) |
 | 🟦 **Sunlight** | 4-bit (AWQ) | 11 GB | ~14 GB | [`Sunlight-v1.2-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-v1.2-AWQ-4bit) |
+| 🟩 **GGUF** | 4-bit / 8-bit / F16 | 5.6–17.9 GB | none — CPU works | [`CaptchaKraken-v1.2-GGUF`](https://huggingface.co/CaptchaKraken/CaptchaKraken-v1.2-GGUF) |
 
-All three are **Qwen3.5-9B** — the adapter, and the two merges made from it.
+All of them are **Qwen3.5-9B** — the adapter, and the builds made from it.
+
+The GGUF repo holds every quantisation plus `mmproj-F16.gguf`, the vision half
+of the model. **It is required**: without it a runtime loads a text-only model
+that answers without ever seeing the puzzle. See
+[Self-hosting → GGUF](./docs/self-hosting.md#gguf-for-ollama-and-llamacpp).
 
 `./setup.sh` installs the LoRA adapter. **Twilight v1.2 is what the hosted API
 answers with** — the same LoRA on the same base, merged.
@@ -451,9 +460,9 @@ all you face and you want the smaller stack.
 | 🟦 **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
 | 🟦 **Sunlight** | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
 
-### ⬛ Abyss — hosted for licence holders, never downloadable
+### ⬛ Abyss — what the hosted API serves, never downloadable
 
-**Serving now, to licence holders only.** It shares the public models' base —
+**Serving now, to every hosted account.** It shares the public models' base —
 Qwen3.5-9B — but it is not a bigger quantisation of them and nothing about its
 VRAM follows from theirs: it is a **routed mixture of specialist adapters**,
 one each for grids, pixel-precision work, animation and text, chosen per
@@ -464,10 +473,11 @@ them, starting with the non-grid hCaptcha puzzles. Keeping it on our own fleet
 is what lets it keep learning from production failures without shipping a
 customer's puzzle set to everyone who runs `hf download`.
 
-**It is not the default, and there is nothing to download.** The hosted API
-answers with Twilight v1.2 unless a request names Abyss, and an account without
-a licence that names it gets a clear 403 — never a quiet substitution, so you
-always know which model answered. No weights are published for it, and no
+**It is what the hosted API answers with, and there is nothing to download.**
+The current client names an Abyss expert on every request to our endpoint; an
+older client, or a request that names no model, is answered by Twilight v1.2,
+because its prompts belong to that generation — never a quiet substitution the
+other way, so you always know which model answered. No weights are published for it, and no
 accuracy figures are either: every number on this page is Twilight v1.2's. Open
 an issue to ask about a licence.
 
@@ -611,9 +621,9 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 - 🟢 **Shipped** — **v1.2**: every vendor we solve (44 puzzle types across 10),
   animated challenges, typed text — as a LoRA and as **Sunlight** / **Twilight**
   merges, all public on [HuggingFace](https://huggingface.co/CaptchaKraken).
-- 🟢 **Shipped** — **Abyss**, hosted-only: served to licence holders who name it
-  on the request, never downloadable, and not the default — the hosted API still
-  answers with **Twilight v1.2** unless you ask for it.
+- 🟢 **Shipped** — **Abyss**, hosted-only: what the hosted API serves the current
+  client, never downloadable. An older client, or a request that names no model,
+  still gets **Twilight v1.2**.
 - ⚪ **Planned** — 🎯 higher accuracy on the **freehand hCaptcha puzzles**
   (connect-the-path and the numbered-line / missing-piece drags), which are the
   families the model is least reliable on. Every hCaptcha family we ship is

@@ -1,9 +1,17 @@
 # AGENTS.md
 
+**Using CaptchaKraken in your own project? This file is for you.**
+
+**Changing CaptchaKraken itself? Stop here — the contributor rules, dev setup
+and gates are in [CONTRIBUTING.md](./CONTRIBUTING.md).**
+
 Setup instructions for AI agents and for humans in a hurry.
 
 CaptchaKraken solves captchas in a browser you control. You give it a page, it
 finds the captcha, reads it with a vision model, clicks, and verifies.
+
+It is a library you drive, not a service you hand a URL to and not a browser:
+you bring the page, and no browser is installed for you.
 
 The model runs in one of two places. **Pick one before you install anything.**
 
@@ -182,7 +190,7 @@ npm install captchakraken     # TypeScript: browser driver
 pip install captchakraken     # Python: engine + `captchakraken` CLI
 ```
 
-Python needs 3.10 or newer. Neither package installs a browser — you bring your
+Python needs 3.11 or newer. Neither package installs a browser — you bring your
 own (Playwright, Patchright, camoufox, or Puppeteer).
 
 ---
@@ -276,6 +284,28 @@ the hosted API it should show `api.captchakraken.com` and `local: false`.
 
 ---
 
+## Account MCP tools
+
+Installed by the one command in §2A. They manage the **account** — none of them
+solves a captcha, and none of them applies to a self-hosted server, which has no
+account. What each one is for:
+
+| Tool | Reach for it to |
+|---|---|
+| `sign_in` | Connect a GitHub account, or resume a sign-in already in progress. Nothing else works until this has |
+| `sign_out` | Disconnect this client. Keys already minted keep solving |
+| `get_account` | Learn who is signed in and which base URL to point a solving client at |
+| `get_balance` | Answer "am I out of credit?" before blaming a failed solve on the model |
+| `get_usage` | See what has already been spent, per day, when a bill looks wrong |
+| `get_pricing` | Estimate what a job will cost before you run it |
+| `create_api_key` | Get a working key onto disk without it passing through this conversation |
+| `list_api_keys` | Find the id of the key you want to revoke. Secrets are never listed, only minted |
+| `revoke_api_key` | Kill a key that leaked, or one a finished job no longer needs |
+| `get_topup_link` | Hand a human a link to add credits. It charges nothing by itself |
+| `get_models` | Decide whether to pay per solve or self-host, by seeing which weights are downloadable |
+
+---
+
 ## Environment variables
 
 Most users set **none** (hosted, via MCP) or **two** (everything else).
@@ -314,17 +344,31 @@ prompt generation and the weights can drift apart.
 
 ## Errors and what to do
 
-Typed errors from `solve()`:
+**The two ports do not raise the same classes**, so a `catch` written for one
+never matches in the other.
+
+**Python.** `PageSolver.solve()` raises these, importable from
+`captchakraken.page_solver`. `CaptchaSolveError` is the base class of the other
+four, so catch it last or it swallows them:
 
 | Error | Meaning | Do |
 |---|---|---|
-| `NoCaptchaFoundError` | Nothing to solve (reCAPTCHA v3 / invisible) | Continue — this is not a failure |
-| `UnsupportedChallengeError` | A puzzle type this build does not handle | Skip, or retry to get a different puzzle |
-| `AnimatedChallengeError` | An animated challenge could not be recorded | Retry |
-| `CaptchaSolveError` | Everything else | Read the message |
+| `NoCaptchaFoundError` | No interactive widget — reCAPTCHA v3 / invisible, or one that only triggers on user action | Continue — this is not a failure |
+| `UnsupportedChallengeError` | A settled frame the model reports it cannot solve | Skip, or retry to get a different puzzle |
+| `AnimatedChallengeError` | An animated challenge could not be **recorded** (the element refuses to screenshot, or the recording decodes to nothing) | Retry |
+| `PageClosedError` | The page, context or browser went away mid-solve | Nothing to retry against — reopen the page |
+| `CaptchaSolveError` | Everything else, and the base of the four above | Read the message |
 
-Hosted API refusals arrive as `CaptchaKrakenAPIError`. **Branch on `e.code`,
-never on the message text** — wording changes, codes do not.
+**TypeScript.** The driver exports exactly **one** error class,
+`CaptchaKrakenAPIError`. Everything else — no widget on the page, a puzzle it
+cannot drive, the round budget exhausted — arrives as a plain `Error` whose
+message says which. Do not write `catch (e) { if (e instanceof
+NoCaptchaFoundError) }` against this port: that class does not exist here and
+the branch can never be taken. Read `result.isSolved`, and read the message.
+
+Hosted API refusals arrive as `CaptchaKrakenAPIError` in **both** ports.
+**Branch on `e.code`, never on the message text** — wording changes, codes do
+not.
 
 | `code` | Meaning | Do |
 |---|---|---|
@@ -372,12 +416,13 @@ client unless you have a reason not to.
   One browser row is marked **not scored**; do not turn it into a number, do not
   convert a count into a percentage, and do not read a static-image rate as a
   promise about a browser — the page says why they differ.
-- **Abyss is hosted for licence holders and is never downloadable.** It is not
-  the default: the hosted endpoint answers with **Twilight v1.2** unless a
-  request names Abyss, and an account without a licence that names it gets a
-  403 rather than a substitution. Do not suggest weights, a download or a
-  workaround for it, and do not quote accuracy figures for it — none are
-  published. Verify what is serving with `GET /v1/models`.
+- **Abyss is what our hosted API serves, and it is never downloadable.** The
+  current client names an Abyss expert on every request to our endpoint and is
+  answered by Abyss; an older client, or a request that names no model, gets
+  Twilight v1.2, because its prompts belong to that generation. Nothing about it
+  is gated on the account. Do not suggest weights, a download or a workaround
+  for it, and do not quote accuracy figures for it — none are published. Verify
+  what is serving with `GET /v1/models`.
 - **Never print an API key** into a transcript, a log, or a commit. Use the MCP
   flow, which writes it to disk instead.
 - **Do not commit `captchakraken.env`.** It holds a key and is gitignored.
@@ -391,6 +436,8 @@ client unless you have a reason not to.
 
 | Topic | Guide |
 |---|---|
+| The npm package alone, as `npm i` installs it | [js/AGENTS.md](./js/AGENTS.md) |
+| The PyPI package alone, as `pip install` installs it | [python/AGENTS.md](./python/AGENTS.md) |
 | Hardware, server management, updating | [docs/self-hosting.md](./docs/self-hosting.md) |
 | Every browser framework, the watcher, migrating from v1 | [docs/usage.md](./docs/usage.md) |
 | The solve pipeline | [docs/how-it-works.md](./docs/how-it-works.md) |

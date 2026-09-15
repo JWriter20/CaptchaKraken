@@ -1,30 +1,4 @@
-"""Images below the training pixel floor must be upscaled before they are sent.
-
-The adapters are trained with `MIN_PIXELS=200704` (448², exported by the
-training repo's `the training pipeline`), so every image smaller than that
-is enlarged before the ViT ever sees it. Nothing did the same at inference:
-vLLM is launched with no `--mm-processor-kwargs` and this client re-encoded the
-file byte-for-byte, so small captchas reached the model at a geometry it was
-never tuned on.
-
-It is not a subtle degradation. Measured 2026-08-10 on real a GeeTest v3 slider
-captures (277x285 = 78,945 px, well under the floor), same adapter, same
-prompt, only the input size differing:
-
-    gold        sent native     sent upscaled
-    (649, 330)  (572, 298)      (648, 333)
-    (718, 165)  (625, 135)      (716, 169)
-    (747, 351)  (641, 293)      (744, 354)
-
-80-105 px out versus 1-4 px, on every sample. Tier 2 scored the affected types
-at 0.000-0.119 while types whose captures happen to exceed the floor
-(a reCAPTCHA 3x3 grid, 232,000 px) scored 0.704 — the split follows image size,
-not puzzle difficulty.
-
-The deployed v1.1 adapter improves under the same change (mean error ~40 px
-native, ~4 px upscaled), so this is unconditional rather than keyed to a model
-generation.
-"""
+"""Measured: predictions 80-105px out at native size against 1-4px once upscaled. A flat band (min == max) normalises every image by design; (w-1)*(h-1) because ceil rounds both sides up."""
 
 from __future__ import annotations
 
@@ -50,25 +24,18 @@ class _Resp:
 
 @pytest.fixture
 def captured(monkeypatch):
-    """Send one request, hand back the payload instead of doing any I/O."""
     seen = {}
 
     def fake_post(self, url, headers=None, json=None, timeout=None):
         seen["payload"] = json
         return _Resp()
 
-    # The planner posts through its OWN pooled session, not the module
-    # function — one connection reused for every round of every solve, because
-    # re-dialling the endpoint measured 258ms against 144ms pooled. Patching
-    # `requests.post` here would leave the real socket in play and this test
-    # would reach the network.
     monkeypatch.setattr(P.requests.Session, "post", fake_post)
     monkeypatch.setattr(P, "ensure_server", lambda *a, **k: None)
     return seen
 
 
 def _sent_images(payload):
-    """Every image in the request, decoded back to a PIL image."""
     out = []
     for part in payload["messages"][-1]["content"]:
         if part.get("type") != "image_url":
@@ -95,16 +62,6 @@ def test_a_small_image_is_upscaled_to_the_training_floor(tmp_path, captured):
 
 
 def test_an_image_inside_an_open_band_is_left_alone(tmp_path):
-    """Under an open band, upscaling is a floor and not a resize: a capture
-    already large enough reaches the model byte-for-byte, because re-encoding
-    every screenshot would spend time and fidelity on types that were never
-    affected.
-
-    Driven through `_encode_image` with an EXPLICIT budget rather than through
-    ActionPlanner, because the planner resolves a per-model budget and this
-    asserts the open-band rule itself. `test_a_flat_band_normalises_every_image`
-    covers what a model that declares min == max does instead.
-    """
     big = tmp_path / "grid.png"
     Image.new("RGB", (400, 580), "white").save(big)
     raw = big.read_bytes()
@@ -118,15 +75,6 @@ def test_an_image_inside_an_open_band_is_left_alone(tmp_path):
 
 
 def test_a_flat_band_normalises_every_image(tmp_path):
-    """A model may declare min == max, and then EVERY image is sent at exactly
-    that area — including one that clears the floor.
-
-    CaptchaKraken-Lora-v1.2 declares exactly that (a flat 720², swept
-    2026-08-18), so "above the floor" stopped meaning "untouched" for it. That
-    is the design, not a regression: a flat band exists so the adapter sees one
-    geometry and only one. Aspect ratio is still preserved — area is clamped,
-    never dimensions, because squashing moves every tile centre.
-    """
     img = tmp_path / "grid.png"
     Image.new("RGB", (400, 580), "white").save(img)
     flat = prompts.PixelBudget(minimum=518_400, maximum=518_400, source="test")
@@ -140,13 +88,6 @@ def test_a_flat_band_normalises_every_image(tmp_path):
 
 
 def test_the_planner_uses_the_pinned_models_band_not_the_module_default(tmp_path, captured):
-    """The budget is a property of the ADAPTER, so the planner must read it from
-    the registry rather than from `P.MIN_PIXELS`.
-
-    This is the half that a module-level constant cannot express, and the reason
-    the two tests above take an explicit budget: change which model is pinned and
-    this legitimately changes with it.
-    """
     img = tmp_path / "grid.png"
     Image.new("RGB", (400, 580), "white").save(img)
     planner = P.ActionPlanner(api_key="k", base_url="http://x/v1")
@@ -159,14 +100,6 @@ def test_the_planner_uses_the_pinned_models_band_not_the_module_default(tmp_path
         f"sent {w}x{h} = {w * h} px, under the pinned model's floor of "
         f"{planner.pixel_budget.minimum} ({planner.pixel_budget.source})")
     if planner.pixel_budget.maximum:
-        # `(w-1)*(h-1)`, not `w*h`: the floor branch scales with ceil() on BOTH
-        # dimensions, deliberately — rounding down lands just under the floor and
-        # defeats the upscale. On a FLAT band (min == max, which v1.2 declares)
-        # that same rounding necessarily overshoots the ceiling by up to one row
-        # and one column: a 400x580 capture is sent as 598x867 = 518,466 against
-        # a stated 518,400, which is 0.013% over and lands in the same ViT patch
-        # grid. Asserting `<= maximum` exactly would be asserting that ceil()
-        # does not round up.
         assert (w - 1) * (h - 1) <= planner.pixel_budget.maximum, (
             f"sent {w}x{h} = {w * h} px, more than a rounding step above the "
             f"pinned ceiling of {planner.pixel_budget.maximum}")

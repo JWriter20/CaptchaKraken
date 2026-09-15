@@ -1,36 +1,11 @@
-"""The pinned (model, prompt) pair must stay internally consistent.
+"""The 2026-07-18 retrain shipped a prompt drift that failed every drag as "unsupported" with CI green; the hashes resolve through models.json, not module constants."""
 
-`pinned_model.json` records the adapter this release was validated against and
-the SHA-256 of each prompt we send it. The adapter and the prompts are a matched
-pair: the LoRA is trained to answer one exact prompt, so changing either half
-alone silently degrades or breaks solving.
-
-That is not hypothetical. On 2026-07-18 the adapter was retrained on the content
-schema (`action: drag` / `drags[]` / lowercase) while planner.py still asked for
-the legacy `output` / `simulate_drag` / PascalCase schema. The model replied in a
-hybrid of the two, the parser dropped it, and every drag puzzle failed as
-"unsupported" — with nothing in CI going red, because train/grade parity inside
-the training repo was intact. Only the SHIPPED prompt had drifted.
-
-So: editing a serving prompt fails this test until someone updates the manifest,
-which forces the question "does the pinned adapter still expect this prompt?".
-Hermetic — reads constants and a JSON file, no model or network.
-
-The prompts hashed here are THE ONES THE PINNED ADAPTER ACTUALLY GETS, resolved
-through `models.json`, not the module-level `planner.PIXEL_ACTION_PROMPT`. Since
-prompts became per-model those constants are aliases for the NEWEST generation,
-which is not necessarily the pinned model's — hashing them made this test fail
-the moment the client learned a new generation, while saying nothing about
-whether the pinned pair still matched. Resolving first restores the meaning:
-"the prompts this release sends the adapter it pins".
-"""
 import hashlib
 
 from captchakraken import config, prompts
 
 _PINNED = prompts.resolve(config.pinned()["lora_adapter"])
 
-# The prompts CI guards, by the name used in pinned_model.json.
 SERVING_PROMPTS = {
     "PIXEL_ACTION_PROMPT": _PINNED.action_prompt,
     "SELECT_GRID_PROMPT": _PINNED.grid_template,
@@ -48,7 +23,6 @@ def test_manifest_has_every_field_config_reads():
 
 
 def test_config_defaults_come_from_the_manifest(monkeypatch):
-    """With no env overrides, config must report exactly what is pinned."""
     for var in (
         "CAPTCHA_BASE_MODEL",
         "CAPTCHA_LORA_ADAPTER",
@@ -56,6 +30,7 @@ def test_config_defaults_come_from_the_manifest(monkeypatch):
         "CAPTCHA_LORA_NAME",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("VLLM_BASE_URL", "http://127.0.0.1:8000/v1")
 
     manifest = config.pinned()
     assert config.base_model() == manifest["base_model"]
@@ -65,7 +40,6 @@ def test_config_defaults_come_from_the_manifest(monkeypatch):
 
 
 def test_env_still_overrides_the_pin(monkeypatch):
-    """The pin is a default, not a lock — self-hosters must keep their override."""
     monkeypatch.setenv("CAPTCHA_LORA_ADAPTER", "someone-else/their-adapter")
     assert config.lora_adapter() == "someone-else/their-adapter"
 

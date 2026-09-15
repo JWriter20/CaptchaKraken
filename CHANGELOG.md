@@ -3,6 +3,161 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
+## [Unreleased]
+
+### Changed
+
+- **Abyss is what the hosted API serves.** The client names an Abyss expert on
+  every request to our endpoint and is answered by it; an older client, or a
+  request that names no model, still gets Twilight v1.2. Nothing is gated on the
+  account, so the `model_not_licensed` and `model_not_serving` error codes are
+  gone from both ports. Licensing is about downloading weights, and Abyss has
+  none to download.
+
+### Removed
+
+- **The debug-only CLI subcommands are gone:** `find-move`, `find-movable`,
+  `is-empty-cell`, `is-cell-selected`, `is-cell-changing`, `wait-for-cell-loaded`
+  and `check-movement-batch`. Nothing in either driver called them. The hCaptcha
+  "Move" pill detector (`move_indicator.py`) went with them.
+- **`trajectory.py` / `trajectory.ts` are gone.** Both humanizers call Cursory
+  directly. The drag-overshoot redraw and the finger contact-wobble along a swipe
+  were our own modelling on top of the recordings and are removed; the tap
+  wobble stays.
+- **The `CAPTCHA_DEBUG=1` image dumps are gone** (`latestDebugRun/`,
+  `debug_runs/`, the reCAPTCHA grid trace). The flag still prints diagnostics to
+  stderr. `ImageProcessor` keeps only the frame-diff primitives, `overlay.py`
+  only the numbered-box overlay the model reads.
+
+### Added
+
+- **Every closed set of names is an enum, exported from both packages.**
+  `captchakraken.kinds` (Python, `StrEnum`) and the `kinds` exports of the JS
+  package (`as const` objects) carry `Vendor`, `ActionKind`, `RetryMode`,
+  `PromptFamily`, `HumanizationMode`, `PauseKind`, `Outcome`, `ErrorCode` and
+  the driver's verdicts and phases, mirrored one-for-one. The wire is unchanged:
+  every member serialises as the string it always was, and a plain string still
+  type-checks on the JS side. A value off the wire that is not a member now
+  raises instead of passing through.
+
+### Changed
+
+- **The codebase is about half its former size** with the same public surface
+  and the same behaviour: the five screenshot-poll loops in each driver share
+  one, the two burst recorders share one, and the CLI is a dispatch table.
+  Comments are one or two sentences that say why; every measured constant keeps
+  its measurement beside it, and the longer stories moved to
+  `TRIBAL_KNOWLEDGE.md`. `estimatedCost` on the JS `SolveResult` is now computed
+  from the gateway's usage rows only; the stale per-model price table is gone.
+
+- **Python 3.10 is no longer supported.** `requires-python` is now `>=3.11`.
+  This is the breaking half of the mouse change rather than a pinning detail:
+  `cursory` declares `Requires-Python >=3.11` and requires `numpy~=2.3.3`, which
+  declares the same, so 3.10 could not be kept by choosing different pins —
+  there is no version of either that runs there. 3.10 reaches end of life in
+  October 2026. If you are on it, stay on 2.10.x until you can move; the two
+  clients are otherwise unchanged in what they ask of you.
+
+### Changed
+
+- **The mouse now moves like a recording, not like a curve.** `mouse` device
+  trajectories come from [Cursory](https://github.com/Vinyzu/cursory) (Python)
+  and [cursory-js](https://github.com/JWriter20/cursory-js) (TypeScript), which
+  search a database of thousands of movements recorded from real people, morph
+  the closest match onto the requested endpoints and re-noise it. It replaces a
+  Bezier arc with a Fitts's-law duration, an ease-in-out profile, speed-scaled
+  jitter and an overshoot-and-correct — a closed form, and findable for being
+  one whatever its constants are.
+
+  **The two clients now share one mouse rather than resembling each other.**
+  `cursory-js` is a port rather than a rewrite; both reduce to the same numpy
+  PCG64 stream, so a seed produces the same trajectory in either language. The
+  parity that used to be statistical is pinned exactly, timings included.
+
+  Move durations track the old model at the median with a considerably longer
+  tail, which is what people look like. The **touch** device is unchanged and
+  stays ours: Cursory records mice, and a finger is not a slower mouse.
+
+- **`numpy` moves from 2.2.6 to 2.3.5** in the Python client, because Cursory
+  requires `numpy~=2.3.3`. The old pin was ours — OpenCV asks only for
+  `numpy>=2`. This conflicts with `numba`, which arrives only under the
+  `[serve]` extra for self-hosting vLLM and is never imported by the solver.
+
+- **The JS client has a runtime dependency for the first time** (`cursory-js`).
+  It previously had none.
+
+- **Third-party notices now ship with both packages.** Cursory is
+  LGPL-3.0-or-later and is used as an ordinary installed dependency — declared,
+  resolved by your package manager, never vendored or bundled — which is the
+  arrangement that licence is written for. See `NOTICE`.
+
+### Added
+
+- **GGUF builds — `CaptchaKraken/CaptchaKraken-v1.2-GGUF`.** The v1.2 merge for
+  **Ollama**, **LM Studio** and **llama.cpp**, so the model runs without vLLM
+  and without a GPU. One repo holds `Q4_K_M` (5.6 GB), `Q8_0` (9.5 GB) and `F16` (17.9 GB).
+  Registered in `models.json`, so the client resolves generation-2 prompts and
+  the right pixel budget for it like any other published model.
+
+  **`mmproj-F16.gguf` is required.** It is the vision half of the model, and a
+  runtime given only the weights loads a text-only model that does not error —
+  it answers every puzzle without having seen the image. It stays full
+  precision in every build: quantising the half that reads a small picture
+  costs far more accuracy than the space it saves.
+
+  **Thinking is off unconditionally, so a plain request just works** — in
+  Ollama, LM Studio and llama.cpp alike. All three turn thinking on by default
+  for any template that mentions it, and with it on the answer goes to
+  `reasoning` while `content` comes back empty, on every puzzle, with no error.
+  A better default would not have survived them, so the branch is gone: these
+  weights carry the empty-think prefix on every training row.
+
+  Ollama names a model after whatever you pulled it as, so that name can never
+  match a registry entry. Set `CAPTCHA_LORA_NAME` to what `ollama list` shows
+  and `CAPTCHA_LORA_ADAPTER` to the repo id — the first is what goes on the
+  wire, the second is what decides the prompts and the resolution. See
+  [Self-hosting → GGUF](./docs/self-hosting.md#gguf-for-ollama-lm-studio-and-llamacpp).
+
+- **`examples/with_local_gguf.py`.** One image, no browser — the shortest way to
+  prove a local Ollama or LM Studio server is wired up before pointing a real
+  browser at it.
+
+### Fixed
+
+- **The JS mouse no longer guesses a 1920x1080 window under camoufox.** camoufox
+  opens its context with `viewport: null`, so `viewportSize()` is null; the
+  driver now asks the window for `innerWidth`/`innerHeight` and clamps the
+  path only when it knows the edge, exactly as the Python port does. A
+  coordinate pinned to a guessed edge is what deadlocked camoufox's mouse
+  (upstream #225). `PlaywrightPage` gains an optional `evaluate`, forwarded by
+  the Puppeteer adapter.
+
+- **A burst now lasts `videoBurstDurationMs`, not that many frames.** Both
+  clients decide "is this board animating?" by watching it for a window long
+  enough to outlast one cycle's dwell — a window in milliseconds, which both
+  spelled as a count of frames at `videoBurstFps`. The loop paces itself but
+  never drops frames, so a camera slower than the interval stretched the window
+  instead of thinning it, and a fast one reached the count before the window
+  had passed.
+
+  The gap is not small on a phone. One element screenshot costs 15.8 ms on a
+  desktop browser and 183.5 ms under mobile emulation, which is the device
+  pixel ratio alone — so a board that took 4.0 s to call still on a desktop
+  took 8.3 s on a phone, holding an answer that had been ready for six of them,
+  and the ceiling stretched the same way on boards that never settle.
+
+  Both windows, both clients, are now milliseconds. Nothing about the verdict
+  changes — the same evidence decides it, just inside the budget that was
+  always written down.
+
+- **A recording reports the frame rate it achieved.** It logged
+  `videoBurstFps` regardless, and the keyframe slicer dates frames by that
+  number, so a clip captured at 5.4 fps was timestamped as though it ran at 10.
+
+- **Self-hosting said the merged builds were a prompt generation behind.** True
+  when only the v1.1 merges existed; the v1.2 merges listed in the same table
+  are generation 2.
+
 ## [2.8.0] - 2026-09-06
 
 A model can now be a MIXTURE rather than a single adapter, and a model can now
