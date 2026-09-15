@@ -3,17 +3,17 @@
 Send screenshots to `https://api.captchakraken.com/v1`. No GPU, no model
 download, no server to run.
 
-The hosted API answers with **Twilight v1.2**, running on our fleet — the same
-weights we publish, merged from the same LoRA on the same base. You are paying
-for the hardware and the uptime, not for weights you cannot get.
+The hosted API answers the current client with **Abyss** — trained against the
+failures of the open weights, and routed across four specialist adapters on the
+same Qwen3.5-9B base as Twilight and Sunlight. It is hosted-only: the weights are
+not published and there is nothing to download. Every hosted account gets it;
+the client names an expert on each request and there is nothing to hold or buy
+first.
 
-**Abyss** — trained against the failures of the open weights, and routed across
-four specialist adapters on the same Qwen3.5-9B base as Twilight and Sunlight —
-is served here too, to licence holders only, and is hosted-only: the weights are not published
-and there is nothing to download. It is **not the default**. Name it on the
-request and hold a licence, or the endpoint answers with Twilight v1.2; an
-account without a licence that names it gets a clear 403, never a silent
-substitution.
+An older client, or a request that names no model, is answered by **Twilight
+v1.2**, running on the same fleet — the same weights we publish, merged from the
+same LoRA on the same base — because its prompts belong to that generation.
+Never a silent substitution the other way.
 
 The client code is identical to the self-hosted path. Only the endpoint changes.
 

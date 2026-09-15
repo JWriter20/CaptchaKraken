@@ -89,8 +89,6 @@ export const ErrorCode = {
   INVALID_REQUEST: 'invalid_request',
   REQUEST_TOO_LARGE: 'request_too_large',
   UPSTREAM_UNAVAILABLE: 'upstream_unavailable',
-  MODEL_NOT_LICENSED: 'model_not_licensed',
-  MODEL_NOT_SERVING: 'model_not_serving',
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
