@@ -175,8 +175,8 @@ export class CaptchaKrakenSolver {
   /** Answers keyed by screenshot hash; a hit means the answer already ran and changed nothing. */
   private solutionCache: Map<string, CliResponse> = new Map();
   private repeatedAnswerSeen = false;
-  /** The one recording and one answer for the animated board on screen. */
-  private animatedPlan: { burstDir: string; response: CliResponse } | null = null;
+  /** The one recording for the animated board on screen, and its answer until the widget refuses it. */
+  private animatedPlan: { burstDir: string; response: CliResponse | null } | null = null;
   private keyframeMode: KeyframeMode | null = null;
   private keyframeSteadyScreens = 0;
   private solveDeadlineAt = 0;
@@ -486,10 +486,16 @@ export class CaptchaKrakenSolver {
       const ask = (imagePath: string) => this.getSolution(imagePath, puzzleSource, retryMode, textMode);
       const askAnimated = () => this.ph(Phase.INFERENCE, () => this.withIdleWander(page, captchaElement, () => this.getAnimatedSolution(burstDir as string)));
       if (isAnimated) {
-        if (this.animatedPlan) {
+        if (this.animatedPlan?.response) {
           burstDir = this.animatedPlan.burstDir;
           response = this.animatedPlan.response;
           console.log('[animated] reusing the recorded answer — same board, same screens');
+        } else if (this.animatedPlan) {
+          // The screens have not changed, so the recording still stands and only the answer is gone.
+          burstDir = this.animatedPlan.burstDir;
+          console.log('[animated] the last answer was refused — re-asking on the frames already recorded');
+          response = await askAnimated();
+          this.animatedPlan = { burstDir, response };
         } else {
           const rec = this.pendingBurst;
           this.pendingBurst = null;
@@ -1397,6 +1403,12 @@ export class CaptchaKrakenSolver {
     }
   }
 
+  /** The recording still stands; dropping only the refused answer makes the retry an inference, not a burst. */
+  private invalidateAnimatedAnswer(): void {
+    const plan = this.animatedPlan;
+    if (plan?.response) this.animatedPlan = { burstDir: plan.burstDir, response: null };
+  }
+
   /** True when this answer already ran and changed nothing: resample, and let the recording path have a go. */
   private noteAnswer(actions: any[], retryMode: RetryMode | null): boolean {
     const sig = CaptchaKrakenSolver.answerSignature(actions, retryMode);
@@ -1404,6 +1416,8 @@ export class CaptchaKrakenSolver {
       this.noProgressRounds++;
       console.log(`[no-progress] the model returned the same answer again (${this.noProgressRounds}/${this.config.maxNoProgressRounds ?? 2}) — the previous one already ran and changed nothing`);
       this.resampleLevel++;
+      // A raised sample never reaches the wire while the cached animated answer stands in front of it.
+      this.invalidateAnimatedAnswer();
       this.repeatedAnswerSeen = true;
       return true;
     }

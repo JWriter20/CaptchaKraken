@@ -76,3 +76,42 @@ test('the budget fits the loop count', () => {
     `${maxSolveLoops} rounds x 7000ms exceeds the ${overallSolveTimeoutMs}ms cap`,
   );
 });
+
+// Drop the ANSWER, keep the FRAMES: re-submitting coordinates the widget refused cannot succeed, and the
+// raised sample never reaches the wire behind a cached response; re-recording screens already in hand is
+// another `videoBurstMaxMs` for nothing. Mirrors `_invalidate_animated_answer` in the Python port.
+test('a repeat drops the cached animated answer but keeps the frames', () => {
+  const s = solver();
+  s.animatedPlan = { burstDir: '/tmp/burst-abc', response: { actions: [] } };
+
+  s.noteAnswer(click([0.1, 0.1, 0.2, 0.2]), null);
+  s.noteAnswer(click([0.1, 0.1, 0.2, 0.2]), null);
+
+  assert.equal(s.animatedPlan.response, null, 'the refused answer must not be re-served');
+  assert.equal(s.animatedPlan.burstDir, '/tmp/burst-abc', 'the frames are still good');
+});
+
+test('an answer that is still making progress keeps its recording', () => {
+  // Invalidating on every round would re-ask once per round on a board that is
+  // being solved correctly, which is one inference per round of pure cost.
+  const s = solver();
+  const plan = { burstDir: '/tmp/burst-abc', response: { actions: [] } };
+  s.animatedPlan = plan;
+
+  s.noteAnswer(click([0.1, 0.1, 0.2, 0.2]), null);
+  s.noteAnswer(click([0.5, 0.5, 0.6, 0.6]), null);
+
+  assert.equal(s.animatedPlan.response, plan.response, 'a changing answer is not a refusal');
+});
+
+test('invalidating twice is not an error', () => {
+  // The no-progress path can fire again before the next round reaches a
+  // request; the second call must be a no-op rather than clearing the frames.
+  const s = solver();
+  s.animatedPlan = { burstDir: '/tmp/burst-abc', response: { actions: [] } };
+  s.invalidateAnimatedAnswer();
+  s.invalidateAnimatedAnswer();
+
+  assert.equal(s.animatedPlan.response, null);
+  assert.equal(s.animatedPlan.burstDir, '/tmp/burst-abc');
+});
