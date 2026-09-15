@@ -669,7 +669,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
             name: string;
             zone: string;
             tagline: string;
-            served: 'current' | 'legacy' | null;
+            hosted: boolean;
             hugging_face_id: string | null;
             published: boolean;
             base_model: string;
@@ -680,8 +680,8 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           }>;
         }>('/api/v1/models', { authenticated: false });
 
-        // `served` and `published` are read for what they say: a model can be downloadable and served, or
-        // served and never downloadable, and deriving one from the other misreported both.
+        // `hosted` and `published` are read for what they say: a model can be downloadable and hosted, or
+        // hosted and never downloadable, and deriving one from the other misreported both.
         const lines = [`Hosted endpoint: ${listing.base_url}`, ''];
         for (const model of listing.models) {
           lines.push(`${model.name} — ${model.zone}`);
@@ -697,8 +697,7 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           } else {
             lines.push('  Hosted only — never published, nothing to download.');
           }
-          if (model.served === 'current') lines.push('  This is what the hosted API answers the current client with.');
-          if (model.served === 'legacy') lines.push('  This is what the hosted API answers older clients, and requests that name no model, with.');
+          if (model.hosted) lines.push('  This is what the hosted API answers the current client with.');
           if (model.accuracy !== null) {
             lines.push(`  Measured: ${(model.accuracy * 100).toFixed(1)}% exact match`);
           }
