@@ -5,6 +5,15 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Abyss is what the hosted API serves.** The client names an Abyss expert on
+  every request to our endpoint and is answered by it; an older client, or a
+  request that names no model, still gets Twilight v1.2. Nothing is gated on the
+  account, so the `model_not_licensed` and `model_not_serving` error codes are
+  gone from both ports. Licensing is about downloading weights, and Abyss has
+  none to download.
+
 ### Removed
 
 - **The debug-only CLI subcommands are gone:** `find-move`, `find-movable`,

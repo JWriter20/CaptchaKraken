@@ -460,9 +460,9 @@ all you face and you want the smaller stack.
 | 🟦 **Twilight** | 8-bit (FP8) | ~14 GB | ~22 GB | [`Twilight-FP8`](https://huggingface.co/CaptchaKraken/Twilight-FP8) |
 | 🟦 **Sunlight** | 4-bit (AWQ) | ~9 GB | ~11 GB | [`Sunlight-AWQ-4bit`](https://huggingface.co/CaptchaKraken/Sunlight-AWQ-4bit) |
 
-### ⬛ Abyss — hosted for licence holders, never downloadable
+### ⬛ Abyss — what the hosted API serves, never downloadable
 
-**Serving now, to licence holders only.** It shares the public models' base —
+**Serving now, to every hosted account.** It shares the public models' base —
 Qwen3.5-9B — but it is not a bigger quantisation of them and nothing about its
 VRAM follows from theirs: it is a **routed mixture of specialist adapters**,
 one each for grids, pixel-precision work, animation and text, chosen per
@@ -473,10 +473,11 @@ them, starting with the non-grid hCaptcha puzzles. Keeping it on our own fleet
 is what lets it keep learning from production failures without shipping a
 customer's puzzle set to everyone who runs `hf download`.
 
-**It is not the default, and there is nothing to download.** The hosted API
-answers with Twilight v1.2 unless a request names Abyss, and an account without
-a licence that names it gets a clear 403 — never a quiet substitution, so you
-always know which model answered. No weights are published for it, and no
+**It is what the hosted API answers with, and there is nothing to download.**
+The current client names an Abyss expert on every request to our endpoint; an
+older client, or a request that names no model, is answered by Twilight v1.2,
+because its prompts belong to that generation — never a quiet substitution the
+other way, so you always know which model answered. No weights are published for it, and no
 accuracy figures are either: every number on this page is Twilight v1.2's. Open
 an issue to ask about a licence.
 
@@ -620,9 +621,9 @@ Most of the detail lives in the docs hub — start at **[docs/](./docs/README.md
 - 🟢 **Shipped** — **v1.2**: every vendor we solve (44 puzzle types across 10),
   animated challenges, typed text — as a LoRA and as **Sunlight** / **Twilight**
   merges, all public on [HuggingFace](https://huggingface.co/CaptchaKraken).
-- 🟢 **Shipped** — **Abyss**, hosted-only: served to licence holders who name it
-  on the request, never downloadable, and not the default — the hosted API still
-  answers with **Twilight v1.2** unless you ask for it.
+- 🟢 **Shipped** — **Abyss**, hosted-only: what the hosted API serves the current
+  client, never downloadable. An older client, or a request that names no model,
+  still gets **Twilight v1.2**.
 - ⚪ **Planned** — 🎯 higher accuracy on the **freehand hCaptcha puzzles**
   (connect-the-path and the numbered-line / missing-piece drags), which are the
   families the model is least reliable on. Every hCaptcha family we ship is

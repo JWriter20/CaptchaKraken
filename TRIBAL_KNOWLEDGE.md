@@ -306,10 +306,9 @@ hand-wrote a local key.
 **`errors.py` owns the wording; the JS port repeats it verbatim.** Before it
 existed, a camoufox user out of credits read `vLLM 402 Payment Required at
 https://api.captchakraken.com/...`. Branch on the code, never the message.
-Unknown codes carry the server's message through so the eleventh code is never
-reported worse than the ten; `model_not_licensed` and `model_not_serving` stay
-separate because collapsing them sends someone to buy a licence they already
-hold; a `Retry-After` HTTP-date is dropped rather than guessed. The JS
+Unknown codes carry the server's message through so a new code is never
+reported worse than the known ones; a `Retry-After` HTTP-date is dropped rather
+than guessed. The JS
 `parseApiError` scans stderr line by line because timing records share the
 stream, and returns null for anything unrecognised: an unparseable stderr must
 not become a confident but wrong billing message.

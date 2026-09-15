@@ -103,26 +103,6 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             "our side, not yours — retry shortly."
         )
 
-    # Two licensed-model codes, kept separate: one is a licence to obtain, the other a fleet not serving yet.
-    # Collapsing them is the reading that sends someone to buy a licence they already hold.
-    if code == ErrorCode.MODEL_NOT_LICENSED:
-        return (
-            "CaptchaKraken: the model this request named is licensed, and this "
-            "account is not licensed for it. The request was refused rather than "
-            "answered by a different model — a silent substitution would be a "
-            "score you could not explain. Unset CAPTCHA_LORA_NAME (or the "
-            f"client's `model`) to use the standard hosted model. {message} "
-            f"Licensing: {url or _SUPPORT}."
-        )
-
-    if code == ErrorCode.MODEL_NOT_SERVING:
-        return (
-            "CaptchaKraken: this account IS licensed for the model it named, but "
-            "the fleet is not serving it yet. Nothing is wrong with your account "
-            "and there is nothing to buy. Unset CAPTCHA_LORA_NAME (or the "
-            f"client's `model`) to use the standard hosted model meanwhile. {message}"
-        )
-
     # Anything added after this was written: the server's message is the best thing available.
     tail = f" See {url}." if url else ""
     return f"CaptchaKraken: {message}{tail}"

@@ -657,8 +657,8 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
     {
       title: 'Models',
       description:
-        'The model lineup: which weights can be self-hosted, and which one the hosted endpoint ' +
-        'runs. Useful for deciding whether to pay per solve or run it yourself.',
+        'The model lineup: which weights can be self-hosted, and what the hosted endpoint ' +
+        'serves. Useful for deciding whether to pay per solve or run it yourself.',
       annotations: { title: 'Models', readOnlyHint: true, openWorldHint: true },
     },
     async () => {
@@ -669,10 +669,9 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
             name: string;
             zone: string;
             tagline: string;
-            hosted: boolean;
+            served: 'current' | 'legacy' | null;
             hugging_face_id: string | null;
             published: boolean;
-            coming_soon: boolean;
             base_model: string;
             min_vram: string | null;
             weights_gb: number | null;
@@ -681,25 +680,25 @@ export function createServer(baseUrl: string, clientName: string): McpServer {
           }>;
         }>('/api/v1/models', { authenticated: false });
 
-        // `hosted` and `published` are separate flags read for what they say: deriving one from the other
-        // misreported Twilight and Abyss both ways. No video line: animated support is a generation property,
-        // and on 2026-09-06 the control plane had Sunlight flagged false.
+        // `served` and `published` are read for what they say: a model can be downloadable and served, or
+        // served and never downloadable, and deriving one from the other misreported both.
         const lines = [`Hosted endpoint: ${listing.base_url}`, ''];
         for (const model of listing.models) {
           lines.push(`${model.name} — ${model.zone}`);
           lines.push(`  ${model.tagline}`);
           lines.push(`  Base: ${model.base_model}`);
 
-          if (model.coming_soon) {
-            lines.push('  Coming soon — not serving, nothing to download.');
-          } else if (model.published) {
+          if (model.published) {
             lines.push(
               `  Weights: ${model.hugging_face_id} (~${model.weights_gb} GB, needs ${model.min_vram})`,
             );
-          } else {
+          } else if (model.hugging_face_id) {
             lines.push(`  Weights: ${model.hugging_face_id} — reserved, not uploaded yet`);
+          } else {
+            lines.push('  Hosted only — never published, nothing to download.');
           }
-          if (model.hosted) lines.push('  This is what the hosted API answers with.');
+          if (model.served === 'current') lines.push('  This is what the hosted API answers the current client with.');
+          if (model.served === 'legacy') lines.push('  This is what the hosted API answers older clients, and requests that name no model, with.');
           if (model.accuracy !== null) {
             lines.push(`  Measured: ${(model.accuracy * 100).toFixed(1)}% exact match`);
           }
