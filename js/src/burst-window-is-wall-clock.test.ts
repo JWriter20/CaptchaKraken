@@ -37,7 +37,7 @@ test('a still board does not hold the burst longer than the floor', async () => 
   const s = solver();
   const t0 = Date.now();
   const rec = s.startKeyframeBurst(cam.element);
-  const dir = await rec.finish();
+  const { dir } = await rec.finish();
   const elapsed = Date.now() - t0;
   fs.rmSync(dir, { recursive: true, force: true });
 
@@ -58,7 +58,7 @@ test('the floor is still a floor when the camera is fast', async () => {
   const s = solver();
   const t0 = Date.now();
   const rec = s.startKeyframeBurst(element);
-  const dir = await rec.finish();
+  const { dir } = await rec.finish();
   const elapsed = Date.now() - t0;
   fs.rmSync(dir, { recursive: true, force: true });
 
@@ -71,7 +71,7 @@ test('a board that never settles stops at the ceiling in seconds', async () => {
   const s = solver();
   const t0 = Date.now();
   const rec = s.startKeyframeBurst(cam.element);
-  const dir = await rec.finish();
+  const { dir } = await rec.finish();
   const elapsed = Date.now() - t0;
   fs.rmSync(dir, { recursive: true, force: true });
 
@@ -84,7 +84,7 @@ test('the recording reports the rate it achieved, not the one it aimed at', asyn
   const cam = slowCamera(['one-screen']);
   const s = solver();
   const rec = s.startKeyframeBurst(cam.element);
-  const dir = await rec.finish();
+  const { dir } = await rec.finish();
   fs.rmSync(dir, { recursive: true, force: true });
 
   assert.ok(s.lastBurstFps < 10,

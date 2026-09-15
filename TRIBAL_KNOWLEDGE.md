@@ -470,6 +470,18 @@ one run were it firing on a still board. There is no "enough screens, stop
 filming" exit: both spellings were measured on number_with_highest_value_video
 and failed every seed either way.
 
+**The second look is a question, and the clip it records answers it.** A board
+that failed a round buys one recording, because "settled" is not proof of
+static. That probe used to declare the board animated *before* filming it, so an
+ordinary miss on a still board — a slide landing 3% wide, a grid read wrong —
+went to the video expert, which can only answer a still with a frame number no
+widget will take. The answer then repeated until the no-progress fence tripped:
+three rounds and twenty-three seconds where one re-ask would have done, and a
+board that needs a second drag never got one. The clip decides now, and it may
+only PROMOTE: an animation the settle classifier already measured is never
+demoted by a film that ends on a settled screen, which is exactly what a board
+that plays once and stops films like.
+
 **`measurePieceBox` must not set `actedOnBoard`.** It runs during detection,
 and marking there disabled `shouldSpeculate` on every slide solve, so the
 speculative burst had never run on those boards.

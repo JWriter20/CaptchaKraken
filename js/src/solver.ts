@@ -175,6 +175,8 @@ export class CaptchaKrakenSolver {
   /** Answers keyed by screenshot hash; a hit means the answer already ran and changed nothing. */
   private solutionCache: Map<string, CliResponse> = new Map();
   private repeatedAnswerSeen = false;
+  private knownAnimated = false;
+  private animatedProbeDone = false;
   /** The one recording and one answer for the animated board on screen. */
   private animatedPlan: { burstDir: string; response: CliResponse } | null = null;
   private keyframeMode: KeyframeMode | null = null;
@@ -440,9 +442,14 @@ export class CaptchaKrakenSolver {
       return { didInteract: false, tokenUsage: [] };
     }
 
-    if (!isAnimated && this.shouldRetryAsAnimated(puzzleSource)) {
-      console.log('[animated] a picture we already answered came back — recording it');
-      isAnimated = true;
+    // 'settled' is not proof of static: a repeated answer buys ONE recording to find out, and the clip that
+    // recording brings back is what decides — `knownAnimated` is set from it below, not from here.
+    let probing = false;
+    if (!isAnimated && this.knownAnimated) isAnimated = true;
+    else if (!isAnimated && this.shouldRetryAsAnimated(puzzleSource)) {
+      console.log('[animated] a second look at a board that did not solve as a still — recording it');
+      this.animatedProbeDone = true;
+      isAnimated = probing = true;
     }
 
     let establishedGridSize: number | null = null;
@@ -482,7 +489,7 @@ export class CaptchaKrakenSolver {
     let burstDir: string | null = null;
 
     try {
-      let response: CliResponse;
+      let response: CliResponse | null = null;
       const ask = (imagePath: string) => this.getSolution(imagePath, puzzleSource, retryMode, textMode);
       const askAnimated = () => this.ph(Phase.INFERENCE, () => this.withIdleWander(page, captchaElement, () => this.getAnimatedSolution(burstDir as string)));
       if (isAnimated) {
@@ -491,13 +498,26 @@ export class CaptchaKrakenSolver {
           response = this.animatedPlan.response;
           console.log('[animated] reusing the recorded answer — same board, same screens');
         } else {
-          const rec = this.pendingBurst;
+          const rec = this.pendingBurst ?? this.startKeyframeBurst(captchaElement);
           this.pendingBurst = null;
-          burstDir = await this.ph(Phase.BURST, () => rec ? rec.finish() : this.recordKeyframeBurst(captchaElement));
-          response = await askAnimated();
-          this.animatedPlan = { burstDir, response };
+          const film = await this.ph(Phase.BURST, () => rec.finish());
+          if (probing) this.knownAnimated = film.moved;
+          if (!probing || film.moved) {
+            burstDir = film.dir;
+            response = await askAnimated();
+            this.animatedPlan = { burstDir, response };
+          } else {
+            // The clip answers the question the probe asked: a board that never moved is a still, and the
+            // video expert can only answer a still with a frame number the widget will not take.
+            console.log('[animated] the recording shows a still board; solving it as a still');
+            const rested = rec.stableFrame();
+            if (rested && fs.existsSync(rested)) fs.copyFileSync(rested, screenshotPath);
+            rmdir(film.dir);
+            isAnimated = false;
+          }
         }
-      } else if (this.shouldSpeculate(puzzleSource, textMode)) {
+      }
+      if (!response && this.shouldSpeculate(puzzleSource, textMode)) {
         // Ask the still and film at once. No idle wander: a moving cursor reads as new screens.
         const rec = this.pendingBurst ?? this.startKeyframeBurst(captchaElement);
         this.pendingBurst = null;
@@ -524,13 +544,12 @@ export class CaptchaKrakenSolver {
           response = still as CliResponse;
         } else {
           console.log('[animated] the widget moved while the model was reading it — dropping the still answer and finishing the recording.');
-          isAnimated = true;
-          this.repeatedAnswerSeen = true;
-          burstDir = await this.ph(Phase.BURST, () => rec.finish());
+          isAnimated = this.knownAnimated = true;
+          burstDir = (await this.ph(Phase.BURST, () => rec.finish())).dir;
           response = await askAnimated();
           this.animatedPlan = { burstDir, response };
         }
-      } else {
+      } else if (!response) {
         response = await this.ph(Phase.INFERENCE, () => this.solveFrameFreshnessGuarded(captchaElement, screenshotPath,
           (imagePath) => this.withIdleWander(page, captchaElement, () => ask(imagePath))));
       }
@@ -1123,10 +1142,6 @@ export class CaptchaKrakenSolver {
     return { didInteract: performedAction, tokenUsage: allTokenUsage };
   }
 
-  private async recordKeyframeBurst(captchaElement: ElementHandle): Promise<string> {
-    return this.startKeyframeBurst(captchaElement).finish();
-  }
-
   /**
    * Start filming now and decide later what it was for: the classifier, the speculative film, or the
    * recording an animated answer is sliced from. Every window is wall-clock. A cycle is a screen that
@@ -1140,7 +1155,7 @@ export class CaptchaKrakenSolver {
     ready: () => Promise<SettleVerdict>;
     verdict: () => Promise<boolean>;
     abandon: () => Promise<void>;
-    finish: () => Promise<string>;
+    finish: () => Promise<{ dir: string; moved: boolean }>;
   } {
     const cfg = this.config;
     const fps = Math.max(1, cfg.videoBurstFps ?? 10);
@@ -1263,8 +1278,9 @@ export class CaptchaKrakenSolver {
         }
         const burstMs = Math.max(1, elapsed());
         this.lastBurstFps = captured / (burstMs / 1000);
+        const animating = order.length > BURST_ANIMATED_SCREENS && burstMs - lastNewMs < floorMs;
         console.log(`[animated] recorded ${captured} frames in ${(burstMs / 1000).toFixed(1)}s (${this.lastBurstFps.toFixed(1)}fps) -> ${dir}`);
-        return dir;
+        return { dir, moved: cycleClosed || animating };
       },
     };
   }
@@ -1374,6 +1390,8 @@ export class CaptchaKrakenSolver {
   private resetSolveState(): void {
     this.solutionCache.clear();
     this.repeatedAnswerSeen = false;
+    this.knownAnimated = false;
+    this.animatedProbeDone = false;
     this.discardAnimatedPlan();
     this.lastSubmitFrameHash = null;
     this.keyframeMode = null;
@@ -1458,8 +1476,10 @@ export class CaptchaKrakenSolver {
     return true;
   }
 
+  /** One second look per solve: a repeated answer arms it, and the recording it takes spends it. */
   private shouldRetryAsAnimated(puzzleSource: Vendor): boolean {
-    return this.repeatedAnswerSeen && puzzleSource !== Vendor.RECAPTCHA && this.config.videoSolveEnabled !== false;
+    return this.repeatedAnswerSeen && !this.animatedProbeDone
+      && puzzleSource !== Vendor.RECAPTCHA && this.config.videoSolveEnabled !== false;
   }
 
   private async getSolution(imagePath: string, puzzleSource: Vendor = Vendor.UNKNOWN, retryMode: RetryMode | null = null, textMode = false): Promise<CliResponse> {

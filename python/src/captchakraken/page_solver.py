@@ -1026,16 +1026,19 @@ class PageSolver:
             return True
         with self._phase(Phase.SETTLE):
             verdict = self._wait_for_element_settled(element)
-        if verdict != SettleVerdict.ANIMATED:
-            # 'settled' is not proof of static; a repeated answer arms one recording to find out.
+        animated = verdict == SettleVerdict.ANIMATED
+        if not animated:
+            # 'settled' is not proof of static; a repeated answer arms one recording to find out. The clip
+            # that recording brings back is what decides — `_known_animated` is set from it, not from here.
             if not self._animated_probe_armed or self._animated_probe_done:
                 return False
             self._animated_probe_done, self._animated_probe_armed = True, False
             _log("[animated] a second look at a board that did not solve as a still — recording it")
-        self._known_animated = True
+        self._known_animated = animated
         if not self.config.video_solve_enabled:
             raise AnimatedChallengeError("the challenge never settles and video_solve_enabled is off")
-        _log("[animated] challenge is animated — solving it from keyframes")
+        if animated:
+            _log("[animated] challenge is animated — solving it from keyframes")
         return True
 
     def _arm_animated_probe(self) -> None:
@@ -1134,8 +1137,8 @@ class PageSolver:
         _log(f"[animated] sliced to {len(paths)} keyframe(s) (mode={kfset.mode})")
         return paths, temp_dir
 
-    def _record_keyframes(self, element: Any) -> Tuple[List[str], str]:
-        """Record the widget and return `(keyframe_paths, temp_dir)`; the caller removes the dir.
+    def _record_keyframes(self, element: Any) -> Tuple[List[str], str, bool]:
+        """Record the widget and return `(keyframe_paths, temp_dir, moved)`; the caller removes the dir.
 
         Frames stay in memory: the intermediate mp4 this used to write was mp4v, which the serving side may not decode.
         """
@@ -1147,12 +1150,13 @@ class PageSolver:
                 f"budget is left and an animated recording needs {cfg.video_burst_duration_ms}ms — not "
                 "starting one that would be cut off mid-way. Raise overall_solve_timeout_ms or "
                 "video_extra_inference_ms, or set video_solve_enabled=False.")
-        frames, _order, _closed, burst_ms = self._burst(element)
+        frames, _order, moved, burst_ms = self._burst(element)
         if not frames:
             raise AnimatedChallengeError("could not record the animated challenge (no frame screenshotted)")
         _log(f"[animated] recorded {len(frames)} frames in {burst_ms / 1000:.1f}s "
              f"({measured_fps(len(frames), burst_ms, cfg.video_burst_fps):.1f}fps)")
-        return self._slice(frames, burst_ms)
+        paths, temp_dir = self._slice(frames, burst_ms)
+        return paths, temp_dir, moved
 
     def _speculate(self, element: Any, shot: str, puzzle_source: Vendor, retry_mode: Optional[RetryMode],
                    text_mode: bool) -> Tuple[List[CaptchaAction], List[Dict[str, Any]], Optional[str]]:
@@ -1178,6 +1182,7 @@ class PageSolver:
                         _debug(f"settled re-read failed: {exc}")
                 return actions, usage, None
             _log("[animated] the widget moved while the model was reading it — finishing the recording")
+            self._known_animated = True
             fut.result()
             self._grant_video_budget()
             paths, keyframe_dir = self._slice(frames, burst_ms)
@@ -1488,11 +1493,14 @@ class PageSolver:
                 else:
                     reused = False
                     with self._phase(Phase.BURST):
-                        keyframes, keyframe_dir = self._record_keyframes(element)
-                if len(keyframes) < 2:
-                    _log("[animated] the recording shows one picture; solving it as a still")
+                        keyframes, keyframe_dir, moved = self._record_keyframes(element)
+                    self._known_animated = self._known_animated or moved
+                # The clip answers the question the probe asked: a board that never moved is a still, and the
+                # video expert can only answer a still with a frame number the widget will not take.
+                if len(keyframes) < 2 or not self._known_animated:
+                    _log("[animated] the recording shows a still board; solving it as a still")
                     is_animated = False
-                    shutil.copyfile(keyframes[0], shot)
+                    shutil.copyfile(keyframes[-1], shot)
                     have_shot = True
                     self._discard_animated_plan()
                     shutil.rmtree(keyframe_dir, ignore_errors=True)
