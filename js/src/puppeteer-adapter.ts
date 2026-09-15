@@ -1,52 +1,12 @@
-/**
- * Puppeteer → CaptchaKraken adapter.
- *
- * The solver speaks the Playwright API surface (see playwright-types.ts). Puppeteer
- * is ~95% the same shape but differs in a handful of method names/options. Rather
- * than couple the solver to either library, this thin adapter wraps a Puppeteer
- * `Page` (and, lazily, the `Frame`/`ElementHandle` objects it hands back) so it
- * satisfies the structural `PlaywrightPage` interface the solver consumes.
- *
- * The deltas it bridges (verified against Puppeteer 24.x):
- *   - `page.viewportSize()`            → `page.viewport()`  (same `{width,height}` shape)
- *   - `page.waitForTimeout(ms)`        → removed in modern Puppeteer; use a timer
- *   - `*.waitForSelector(sel, {state}) → Puppeteer uses `{visible}/{hidden}`
- *   - `handle.getAttribute(name)`      → `handle.evaluate((el,n)=>el.getAttribute(n), name)`
- *   - `handle.textContent()`           → `handle.evaluate(el=>el.textContent)`
- *   - `handle.scrollIntoViewIfNeeded()`→ `handle.scrollIntoView()`
- *   - `page.isClosed()`                → same, but must be forwarded explicitly
- * Everything else (`$`, `$$`, `$eval`, `waitForFunction`, `mouse.*`,
- * `screenshot({path})`, `boundingBox`, `contentFrame`, `isVisible`) is
- * call-compatible and passed straight through.
- *
- * Usage:
- * ```typescript
- * import puppeteer from 'puppeteer';
- * import { CaptchaKrakenSolver, fromPuppeteer } from 'captchakraken';
- *
- * const browser = await puppeteer.launch({ headless: false });
- * const page = await browser.newPage();
- * await page.goto('https://www.google.com/recaptcha/api2/demo');
- *
- * const solver = new CaptchaKrakenSolver();
- * await solver.solve(fromPuppeteer(page));
- * await browser.close();
- * ```
- */
-
 import {
   PlaywrightPage,
   PlaywrightFrame,
   PlaywrightElementHandle,
+  PlaywrightLocator,
   BoundingBoxRect,
   ViewportSize,
 } from './playwright-types';
 
-/**
- * Minimal structural view of the Puppeteer objects we touch. We deliberately
- * type these loosely (no `puppeteer` import) so the package keeps ZERO browser
- * dependencies — the caller supplies a real Puppeteer `Page` at runtime.
- */
 interface PuppeteerSelectorState {
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
   timeout?: number;
@@ -58,10 +18,10 @@ interface PuppeteerElementHandle {
   scrollIntoView(): Promise<void>;
   isVisible(): Promise<boolean>;
   evaluate(pageFunction: (el: any, ...args: any[]) => any, ...args: any[]): Promise<any>;
-  $(selector: string): Promise<PuppeteerElementHandle | null>;
+  $$(selector: string): Promise<PuppeteerElementHandle[]>;
 }
 interface PuppeteerFrame {
-  $(selector: string): Promise<PuppeteerElementHandle | null>;
+  $$(selector: string): Promise<PuppeteerElementHandle[]>;
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   waitForFunction(pageFunction: Function | string, options?: any, ...args: any[]): Promise<unknown>;
 }
@@ -79,13 +39,12 @@ interface PuppeteerPage {
   };
   waitForSelector(selector: string, options?: any): Promise<PuppeteerElementHandle | null>;
   viewport(): ViewportSize | null;
-  $(selector: string): Promise<PuppeteerElementHandle | null>;
+  evaluate<R>(pageFunction: () => R): Promise<R>;
   $$(selector: string): Promise<PuppeteerElementHandle[]>;
-  $eval(selector: string, pageFunction: (element: Element) => any, ...args: any[]): Promise<any>;
   isClosed(): boolean;
+  evaluate(pageFunction: () => any): Promise<any>;
 }
 
-/** Translate Playwright `{state}` selector options to Puppeteer `{visible}/{hidden}`. */
 function toPuppeteerSelectorOptions(options?: PuppeteerSelectorState): any {
   if (!options) return undefined;
   const { state, timeout } = options;
@@ -93,9 +52,23 @@ function toPuppeteerSelectorOptions(options?: PuppeteerSelectorState): any {
   if (timeout !== undefined) out.timeout = timeout;
   if (state === 'visible') out.visible = true;
   else if (state === 'hidden') out.hidden = true;
-  // 'attached'/'detached' have no direct Puppeteer flag — default wait (attached)
-  // is the closest match, so we pass no visibility flag.
+
   return out;
+}
+
+/** Puppeteer's own Locator has no `all()`, `count()` or visibility filter, so a Playwright-shaped one is built over `$$`. */
+function locatorOver(resolve: () => Promise<PuppeteerElementHandle[]>): PlaywrightLocator {
+  return {
+    locator: (selector) => locatorOver(async () => (await Promise.all((await resolve()).map((h) => h.$$(selector)))).flat()),
+    filter: ({ visible }) => locatorOver(async () => {
+      const found = await resolve();
+      const shown = await Promise.all(found.map((h) => (visible === undefined ? true : h.isVisible().then((v) => v === visible))));
+      return found.filter((_, i) => shown[i]);
+    }),
+    all: async () => (await resolve()).map((h) => locatorOver(async () => [h])),
+    count: async () => (await resolve()).length,
+    elementHandle: async () => wrapHandle((await resolve())[0] ?? null),
+  };
 }
 
 function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle | null {
@@ -108,26 +81,23 @@ function wrapHandle(h: PuppeteerElementHandle | null): PlaywrightElementHandle |
     getAttribute: (name) => h.evaluate((el: Element, n: string) => el.getAttribute(n), name),
     isVisible: () => h.isVisible(),
     textContent: () => h.evaluate((el: Element) => el.textContent),
-    $: async (selector) => wrapHandle(await h.$(selector)),
+    inputValue: () => h.evaluate((el: any) => (typeof el.value === 'string' ? el.value : '')),
+    evaluate: (pageFunction) => h.evaluate(pageFunction),
   };
 }
 
 function wrapFrame(f: PuppeteerFrame | null): PlaywrightFrame | null {
   if (!f) return null;
   return {
-    $: async (selector) => wrapHandle(await f.$(selector)),
+    locator: (selector) => locatorOver(() => f.$$(selector)),
     waitForSelector: async (selector, options) =>
       wrapHandle(await f.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
     waitForFunction: (pageFunction, arg, options) =>
-      // Playwright: (fn, arg, {timeout,polling}); Puppeteer: (fn, {timeout,polling}, ...args).
+
       f.waitForFunction(pageFunction as any, options, arg),
   };
 }
 
-/**
- * Wrap a Puppeteer `Page` so it satisfies the solver's structural Playwright
- * `Page`. Pass the result to `solver.solve(...)`.
- */
 export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
   return {
     mouse: {
@@ -137,9 +107,8 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     },
     keyboard: {
       type: (text, options) => page.keyboard.type(text, options),
-      // Puppeteer has no combo syntax: 'Control+A' must be held, pressed,
-      // released. Playwright accepts the combo string directly, which is why
-      // the solver speaks Playwright and this adapter translates.
+
+      // Puppeteer has no 'Control+A' combo syntax; the solver speaks Playwright and this side translates.
       press: async (key) => {
         const parts = key.split('+');
         const target = parts.pop() as string;
@@ -152,14 +121,9 @@ export function fromPuppeteer(page: PuppeteerPage): PlaywrightPage {
     waitForSelector: async (selector, options) =>
       wrapHandle(await page.waitForSelector(selector, toPuppeteerSelectorOptions(options))),
     viewportSize: () => page.viewport(),
-    $: async (selector) => wrapHandle(await page.$(selector)),
-    $$: async (selector) => (await page.$$(selector)).map((h) => wrapHandle(h)!).filter(Boolean),
-    $eval: (selector, pageFunction, arg) => page.$eval(selector, pageFunction as any, arg),
-    // Same name and shape on both libraries, but it still has to be forwarded:
-    // the wrapper is a fresh object literal, so anything not listed here is
-    // simply absent. The auto-solve watcher reads it to end its loop when the
-    // caller closes the browser, and an undefined `isClosed` reads as "still
-    // open" — a watcher that polls a dead page forever.
+    evaluate: (pageFunction) => page.evaluate(pageFunction),
+    locator: (selector) => locatorOver(() => page.$$(selector)),
+    // Forwarded explicitly: without it the watcher polls a dead page forever.
     isClosed: () => page.isClosed(),
   };
 }

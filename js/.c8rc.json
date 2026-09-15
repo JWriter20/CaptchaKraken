@@ -11,6 +11,6 @@
     "python/**"
   ],
   "check-coverage": true,
-  "lines": 71,
-  "branches": 78
+  "lines": 73,
+  "branches": 80
 }

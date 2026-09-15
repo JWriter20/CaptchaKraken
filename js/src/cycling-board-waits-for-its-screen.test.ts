@@ -1,49 +1,15 @@
-/**
- * Regression: the frame gate was OFF on every real animated captcha, and when
- * it did fire the pointer still had to travel afterwards.
- *
- * GeeTest's svg variant advances through 2-3 screens of fresh glyphs, dwelling
- * ~1.5s on each. The model answers WHERE and WHEN — `frame` names the screen —
- * and `waitForKeyframe` exists to hold the click until that screen is back up.
- * Live it solved 1/14 on the 27B and 1/8 on v1.2. Three separate faults, each
- * enough on its own:
- *
- * 1. THE GATE NEVER RAN. It skipped whenever `keyframeMode === 'even'`, on the
- *    reasoning that `even` means no state recurs. It does not: `even` means the
- *    SLICER could not PROVE recurrence, and it cannot, because `_detect_cycle`
- *    requires a state to be seen coming back and only ONE pass fits in a 4s
- *    burst. Measured over 60 real clips: 32 sliced `even` while sitting on 2-3
- *    steady screens covering 95-100% of the burst. So the driver clicked
- *    whatever screen happened to be up — right about one time in three, which
- *    is what 1/14 looks like.
- *
- *    The skip was added for a real measurement (2026-08-19,
- *    an hCaptcha rotating-object animation: 6.0s of a 28.8s solve spent waiting for a
- *    frame that could not return) and that case must keep its behaviour. It
- *    does: a rotation is nearly all transition, so it decomposes into no steady
- *    holds at all. Measured across all five continuous hCaptcha video types,
- *    12 clips each: `steady_screens` 0 for 60 of 60. GeeTest svg: 2-3 for every
- *    real capture. The two families separate cleanly, which is why the gate now
- *    keys on the screen COUNT rather than on the slicing mode.
- *
- * 2. THE POINTER TRAVELLED AFTER THE MATCH. The wait was followed by
- *    `executeClick`, which starts with a humanised move — measured 274ms p10 /
- *    398ms p50 / 647ms max across a 340x384 widget, i.e. 27-36% of a 1500ms
- *    dwell, spent after we had already confirmed the right screen was up. So
- *    the gate could succeed and the click still land on the next screen. The
- *    pointer is now PARKED on the target before the wait begins and pressed in
- *    place, which is what `move()`'s same-point short-circuit makes free.
- *
- * 3. THE BUDGET WAS SHORTER THAN THE CYCLE. 6000ms against a 3-screen cycle
- *    measured at 4.5s median and 8.1s worst case, so the worst case could not
- *    fit even in principle.
- */
+// The gate keys on steady-screen COUNT, not slicing mode: `even` means the slicer could not prove recurrence, and 32 clips sliced `even`
+// while sitting on 2-3 steady screens. The pointer parks first (a 274-647ms move against a 1500ms dwell), the budget is 2.7s x 3 screens,
+// the local-evidence wait is capped at one burst (uncapped it ran 36s), and a touched board is never re-classified by filming it.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CaptchaKrakenSolver, SOLVE_DEFAULTS } from './solver';
+import { SettleVerdict } from './kinds';
 
-/** A solver whose keyframe probe is counted rather than run. */
 function gated(opts: { mode: string | null; screens: number; matchAfter?: number }) {
   const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
   solver.keyframeMode = opts.mode;
@@ -58,7 +24,6 @@ function gated(opts: { mode: string | null; screens: number; matchAfter?: number
 }
 
 test('a clip that sits on steady screens waits, even when sliced `even`', async () => {
-  // The live failure. Every real geetest_v4_svg burst is exactly this shape.
   const { solver, element, probes } = gated({ mode: 'even', screens: 3 });
   const matched = await solver.waitForKeyframe(element, '/tmp/kf.png', 0.5, 0.5);
   assert.equal(matched, true, 'the gate must run for a board that holds screens');
@@ -66,12 +31,39 @@ test('a clip that sits on steady screens waits, even when sliced `even`', async 
 });
 
 test('a one-way animation still does not wait', async () => {
-  // an hCaptcha rotating-object animation and the other four continuous types: no steady
-  // holds, nothing to come back to, and waiting is pure cost. Preserved.
   const { solver, element, probes } = gated({ mode: 'even', screens: 0 });
   const matched = await solver.waitForKeyframe(element, '/tmp/kf.png', 0.5, 0.5);
   assert.equal(matched, false);
   assert.equal(probes(), 0, 'a clip with no steady screens must not be polled at all');
+});
+
+test('no steady screens, but the answer AREA comes back — then it waits', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kfset_'));
+  for (const n of ['frame_01.png', 'frame_02.png', 'frame_03.png']) {
+    fs.writeFileSync(path.join(dir, n), '');
+  }
+  const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
+  solver.keyframeSteadyScreens = 0;
+  let probes = 0;
+  solver.runCvTool = async (tool: string) => {
+    if (tool === 'match-region') probes += 1;
+    return { match: true, diff: 0.0 };
+  };
+  const element: any = { screenshot: async () => undefined };
+  try {
+    const matched = await solver.waitForKeyframe(
+      element, path.join(dir, 'frame_01.png'), 0.5, 0.5);
+    assert.equal(matched, true, 'an answer area that recurs is worth waiting for');
+    assert.ok(probes >= 2, 'it must compare against the clip, then poll the widget');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the wait is bounded by the evidence that opened it', async () => {
+  const BURST_FLOOR_MS = 4000;
+  assert.ok(BURST_FLOOR_MS < SOLVE_DEFAULTS.keyframeWaitTimeoutMs,
+    'the local-evidence cap must be shorter than the full budget, or it is not a cap');
 });
 
 test('a proven cycle still waits', async () => {
@@ -87,8 +79,6 @@ test('the gate polls until the screen comes round, then reports the match', asyn
 });
 
 test('the pointer is parked on the target BEFORE the gate opens', async () => {
-  // The ordering that makes the gate worth having: by the time the screen
-  // matches there must be nothing left to do but press.
   const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
   solver.keyframeMode = 'even';
   solver.keyframeSteadyScreens = 3;
@@ -116,27 +106,17 @@ test('the pointer is parked on the target BEFORE the gate opens', async () => {
   assert.ok(moved < probed, `pointer must be parked before the gate opens: ${events.join(' ')}`);
   assert.ok(probed < clicked, `the click must come after the match: ${events.join(' ')}`);
 
-  // And the point pressed must be the point parked on — parking somewhere else
-  // would reintroduce exactly the travel this removes.
   assert.equal(events[clicked].slice('click:'.length), events[moved].slice('move:'.length),
     `parked and pressed different points: ${events.join(' ')}`);
 });
 
 test('the wait budget can hold one worst-case cycle', () => {
-  // Dwell max 2.7s x 3 screens = 8.1s (src/captchaCollection/sources.py).
-  // A budget under that cannot catch the worst case however well it is aimed.
   const budget = SOLVE_DEFAULTS.keyframeWaitTimeoutMs;
   assert.ok(budget >= 8_100,
     `keyframeWaitTimeoutMs is ${budget}ms; a 3-screen cycle runs to 8100ms`);
 });
 
 test('the gate stops early once the widget is clearly a different board', async () => {
-  // AFTER a successful click the board is gone, and the gate was waiting out
-  // its whole 9s budget for a screen that could never return — once per solve,
-  // measured as the largest single item in a 40.3s trace.
-  //
-  // The number it needed was already in its hand: two SCREENS of one board
-  // differ by 0.0056, a different board by 0.77.
   const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
   solver.keyframeMode = 'even';
   solver.keyframeSteadyScreens = 3;
@@ -154,8 +134,6 @@ test('the gate stops early once the widget is clearly a different board', async 
 });
 
 test('a WRONG SCREEN of the right board is still waited for', async () => {
-  // The whole point of the gate. A different screen reads ~0.0056, nowhere near
-  // the "not this board" bar, so it must keep polling.
   const solver: any = new CaptchaKrakenSolver({ keyframeWaitPollMs: 1 });
   solver.keyframeMode = 'even';
   solver.keyframeSteadyScreens = 3;
@@ -170,10 +148,6 @@ test('a WRONG SCREEN of the right board is still waited for', async () => {
 });
 
 test('a cycling board is recorded after ONE round, not two', async () => {
-  // The freshness guard already watches the frame during inference. Seeing it
-  // change TWICE in one round, with nothing clicked, is a cycling board — and
-  // it used to re-solve instead, then wait for the same answer to come back a
-  // round later. Two still inferences and ~10s of a 40s solve.
   const solver: any = new CaptchaKrakenSolver({});
   let changes = 0;
   solver.captchaFrameChangedSince = async () => { changes += 1; return true; };
@@ -187,4 +161,25 @@ test('a cycling board is recorded after ONE round, not two', async () => {
   assert.equal(solver.shouldRetryAsAnimated('unknown'), true,
     'two changes in one round and it still wants another round to be sure');
   assert.ok(queries <= 2, `${queries} inferences spent re-solving a board that never holds still`);
+});
+
+test('a board we have already touched is not re-classified by filming it', async () => {
+  const solver: any = new CaptchaKrakenSolver({});
+  let filmed = 0;
+  solver.startKeyframeBurst = () => {
+    filmed += 1;
+    return {
+      moved: () => true, screensSeen: () => 9, stableFrame: () => null,
+      ready: async () => SettleVerdict.ANIMATED, verdict: async () => true,
+      abandon: async () => {}, finish: async () => '/tmp/nope',
+    };
+  };
+  const element: any = { screenshot: async () => undefined };
+
+  assert.equal(await solver.classifyByRecording(element), SettleVerdict.ANIMATED);
+  assert.equal(filmed, 1);
+
+  solver.actedOnBoard = true;
+  assert.equal(await solver.classifyByRecording(element), SettleVerdict.SETTLED);
+  assert.equal(filmed, 1, 'a touched board must not be filmed to classify it');
 });

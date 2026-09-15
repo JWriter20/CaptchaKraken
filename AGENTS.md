@@ -190,7 +190,7 @@ npm install captchakraken     # TypeScript: browser driver
 pip install captchakraken     # Python: engine + `captchakraken` CLI
 ```
 
-Python needs 3.10 or newer. Neither package installs a browser — you bring your
+Python needs 3.11 or newer. Neither package installs a browser — you bring your
 own (Playwright, Patchright, camoufox, or Puppeteer).
 
 ---
@@ -416,12 +416,13 @@ client unless you have a reason not to.
   One browser row is marked **not scored**; do not turn it into a number, do not
   convert a count into a percentage, and do not read a static-image rate as a
   promise about a browser — the page says why they differ.
-- **Abyss is hosted for licence holders and is never downloadable.** It is not
-  the default: the hosted endpoint answers with **Twilight v1.2** unless a
-  request names Abyss, and an account without a licence that names it gets a
-  403 rather than a substitution. Do not suggest weights, a download or a
-  workaround for it, and do not quote accuracy figures for it — none are
-  published. Verify what is serving with `GET /v1/models`.
+- **Abyss is what our hosted API serves, and it is never downloadable.** The
+  current client names an Abyss expert on every request to our endpoint and is
+  answered by Abyss; an older client, or a request that names no model, gets
+  Twilight v1.2, because its prompts belong to that generation. Nothing about it
+  is gated on the account. Do not suggest weights, a download or a workaround
+  for it, and do not quote accuracy figures for it — none are published. Verify
+  what is serving with `GET /v1/models`.
 - **Never print an API key** into a transcript, a log, or a commit. Use the MCP
   flow, which writes it to disk instead.
 - **Do not commit `captchakraken.env`.** It holds a key and is gitignored.

@@ -1,37 +1,9 @@
-/**
- * Scrolling to an element must not be allowed to take thirty seconds.
- *
- * `move()` calls `scrollIntoViewIfNeeded` before every gesture — once per
- * action and once per submit. Playwright's default timeout is 30s, and it does
- * not just scroll: it waits for the element to be STABLE, i.e. to stop
- * animating. A captcha widget mid-animation is exactly the input that makes
- * that wait run long, and the element is already on screen anyway, because the
- * driver has just screenshotted it.
- *
- * MEASURED on an MTCaptcha distorted-text puzzle, the fixture, this port:
- *
- *     [trial 1] SOLVED  12.0s
- *         # 1 initial  +0.89s   @0.9s   initial (pre-action)
- *         # 2 type     +10.13s  @11.0s  typed the code
- *
- *     phases: inference 1.5s, mouse 0.7s, settle 0.7s, verdict 0.1s
- *
- * Ten of those twelve seconds are in neither the model nor the mouse. They are
- * one un-timed-out scroll to a text box that never moved. The Python port
- * bounds it at 2000ms and has since it "turned a ~5s solve loop into minutes
- * during live testing"; this port never got that fix, and the two ports must
- * behave the same (CLAUDE.md 1c).
- *
- * On timeout the move proceeds to wherever `boundingBox()` says the element is,
- * which is what it would have done anyway.
- */
-
+// Playwright's default 30s stability wait cost ten of a twelve-second solve; the bound is 2000ms to match the Python port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CaptchaKrakenSolver } from './solver';
 
-/** The longest a scroll may block a gesture. */
 const MAX_SCROLL_WAIT_MS = 3000;
 
 function solverWithFakePointer() {

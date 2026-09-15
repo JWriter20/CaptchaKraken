@@ -1,29 +1,4 @@
 #!/usr/bin/env node
-/**
- * FILE_PURPOSES.md must describe every tracked file, and nothing else.
- *
- * A map that has gone stale is worse than no map, because it still gets
- * trusted: an entry for a file that was deleted sends the next reader looking
- * for code that is not there, and a file with no entry is invisible to anyone
- * deciding where a change belongs. So this fails in BOTH directions.
- *
- * It enumerates `git ls-files` and never walks the directory tree. Walking it
- * would pull in `js/dist/`, `node_modules/` and every other gitignored path,
- * which is not a stricter map — it is thousands of lines that go stale on the
- * next build and bury the ones that matter.
- *
- * An entry is a table row whose FIRST cell is a backticked path and nothing
- * else:
- *
- *     | `js/src/solver.ts` | What it is for. |
- *
- * That shape is deliberate. Paths mentioned in prose, and the artifact table
- * whose first cell is a package name rather than a path, are not entries and
- * are not checked.
- *
- * Usage: node .github/scripts/check-file-purposes.mjs [path/to/FILE_PURPOSES.md]
- * Exits 0 when the two sets match, 1 when they do not, 2 if it cannot run.
- */
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';

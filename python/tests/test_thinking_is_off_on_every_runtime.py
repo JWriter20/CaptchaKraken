@@ -1,22 +1,5 @@
-"""Thinking must be off on EVERY runtime, and they disagree about how to say so.
+"""Both `chat_template_kwargs.enable_thinking` and `reasoning_effort` go out: Ollama ignores the kwargs and defaults thinking on, and vLLM reads reasoning_effort only when the kwargs are unset."""
 
-These weights are trained to answer straight into a fixed JSON schema, with the
-empty-think prefix already in place. Let the model think instead and the answer
-goes to a `reasoning` field, `content` comes back EMPTY, and the token budget is
-gone before the JSON starts. Nothing errors — it reads exactly like a model that
-cannot solve anything.
-
-`chat_template_kwargs` is what vLLM and llama.cpp read. **Ollama has no such
-field**; its OpenAI-compatible endpoint reads `reasoning_effort`, ignores the
-kwargs object entirely, and defaults thinking ON for any model whose template
-mentions `<think>`. So one field alone is silently wrong on one of the three
-runtimes this client supports, and which one depends on where the user pointed
-`VLLM_BASE_URL`.
-
-Sending both is safe, not merely tolerated: vLLM derives `enable_thinking` from
-`reasoning_effort` only when the caller has not set it explicitly, so the kwargs
-still win there and nothing about an existing vLLM deployment changes.
-"""
 import json
 import pytest
 
@@ -82,7 +65,6 @@ def test_a_click_round_turns_thinking_off_both_ways(tmp_path, posted):
 
 
 def test_a_keyframe_round_turns_thinking_off_both_ways(tmp_path, posted):
-    """The family that suffers most: several stills already crowd the budget."""
     frames = [_png(tmp_path, f"f{i}.png") for i in range(3)]
 
     _planner().get_keyframe_actions(frames)
@@ -92,7 +74,6 @@ def test_a_keyframe_round_turns_thinking_off_both_ways(tmp_path, posted):
 
 
 def test_every_round_of_a_solve_says_it(tmp_path, posted):
-    """Not just the first request — a real solve changes family mid-solve."""
     planner = _planner()
     planner.get_grid_selection(_png(tmp_path), rows=3, cols=3)
     planner.get_pixel_actions(_png(tmp_path))

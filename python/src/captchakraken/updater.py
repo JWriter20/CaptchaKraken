@@ -1,32 +1,3 @@
-"""
-Unified fetch/update for self-hosters.
-
-One command pulls the latest published CaptchaKraken model from the HuggingFace
-org (https://huggingface.co/CaptchaKraken) AND refreshes the local vLLM serving
-stack, so upgrading picks up new model revisions + engine fixes without
-re-running the whole installer:
-
-    captchakraken fetch
-
-What it does (all model-agnostic — repo ids come from `config`, so overriding
-CAPTCHA_LORA_ADAPTER / CAPTCHA_BASE_MODEL retargets it):
-
-  1. Re-downloads the configured captcha LoRA adapter + base model from HF. A
-     no-op when you're already on the latest revision; pulls the new commit
-     otherwise. (Downloads are cached under HF_HOME, same as the installer.)
-  2. Upgrades the vLLM serving stack in the current environment
-     (``pip install -U vllm huggingface_hub``).
-  3. Restarts a locally-managed vLLM server if one is running, so the freshly
-     pulled weights + engine actually take effect. Remote endpoints are left
-     alone (you manage those).
-
-Flags handled by the CLI wrapper:
-  --weights-only   just re-pull weights (skip the pip upgrade)
-  --engine-only    just upgrade vLLM (skip the weight download)
-  --no-restart     don't bounce a running local server
-  --dry-run        print the plan as JSON and do nothing (no network, no pip)
-"""
-
 import os
 import shutil
 import subprocess
@@ -35,17 +6,11 @@ import sys
 from . import config
 
 
-# The vLLM serving stack `fetch` keeps current. Mirrors the `serve` extra in
-# pyproject; upgraded in-place so a self-hoster gets engine fixes without a full
-# reinstall. Kept deliberately small — torch/transformers ride along with vllm.
 ENGINE_PACKAGES = ["vllm", "huggingface_hub"]
 
 
 def _hf_bin() -> "str | None":
-    """Locate the HuggingFace CLI. Prefer the one next to the CURRENT interpreter
-    (the venv the CLI runs in) — the JS driver invokes us via the venv python
-    without its bin dir on PATH — then fall back to PATH. Accepts either the new
-    `hf` entrypoint or the legacy `huggingface-cli`."""
+    """Next to the current interpreter first: the JS driver invokes the venv python without its bin on PATH."""
     here = os.path.dirname(sys.executable)
     for name in ("hf", "huggingface-cli"):
         sibling = os.path.join(here, name)
@@ -55,11 +20,6 @@ def _hf_bin() -> "str | None":
 
 
 def _download_cmd(repo_id: str) -> "list[str]":
-    """The argv that pulls (or refreshes) one HF repo into the local cache. Uses
-    the `hf`/`huggingface-cli` binary when present; otherwise drives
-    `huggingface_hub.snapshot_download` through the current interpreter so a
-    fetch still works from a bare `pip install captchakraken[serve]` (no console
-    script on PATH)."""
     hf = _hf_bin()
     if hf:
         return [hf, "download", repo_id]
@@ -76,24 +36,14 @@ def _pip_upgrade_cmd() -> "list[str]":
 
 
 class LicensedModelError(RuntimeError):
-    """Raised when `fetch` is pointed at weights that are not downloadable."""
+    pass
 
 
 def _refuse_licensed(repo_id: str) -> None:
-    """A licensed model has no Hub repo. Say so, instead of 404ing at the Hub.
+    """A licensed model has no Hub repo; the Hub's RepositoryNotFoundError reads as "you are not logged in".
 
-    Without this the failure is `RepositoryNotFoundError` from huggingface_hub,
-    which reads as "you are not logged in" or "typo" — so the next thing a
-    self-hoster does is hunt for a token that will never exist. It is also the
-    one place a licensed model's name can plausibly be typed by accident:
-    CAPTCHA_LORA_ADAPTER takes any string and `fetch` hands it straight to the
-    Hub.
-
-    A `private` model is NOT refused here, and that asymmetry is the point.
-    Its repo exists; the 401 an unauthorised puller gets is the true answer,
-    and pre-empting it with a refusal would stop the holder of an authorised
-    token from fetching weights they are entitled to. `_auth_hint` covers the
-    part that IS worth saying in advance.
+    A `private` model is deliberately NOT refused: its 401 is the true answer, and pre-empting it would stop
+    the holder of an authorised token from fetching weights they are entitled to.
     """
     from . import prompts
 
@@ -111,12 +61,7 @@ def _refuse_licensed(repo_id: str) -> None:
 
 
 def _needs_auth(*repo_ids: "str | None") -> "list[str]":
-    """Which of these repos are registered `availability: private`.
-
-    Reported by `plan()` so `--dry-run` says "this one needs a token" BEFORE
-    the download, rather than leaving a 401 to be read as a typo. Same reason
-    the licensed refusal lives in `plan()` and not at the download call.
-    """
+    """Reported by `plan()` so `--dry-run` says "this needs a token" before the download, not after a 401."""
     from . import prompts
 
     return [r for r in repo_ids if r and prompts.requires_auth(r)]
@@ -130,14 +75,6 @@ def plan(
     base: "str | None" = None,
     lora: "str | None" = None,
 ) -> dict:
-    """Assemble the fetch plan WITHOUT running anything. Pure + side-effect-free
-    so `--dry-run` and the tests can assert exactly what a real run would do.
-
-    Raises `LicensedModelError` rather than planning a download that cannot
-    succeed. Refusing HERE and not at the download call is deliberate: `plan()`
-    is what `--dry-run` prints, so the refusal is visible before anyone runs the
-    real thing, and there is exactly one place to keep it correct.
-    """
     base_model = base or config.base_model()
     lora_adapter = lora or config.lora_adapter()
     base_url = config.base_url()
@@ -162,7 +99,6 @@ def plan(
 
 
 def _is_local(base_url: str) -> bool:
-    # Imported lazily so a plan/dry-run doesn't drag in requests via server_manager.
     from .server_manager import is_local
 
     return is_local(base_url)
@@ -186,11 +122,6 @@ def fetch(
     base: "str | None" = None,
     lora: "str | None" = None,
 ) -> dict:
-    """Pull the latest weights + engine and (optionally) restart a local server.
-
-    Returns a JSON-serializable summary of what was done. On --dry-run, returns
-    the plan with ``"dry_run": true`` and performs no I/O.
-    """
     p = plan(weights=weights, engine=engine, restart=restart, base=base, lora=lora)
     if dry_run:
         return {**p, "dry_run": True}

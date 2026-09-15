@@ -65,8 +65,17 @@ file was for.
   wrong answer and hide the real defect. Fail loudly instead.
 - **Read the provider's docs** before writing against a third-party API. Never
   infer an endpoint, field, or rate limit from memory.
-- **Run independent work concurrently** — `Promise.all()`, one batched query
-  over N in a loop.
+- **Run independent work concurrently.** N queries that do not depend on each
+  other go through one `Promise.all()`, never an `await` in a loop; a loop
+  that awaits one query per iteration is a bug, not a style.
+- **Strong typing, always.** Closed sets are enums, tables are typed records
+  keyed by those enums, and a shape is an interface or a frozen dataclass —
+  never `Record<string, any>`, `Dict[str, Any]` or a bare tuple. The type
+  checker is the first reviewer.
+- **Functional over imperative.** Prefer `map`/`filter`/`flatMap`/`find` and
+  comprehensions to hand-rolled loops, accumulators and early-return ladders.
+  A `for` loop that builds an array, or a chain of `if (x) return x` over a
+  list, should be one expression.
 - **Comments say why, in a sentence or two.** Simple code needs none. Anything
   longer is a decision — put it in `TRIBAL_KNOWLEDGE.md`.
 - **Docs ship with the code that changed them.** Update the README and `docs/`
@@ -123,6 +132,28 @@ requirements → one agent.
   heavily gated code here: every geometry gate in
   `python/tests/test_grid_geometry_gates.py` exists because one specific false
   positive happened. Read the test named for a gate before you change it.
+- **Locators, never `page.$()` / `page.$$()` / `query_selector()`.** The
+  driver reads the page through `scope.locator(sel).filter({ visible: true })`
+  (`filter(visible=True)` in Python), `.all()`, `.count()` and
+  `.elementHandle()`; the structural `Page` type in `js/src/playwright-types.ts`
+  deliberately has no `$`. Query every selector of a pass at once (see the
+  `visible()` helper in `solver.ts`), not one after another.
+- **Every selector lives in `js/src/selectors.ts` and
+  `python/src/captchakraken/selectors.py`.** They are one typed table,
+  `SELECTORS: Record<Vendor, VendorSelectors>`, with a row per vendor: hosts,
+  challenge and checkbox iframes, inline widget shapes, response field,
+  accepted and checked markers, submit controls, text inputs, slider handles,
+  pieces. Import from it; never write a selector string in the driver. Adding
+  a vendor is adding a row, and the two files stay in the same order because
+  table order is detection order.
+- **General first, vendor second.** There are only a few puzzle types — drag,
+  grid selection, text, clicking, slider, grid fading, grid boundary (the 4×4
+  reCAPTCHA) and video clicking — and the model handles the divergence between
+  vendors; the driver's job is to photograph the board, send it, and perform
+  the answer. Write the general flow, then express what a vendor needs as a
+  field in its `SELECTORS` row. Code that runs for exactly one vendor is the
+  last resort, needs a why-comment, and is the first thing a reviewer asks to
+  remove.
 - **The two ports must agree.** `contract.json` records the public surface of
   both, and `js/src/contract.test.ts` plus `python/tests/test_public_contract.py`
   fail on a new divergence. After an intended change, regenerate it with
@@ -175,12 +206,12 @@ Every dependency in all four manifests is pinned to an exact version, and CI
 installs from the lockfiles with `npm ci`. Changing a version is a reviewed
 change, never a side effect of installing.
 
-**A Python pin has to install on 3.10**, which is what `requires-python`
+**A Python pin has to install on 3.11**, which is what `requires-python`
 promises — not merely on whatever interpreter you have. Resolve against the
 floor before changing one:
 
 ```bash
-uv venv --python 3.10 /tmp/ck310 && VIRTUAL_ENV=/tmp/ck310 uv pip install -e "python[dev]"
+uv venv --python 3.11 /tmp/ck311 && VIRTUAL_ENV=/tmp/ck311 uv pip install -e "python[dev]"
 ```
 
 The `js` package ships **no browser** — it types its public API against an
@@ -205,7 +236,7 @@ spend a test run discovering it.
 run locally:
 
 ```bash
-# Python: the whole suite, on 3.10 and 3.12 in CI
+# Python: the whole suite, on 3.11 and 3.12 in CI
 cd python && python -m pytest -q
 
 # TypeScript driver: type-check, then the node:test suite

@@ -1,13 +1,3 @@
-/**
- * postinstall bootstrap: create a local venv under `python/.venv` and install the
- * bundled `captchakraken` package so `python -m captchakraken.cli` works out-of-the-box.
- *
- * Opt out:
- *   CAPTCHA_KRAKEN_SKIP_PYTHON_SETUP=1
- *
- * Force a specific system python:
- *   CAPTCHA_KRAKEN_PYTHON=/path/to/python3
- */
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -42,7 +32,7 @@ function venvPython(venvDir) {
 
 function resolveSystemPython() {
   if (process.env.CAPTCHA_KRAKEN_PYTHON) return process.env.CAPTCHA_KRAKEN_PYTHON;
-  // Try python3 first, then python.
+
   return process.platform === 'win32' ? 'python' : 'python3';
 }
 
@@ -76,15 +66,6 @@ function main() {
     run(py, ['-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'], { cwd: cliRoot });
   }
 
-  // Install the `captchakraken` package with its CORE (lightweight) deps only:
-  // OpenCV grid detection + the HTTP planner that talks to a vLLM server. The
-  // heavy serving stack (vllm/torch, the `[serve]` extra) is NOT installed here
-  // — that's what setup.sh installs for people self-hosting the model.
-  //
-  // Prefer the PUBLISHED package from PyPI, pinned to THIS npm package's version
-  // so the JS driver and the Python engine stay in lockstep. Only fall back to
-  // the bundled source tree when PyPI can't satisfy that pin — offline installs,
-  // or a dev/CI/from-git build whose version isn't on PyPI yet.
   const pkgVersion = require(path.join(pkgRoot, 'package.json')).version;
   try {
     console.log(`[CaptchaKraken] Installing captchakraken==${pkgVersion} from PyPI...`);
@@ -114,5 +95,4 @@ try {
   );
   if (strict) process.exit(1);
 }
-
 

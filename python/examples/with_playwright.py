@@ -1,20 +1,3 @@
-"""
-Vanilla Playwright + CaptchaKraken.
-
-No adapter, and no browser dependency in the package: the driver duck-types the
-Playwright surface, so a real `sync_playwright` page satisfies it as-is — as do
-patchright's and camoufox's.
-
-    pip install captchakraken playwright && playwright install chromium
-    export VLLM_BASE_URL=https://api.captchakraken.com/v1
-    export CAPTCHA_KRAKEN_API_KEY=ck_live_...
-    python examples/with_playwright.py [url]
-
-SYNC, NOT ASYNC. `PageSolver` mirrors the synchronous Playwright API. A sync
-handle cannot be driven from inside an event loop, so `async_playwright` pages
-cannot be solved — use `sync_playwright`, as here.
-"""
-
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -30,9 +13,7 @@ def main() -> int:
         page = browser.new_page()
         page.goto(URL)
 
-        # ── the whole integration: construct, solve ──────────────────────────
         result = PageSolver().solve(page)
-        # ─────────────────────────────────────────────────────────────────────
 
         print("✅ solved" if result.is_solved else "❌ not solved")
         browser.close()

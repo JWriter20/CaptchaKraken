@@ -1,14 +1,4 @@
-/**
- * The watcher's contract, driven against a fake solver.
- *
- * A fake rather than a browser on purpose: every behaviour worth pinning here
- * — does it stop, does it re-arm, does one solve overlap the next, does a
- * throwing callback kill the loop — is about the LOOP, and a real page would
- * make each of them slow and flaky without testing anything extra. The
- * puppeteer/playwright surface is covered separately in
- * puppeteer-adapter.test.ts.
- */
-
+// 'No captcha' is not a failure: treating it as one made the first tick sleep the whole error backoff.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -24,7 +14,6 @@ const RESULT: SolveResult = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** A page that is open, and closed only when a test says so. */
 function fakePage(): Page & { close(): void } {
   let closed = false;
   const page = { isClosed: () => closed, close: () => { closed = true; } };
@@ -72,7 +61,7 @@ test('stop() waits for the solve in flight instead of abandoning it', async () =
   });
   const watcher = watchPage(solver, fakePage(), { intervalMs: 5 });
 
-  await sleep(25);            // long enough to be inside solve()
+  await sleep(25);
   await watcher.stop();
 
   assert.equal(finished, true, 'stop() resolved while a solve was still running');
@@ -127,8 +116,6 @@ test('a failing solve backs off instead of hot-looping', async () => {
   await sleep(100);
   await watcher.stop();
 
-  // Without the backoff this would run ~100 times. The point of the assertion
-  // is the ORDER of magnitude, not the exact count.
   assert.ok(calls <= 5, `backoff not applied: ${calls} attempts in 100ms`);
 });
 

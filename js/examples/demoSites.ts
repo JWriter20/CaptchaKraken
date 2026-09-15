@@ -1,23 +1,3 @@
-/**
- * Solve several real captcha sites in one run, in one browser, and print a
- * table of what happened.
- *
- *   source ../captchakraken.env        # VLLM_BASE_URL + CAPTCHA_KRAKEN_API_KEY
- *   npx tsx examples/demoSites.ts
- *   npx tsx examples/demoSites.ts recaptcha geetest-slide     # pick a subset
- *   npx tsx examples/demoSites.ts --list
- *
- * WHY ONE BROWSER FOR ALL OF THEM. Launching Holo on a virtual-GPU display is
- * tens of seconds — paid once here instead of once per site. It is also closer
- * to what a real integration does: one long-lived browser meeting captchas as
- * they come, rather than a fresh fingerprint per puzzle, which is a much easier
- * problem than the one customers have.
- *
- * Each site gets its OWN context, though, so a token banked on one vendor
- * cannot wave us through on the next. A demo that silently stopped solving
- * because the first solve satisfied everything afterwards would be the most
- * flattering possible bug.
- */
 import { CaptchaKrakenSolver } from '../src/index';
 import type { SolveResult } from '../src/types';
 import { resolveLauncher, launchOptions, displayMode } from './launcher';
@@ -27,39 +7,14 @@ interface Site {
   vendor: string;
   what: string;
   url: string;
-  /** Extra settle time for vendors whose widget paints late. */
+
   settleMs?: number;
-  /**
-   * Selectors to click, in order, to reveal the puzzle — the VISITOR'S click,
-   * not the solver's.
-   *
-   * GeeTest's demo pages put the widget behind a button: until it is pressed
-   * the markup is in the DOM but nothing is drawn, and the solver correctly
-   * reports that it can find no interactive widget. That is a property of the
-   * demo page, not of the vendor's integration — on a real site the button is
-   * whatever the user was already clicking — so pressing it belongs to the
-   * harness. reCAPTCHA and hCaptcha need nothing here: the solver drives their
-   * checkbox itself, which is why the two shipped single-vendor examples
-   * navigate and solve with no setup at all.
-   */
+
   open?: string[];
-  /** Selectors that mean the puzzle is now up; any one is enough. */
+
   ready?: string[];
 }
 
-/**
- * The sites. Public demo pages the vendors host themselves, so running this
- * costs nobody anything and hits no customer's property.
- *
- * ORDERED, AND reCAPTCHA IS LAST ON PURPOSE — but not hidden. Its demo page
- * deals a dynamic board perhaps half the time: tiles fade out and are replaced,
- * and it only ends when the board comes back clean, which runs past the
- * client's shipped 45s budget often enough that it is genuinely a coin flip.
- * That is a real property of the product and it is reported as its own figure.
- * Leading with it would mean the first thing you see is the puzzle most likely
- * to time out, which tells you less about the model than the other three do.
- * Run `demoSites.ts recaptcha` to go straight at it.
- */
 const SITES: Site[] = [
   {
     id: 'hcaptcha',
@@ -100,29 +55,18 @@ const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms
 interface Outcome {
   site: Site;
   solved: boolean;
-  /** Wall clock from `goto` to verdict — page load and the reveal click included. */
+
   totalMs: number;
-  /** Just `solve()`. THIS is the number the benchmarks report. */
+
   solveMs: number;
   tokensIn: number;
   tokensOut: number;
   note?: string;
 }
 
-/**
- * Why an attempt did not end in a solve.
- *
- * THREE OF THESE ARE NOT THE MODEL, and saying so is the point. A refused
- * session, a dead endpoint and a widget that never appeared all produce "not
- * solved", and scoring them as misses is how a transport fault gets read as a
- * weak model.
- */
-/** For the summary table: one short line, not the solver's full report. */
 function brief(note: string | undefined, width = 46): string {
   if (!note) return 'not solved';
-  // The client appends a usage blob to some errors, and a JSON object pasted
-  // into a fixed-width table destroys the table. The full text has already
-  // been printed above this, in full, as the attempt happened.
+
   const first = note.split(/\.\s|\. Total usage|; /)[0].trim();
   return first.length > width ? first.slice(0, width - 1) + '…' : first;
 }
@@ -143,7 +87,6 @@ function explain(err: unknown, result?: SolveResult | void): string {
   return msg || 'unknown';
 }
 
-/** Press whatever this demo page puts in front of its widget. */
 async function reveal(page: any, site: Site): Promise<void> {
   for (const sel of site.open ?? []) {
     const el = await page.waitForSelector(sel, { state: 'visible', timeout: 8000 }).catch(() => null);
@@ -191,16 +134,10 @@ async function main(): Promise<void> {
   try {
     for (const site of sites) {
       process.stdout.write(`  ${site.vendor} — ${site.what}\n    ${site.url}\n    solving… `);
-      // A fresh context per site: see the file header on why a shared one
-      // would flatter the result.
+
       const context = await browser.newContext({ viewport: null });
       const t0 = Date.now();
-      // TWO CLOCKS, BECAUSE THEY ANSWER DIFFERENT QUESTIONS. `solveMs` is what
-      // the recorded medians measure and the only figure comparable to them.
-      // `totalMs` also carries the page load, the settle and the demo page's
-      // own reveal click — real time a visitor waits, but not the model's.
-      // Printing one number for both would make this example look like it
-      // disagrees with the published medians when it does not.
+
       let s0 = t0;
       let solved = false;
       let note: string | undefined;

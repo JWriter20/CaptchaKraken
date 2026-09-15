@@ -1,47 +1,19 @@
 """What the hosted API's refusals mean, in words a user can act on.
 
-The solver talks to an OpenAI-compatible endpoint that may be a local vLLM the
-user started themselves or the hosted CaptchaKraken gateway. Those two fail very
-differently, and until this module existed both were reported the same way:
-`vLLM 402 Payment Required at https://api.captchakraken.com/v1/chat/completions`.
-A camoufox user who has never heard of vLLM, run vLLM, or intended to run vLLM
-would hit that on the day their credits ran out.
-
-Two rules, both inherited from the gateway's own `src/errors.ts`:
-
- 1. BRANCH ON `error.code`, NEVER ON PROSE. The messages get reworded; the codes
-    are the contract. A client that pattern-matches "Out of credits" breaks the
-    day someone improves the wording.
-
- 2. AN UNRECOGNISED CODE MUST STILL PRODUCE A USEFUL MESSAGE. There are ten
-    codes today and there will be more. Enumerating them exhaustively here means
-    the eleventh is reported worse than the ten — so the fallback carries the
-    server's own `message` and `resolution_url` through, and only the phrasing
-    is lost.
-
-The self-hosted path is deliberately untouched: a local vLLM does not send this
-envelope, so `from_response` returns a message shaped like the old one and the
-401/403 hint about the bearer token survives. Nobody self-hosting sees a word
-about credits.
+Before this, a camoufox user out of credits read `vLLM 402 Payment Required at https://api.captchakraken.com/...`.
+Branch on `code`, never on prose; an unknown code carries the server's own message through, so the eleventh
+code is never reported worse than the ten. The self-hosted path (no envelope) is untouched.
 """
 
 from typing import Any, Dict, Optional
 
-# Where a user with no `resolution_url` in hand should be sent. Only used as a
-# fallback — the server almost always supplies a deep link that is better than
-# this, and when it does we prefer it.
+from .kinds import ErrorCode
+
 _DASHBOARD = "https://captchakraken.com/dashboard"
 _SUPPORT = "https://captchakraken.com/support"
 
 
 class CaptchaKrakenAPIError(RuntimeError):
-    """A refusal from the hosted API, already translated.
-
-    Carries the machine-readable parts alongside the message so a caller that
-    wants to react programmatically (retry on `rate_limited`, stop on
-    `insufficient_credits`) can do so without re-parsing anything. `str(e)` is
-    the human sentence and is what reaches a console.
-    """
 
     def __init__(
         self,
@@ -59,13 +31,6 @@ class CaptchaKrakenAPIError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
 
     def to_payload(self) -> Dict[str, Any]:
-        """The shape the CLI puts on stderr for the JS driver to pick up.
-
-        The JS half shells out to this CLI and can only see stdout/stderr, so
-        the structured fields would otherwise be flattened to a string at the
-        process boundary and have to be re-parsed out of prose — exactly the
-        thing rule 1 forbids.
-        """
         return {
             "error": str(self),
             "ck_error": {
@@ -78,15 +43,10 @@ class CaptchaKrakenAPIError(RuntimeError):
 
 
 def _retry_after(headers: Any) -> Optional[float]:
-    """Seconds from the `Retry-After` header, if it is the numeric form.
-
-    HTTP also permits an HTTP-date here. The gateway only ever sends deltas, and
-    guessing wrong about a date would produce a confidently incorrect "wait 3
-    seconds", so anything unparseable is dropped rather than approximated.
-    """
+    """Numeric form only: guessing wrong about an HTTP-date would produce a confident "wait 3 seconds"."""
     try:
         raw = headers.get("Retry-After")
-    except Exception:  # noqa: BLE001 — a mapping-ish object is all we assume
+    except Exception:
         return None
     if raw is None:
         return None
@@ -97,19 +57,13 @@ def _retry_after(headers: Any) -> Optional[float]:
 
 
 def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float]) -> str:
-    """The user-facing line for a known code.
-
-    Every branch names CaptchaKraken. That is the entire point of this module:
-    the person reading it needs to know which product is refusing them before
-    anything else in the sentence can help.
-    """
-    if code == "insufficient_credits":
+    if code == ErrorCode.INSUFFICIENT_CREDITS:
         return (
             "CaptchaKraken: your account is out of credits, so this solve was refused. "
             f"Top up at {url or _DASHBOARD} and retry."
         )
 
-    if code == "solve_abandoned":
+    if code == ErrorCode.SOLVE_ABANDONED:
         return (
             "CaptchaKraken: this captcha attempt was served too many times without "
             "settling and has been abandoned. That usually means the IP reputation or "
@@ -118,24 +72,24 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             "one per solve() call, so a new solve is enough)."
         )
 
-    if code == "rate_limited":
+    if code == ErrorCode.RATE_LIMITED:
         wait = f" Retry in about {retry:g}s." if retry else " Back off and retry."
         return f"CaptchaKraken: too many requests.{wait}"
 
-    if code == "account_suspended":
+    if code == ErrorCode.ACCOUNT_SUSPENDED:
         return (
             "CaptchaKraken: this account is suspended, so solving is disabled. "
             f"Contact support at {url or _SUPPORT}."
         )
 
-    if code == "request_too_large":
+    if code == ErrorCode.REQUEST_TOO_LARGE:
         return (
             "CaptchaKraken: the screenshot sent for this solve exceeded the request "
             f"size limit. ({message}) Capture the captcha element rather than the "
             "whole page if you are not already."
         )
 
-    if code in ("missing_api_key", "invalid_api_key"):
+    if code in (ErrorCode.MISSING_API_KEY, ErrorCode.INVALID_API_KEY):
         return (
             "CaptchaKraken: the API key was missing or not accepted. Set "
             "CAPTCHA_KRAKEN_API_KEY, or run the CaptchaKraken MCP server's "
@@ -143,49 +97,18 @@ def _sentence(code: str, message: str, url: Optional[str], retry: Optional[float
             f"Manage keys at {url or _DASHBOARD}."
         )
 
-    if code == "upstream_unavailable":
+    if code == ErrorCode.UPSTREAM_UNAVAILABLE:
         return (
             "CaptchaKraken: the solver fleet is temporarily unreachable. This is on "
             "our side, not yours — retry shortly."
         )
 
-    # The two LICENSED-MODEL refusals. Both are 'you named a model', and they
-    # are separate codes because the fix is completely different: one is a
-    # licence to obtain, the other is a fleet that has not started serving yet
-    # and nothing for the caller to do. Generic prose collapses them into "the
-    # solve failed", which is the reading that sends someone to buy a licence
-    # they already hold.
-    if code == "model_not_licensed":
-        return (
-            "CaptchaKraken: the model this request named is licensed, and this "
-            "account is not licensed for it. The request was refused rather than "
-            "answered by a different model — a silent substitution would be a "
-            "score you could not explain. Unset CAPTCHA_LORA_NAME (or the "
-            f"client's `model`) to use the standard hosted model. {message} "
-            f"Licensing: {url or _SUPPORT}."
-        )
-
-    if code == "model_not_serving":
-        return (
-            "CaptchaKraken: this account IS licensed for the model it named, but "
-            "the fleet is not serving it yet. Nothing is wrong with your account "
-            "and there is nothing to buy. Unset CAPTCHA_LORA_NAME (or the "
-            f"client's `model`) to use the standard hosted model meanwhile. {message}"
-        )
-
-    # `unrecognized_prompt`, `invalid_request`, and anything added after this was
-    # written. The server's own message is the best thing available, so it is
-    # carried through verbatim rather than replaced with a guess.
+    # Anything added after this was written: the server's message is the best thing available.
     tail = f" See {url}." if url else ""
     return f"CaptchaKraken: {message}{tail}"
 
 
 def from_response(resp: Any, url: str) -> Exception:
-    """Build the exception for a non-OK response, hosted or self-hosted.
-
-    Returns rather than raises so the caller's `raise` keeps the traceback
-    anchored at the request site, where it is useful.
-    """
     body_text = (getattr(resp, "text", "") or "")[:300]
     status = getattr(resp, "status_code", None)
 
@@ -194,7 +117,7 @@ def from_response(resp: Any, url: str) -> Exception:
         parsed = resp.json()
         if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
             error = parsed["error"]
-    except Exception:  # noqa: BLE001 — a non-JSON body is the self-hosted case
+    except Exception:
         error = {}
 
     code = error.get("code")
@@ -210,8 +133,7 @@ def from_response(resp: Any, url: str) -> Exception:
             retry_after_seconds=retry,
         )
 
-    # No gateway envelope: a local vLLM, a proxy in between, or an HTML error
-    # page. Keep the pre-existing message so self-hosted debugging is unchanged.
+    # No gateway envelope: a local vLLM, a proxy, or an HTML error page. Self-hosted debugging is unchanged.
     hint = ""
     if status in (401, 403):
         hint = " — check CAPTCHA_KRAKEN_API_KEY is set and forwarded to the CLI"

@@ -1,17 +1,5 @@
-"""A ROUTED model picks its adapter per prompt family; nothing else changes.
+"""`text` is left out of the fixture map on purpose: the day that family reached ckgate without a marker, refusing it cost every distorted-text solve in production for a day. An unknown pin raises; arms are never public; the routed models are spelled out so a second one needs an edit."""
 
-Three properties, and the third is the one that matters most:
-
-1. A routed model sends a DIFFERENT adapter name per family, chosen by the
-   family the request is about to prompt in — the router is the prompt family
-   and it needs no help from the caller (docs/MOE_LORA_DESIGN.md §11).
-2. A pin overrides that, and a pin that cannot mean anything RAISES rather than
-   quietly measuring the generalist and reporting it as the expert.
-3. EVERY MODEL PUBLISHED SO FAR IS UNROUTED, and for those the bytes on the
-   wire are identical to what they were before this mechanism existed. That is
-   the whole backwards-compatibility claim, so it is asserted against the real
-   shipped registry rather than a fixture.
-"""
 import json
 import os
 from pathlib import Path
@@ -50,8 +38,6 @@ def routed(monkeypatch):
     prompts.clear_cache()
 
 
-# ── 1. routing by family ────────────────────────────────────────────────────
-
 def test_each_family_reaches_its_own_expert(routed):
     assert prompts.route("routed", "grid") == "routed-grid"
     assert prompts.route("routed", "pixel") == "routed-general"
@@ -59,12 +45,6 @@ def test_each_family_reaches_its_own_expert(routed):
 
 
 def test_an_unmapped_family_falls_back_to_the_generalist_not_an_error(routed):
-    """`text` is deliberately absent from the fixture's map.
-
-    The day the generation-2 `text` family reached ckgate without a marker,
-    refusing it cost every distorted-text solve in production for a day. A
-    family with no expert is answered by the model the caller named.
-    """
     assert prompts.route("routed", "text") == "routed"
 
 
@@ -74,8 +54,6 @@ def test_an_unrecognised_family_falls_back_too(routed):
 
 
 def test_the_expert_name_resolves_to_the_same_prompts_and_band(routed):
-    """The name that goes ON THE WIRE has to resolve, or every routed solve
-    resolves its prompts by guessing."""
     for name in ("routed", "routed-grid", "routed-general", "routed-video"):
         assert prompts.canonical_model_id(name) == "Acme/Routed"
         assert prompts.resolve(name).version == "2"
@@ -88,11 +66,8 @@ def test_an_unknown_family_key_in_the_registry_is_dropped(routed, monkeypatch):
     prompts.clear_cache()
     monkeypatch.setattr(prompts, "_load_registry", lambda: bad)
     assert "gird" not in prompts.experts("routed")
-    # and the typo never reaches the wire
     assert prompts.route("routed", "gird") == "routed"
 
-
-# ── 2. the pin ──────────────────────────────────────────────────────────────
 
 def test_a_pin_overrides_the_family(routed):
     assert prompts.route("routed", "video", pin="grid") == "routed-grid"
@@ -104,7 +79,6 @@ def test_an_unknown_pin_raises(routed):
 
 
 def test_a_pin_against_an_unrouted_model_raises(routed):
-    """Silently ignoring it would report the generalist's score as an expert's."""
     with pytest.raises(ValueError, match="declares no experts"):
         prompts.route("plain", "grid", pin="grid")
 
@@ -118,12 +92,6 @@ def test_the_env_pin_is_read_and_an_empty_one_is_unset(monkeypatch):
     assert prompts.expert_pin() == "grid"
 
 
-# ── 3. the shipped registry is unrouted, and stays byte-identical ───────────
-
-#: The one routed model in the shipped registry. Spelled out so that a SECOND
-#: one cannot appear without someone editing this line — registering experts is
-#: part of publishing a routed model, and the publish commit is where the arms'
-#: prompt generation and pixel band get confirmed against their run records.
 ROUTED_IN_REGISTRY = {"CaptchaKraken/Abyss"}
 
 
@@ -134,18 +102,6 @@ def test_only_the_declared_routed_models_are_routed():
 
 
 def test_abyss_routes_all_four_families_to_distinct_experts():
-    """Four families, four names, and every one of them resolvable — that last
-    part is what the release parity gate gates and what keeps a routed solve
-    from resolving its prompts by guessing.
-
-    Resolvable is NOT "resolves to the router". The arms started as four
-    aliases onto `CaptchaKraken/Abyss` because none of them had weights; an arm
-    that has trained and been uploaded has a repo id of its own, and aliasing a
-    real, separately fetchable adapter onto another model's entry would be the
-    mispairing this registry exists to prevent. What has to hold — and what the
-    parity gate enforces — is that every arm lands on a REGISTERED entry
-    declaring the router's prompt generation and pixel band.
-    """
     prompts.clear_cache()
     mapping = prompts.experts("abyss")
     assert set(mapping) == set(prompts.PROMPT_FAMILIES)
@@ -157,16 +113,6 @@ def test_abyss_routes_all_four_families_to_distinct_experts():
 
 
 def test_no_expert_arm_is_public():
-    """An arm is one expert of a proprietary mixture, and it is a 9B like every
-    PUBLISHED model — so nothing about the weights themselves tells them apart.
-    `availability` is the only thing that does, and it must be non-public for
-    every arm however each one is registered.
-
-    `private` and `licensed` are both acceptable here and mean different
-    things: `private` says the bytes are in a private Hub repo an authorised
-    token opens, `licensed` says there is no repo at all. What is refused is
-    `public`, which is the one value that cannot be taken back.
-    """
     prompts.clear_cache()
     assert prompts.is_licensed("abyss"), "the router itself must not be public"
     for name in prompts.experts("abyss").values():
@@ -180,19 +126,12 @@ def test_an_unrouted_model_returns_the_name_it_was_given():
             assert prompts.route(name, family) == name
 
 
-#: The release gate lives in the PRIVATE training repo, which this one is a
-#: The release-side parity gate holds its own copy of PROMPT_FAMILIES, and the
-#: two can drift. Point CAPTCHA_PARITY_GATE at that file to check them against
-#: each other; without it this skips, because a clone of this repo alone has
-#: no second copy to disagree with.
 _GATE = Path(os.environ.get("CAPTCHA_PARITY_GATE") or "/nonexistent")
 
 
 @pytest.mark.skipif(not _GATE.is_file(),
                     reason="set CAPTCHA_PARITY_GATE to check the release gate's copy")
 def test_prompt_families_match_the_release_gate():
-    """Two copies, because the gate reads the client by AST and cannot import
-    it. Same reason AVAILABILITIES is spelled out twice."""
     import ast
     tree = ast.parse(_GATE.read_text(encoding="utf-8"))
     found = None

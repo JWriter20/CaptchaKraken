@@ -1,9 +1,11 @@
 {
   "python": {
-    "version": "2.9.0",
+    "version": "3.0.0",
     "exports": [
+      "ActionKind",
       "ActionPlanner",
       "AppiumTouchBackend",
+      "Availability",
       "CaptchaAction",
       "CaptchaKrakenAPIError",
       "CaptchaSolver",
@@ -11,37 +13,51 @@
       "CdpTouchBackend",
       "ClickAction",
       "DragAction",
+      "ErrorCode",
+      "HumanizationMode",
       "Humanizer",
       "ImageProcessor",
+      "KeyframeMode",
       "MobileHumanizer",
       "MouseHumanizer",
       "NullHumanizer",
+      "Outcome",
       "PageSolver",
+      "PauseKind",
+      "PromptFamily",
+      "RetryMode",
+      "SELECTORS",
       "SolveResult",
       "TouchBackend",
       "TouchscreenTouchBackend",
       "TypeAction",
+      "Vendor",
+      "VendorSelectors",
       "WaitAction",
       "add_overlays_to_image",
       "solve_captcha",
       "solve_captcha_on_page"
     ],
     "signatures": {
-      "solve_captcha": "(media_path, instruction='', *, puzzle_source='unknown', retry_mode=None, text_mode=False, **kwargs)",
+      "solve_captcha": "(media_path, instruction='', *, puzzle_source=<Vendor.UNKNOWN: 'unknown'>, retry_mode=None, text_mode=False, **kwargs)",
       "CaptchaSolver.__init__": "(self, model=None, provider='captchaKrakenApi', api_key=None, expert=None)",
-      "CaptchaSolver.solve": "(self, media_path, instruction='', puzzle_source='unknown', retry_mode=None, text_mode=False)",
+      "CaptchaSolver.solve": "(self, media_path, instruction='', puzzle_source=<Vendor.UNKNOWN: 'unknown'>, retry_mode=None, text_mode=False)",
       "CaptchaSolver.solve_keyframes": "(self, keyframe_paths)",
       "PageSolver.__init__": "(self, config=None, solver=None, **solver_kwargs)",
       "PageSolver.solve": "(self, page)",
       "PageSolver.watch": "(self, page, **options)",
       "solve_captcha_on_page": "(page, **kwargs)",
       "CaptchaKrakenAPIError.__init__": "(self, message, *, status=None, code=None, resolution_url=None, retry_after_seconds=None)",
-      "add_overlays_to_image": "(image_path, boxes, output_path=None, label_position='top-left')",
+      "add_overlays_to_image": "(image_path, boxes, output_path=None, label_position=<LabelPosition.TOP_LEFT: 'top-left'>)",
       "humanize.resolve": "(config)"
     },
     "page_solver_config_fields": [
       "animated_challenge_after_ms",
+      "animated_motion_streak",
       "animated_probe_enabled",
+      "board_paint_floor",
+      "board_paint_poll_ms",
+      "board_paint_timeout_ms",
       "element_screenshot_timeout_ms",
       "expert",
       "grid_load_poll_interval_ms",
@@ -71,7 +87,6 @@
       "settle_poll_ms",
       "settle_timeout_ms",
       "slide_max_corrections",
-      "slide_probe_offsets_px",
       "slide_tolerance_px",
       "speculative_burst_enabled",
       "stale_element_backoff_ms",
@@ -100,6 +115,8 @@
       "credentials_path",
       "extra_serve_args",
       "gpu_memory_utilization",
+      "hosted_hosts",
+      "is_hosted_endpoint",
       "lora_adapter",
       "lora_name",
       "lora_revision",
@@ -114,8 +131,6 @@
       "insufficient_credits",
       "invalid_api_key",
       "missing_api_key",
-      "model_not_licensed",
-      "model_not_serving",
       "rate_limited",
       "request_too_large",
       "solve_abandoned",
@@ -130,28 +145,22 @@
   "cli": {
     "entry_point": "captchakraken = captchakraken.cli:main",
     "subcommands": [
+      "board-painted",
       "check-movement",
-      "check-movement-batch",
       "detect-selected",
       "fetch",
       "find-checkbox",
       "find-grid",
-      "find-movable",
-      "find-move",
       "get-numbered-grid",
       "grid-cell-states",
       "grid-cell-states-fixed",
-      "is-cell-changing",
-      "is-cell-selected",
-      "is-empty-cell",
       "match-region",
       "report-outcome",
       "serve",
       "server",
       "solve-animated",
       "track-piece",
-      "update",
-      "wait-for-cell-loaded"
+      "update"
     ],
     "solve_parser": [
       "--expert",
@@ -181,7 +190,6 @@
       "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_DEBUG": [
-      "js/src/solver.ts",
       "python/src/captchakraken/page_solver.py",
       "python/src/captchakraken/planner.py",
       "python/src/captchakraken/server_manager.py",
@@ -189,6 +197,9 @@
     ],
     "CAPTCHA_EXPERT": [
       "python/src/captchakraken/prompts.py"
+    ],
+    "CAPTCHA_HOSTED_HOSTS": [
+      "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_HUMANIZATION": [
       "js/src/humanize.ts",
@@ -233,6 +244,7 @@
       "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_LORA_NAME": [
+      "js/src/solver.ts",
       "python/src/captchakraken/config.py"
     ],
     "CAPTCHA_LORA_REVISION": [
@@ -276,6 +288,7 @@
       "python/src/captchakraken/config.py"
     ],
     "VLLM_BASE_URL": [
+      "js/src/solver.ts",
       "python/src/captchakraken/config.py"
     ],
     "VLLM_EXTRA_ARGS": [
@@ -336,7 +349,7 @@
       "",
       "python_only_config: solver knobs the Python PageSolverConfig has and",
       "CaptchaKrakenConfig does not, so the behaviour is unreachable from JS.",
-      "The three `slide_*` ones are the slider correction loop; a JS caller",
+      "The two `slide_*` ones are the slider correction loop; a JS caller",
       "cannot tune it. `max_unsupported_resolves`, `max_stale_frame_resolves`",
       "and `stale_frame_resolve_enabled` DO exist in TS — spelled `Re`Solves,",
       "which is not the snake->camel transform every other field follows, so a",
@@ -353,7 +366,6 @@
       "max_stale_frame_resolves",
       "max_unsupported_resolves",
       "slide_max_corrections",
-      "slide_probe_offsets_px",
       "slide_tolerance_px",
       "stale_frame_resolve_enabled"
     ],
@@ -378,6 +390,7 @@
       "bin": null,
       "files": [
         "dist",
+        "NOTICE",
         "python",
         "scripts",
         "AGENTS.md",
@@ -386,18 +399,35 @@
       "postinstall": "node scripts/setup-python.js"
     },
     "exports": [
+      "ActionKind",
       "AppiumTouchBackend",
       "BaseHumanizer",
       "CaptchaKrakenAPIError",
       "CaptchaKrakenSolver",
       "CdpTouchBackend",
+      "ErrorCode",
+      "FrameRole",
       "HUMANIZATION_MODES",
+      "HumanizationMode",
+      "KeyframeMode",
       "MobileHumanizer",
       "MouseHumanizer",
       "NullHumanizer",
+      "Outcome",
       "PAUSE_KINDS",
+      "PaintVerdict",
+      "PauseKind",
+      "Phase",
+      "PromptFamily",
+      "RecaptchaBanner",
+      "RetryMode",
+      "SELECTORS",
+      "SettleVerdict",
+      "SolveStage",
       "TouchscreenTouchBackend",
+      "Vendor",
       "fromPuppeteer",
+      "isOneOf",
       "resolveHumanizer",
       "resolveLoraName",
       "touchBackendFor",
@@ -410,7 +440,11 @@
     ],
     "config_fields": [
       "animatedChallengeAfterMs",
+      "animatedMotionStreak",
       "apiKey",
+      "boardPaintFloor",
+      "boardPaintPollMs",
+      "boardPaintTimeoutMs",
       "elementScreenshotTimeoutMs",
       "expert",
       "gridLoadPollIntervalMs",
@@ -470,8 +504,6 @@
       "invalid_api_key",
       "invalid_request",
       "missing_api_key",
-      "model_not_licensed",
-      "model_not_serving",
       "rate_limited",
       "request_too_large",
       "solve_abandoned",
