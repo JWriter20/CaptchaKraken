@@ -187,6 +187,14 @@ export class CaptchaKrakenSolver {
   private resampleLevel = 0;
   /** The recording `classifyByRecording` started and left running for the branch below to finish or drop. */
   private pendingBurst: ReturnType<CaptchaKrakenSolver['startKeyframeBurst']> | null = null;
+  /**
+   * The camera on the animated board in front of us, running across rounds until that board is gone.
+   *
+   * Distinct from `pendingBurst`, which is the speculative film one round starts and the same round spends.
+   * This one outlives a rejected answer on purpose: it is the only thing that can give the next ask a
+   * different question to answer, since the answer itself is deterministic at temperature 0.
+   */
+  private animatedFilm: ReturnType<CaptchaKrakenSolver['startKeyframeBurst']> | null = null;
   private lastBurstFps: number | null = null;
   private actedOnBoard = false;
   private lastSubmitFrameHash: string | null = null;
@@ -229,6 +237,8 @@ export class CaptchaKrakenSolver {
       return result;
     } finally {
       if (timingsEnabled()) console.error(this.budget!.report());
+      // The camera outlives a round by design, so it has to be ended by the thing that outlives the solve.
+      await this.stopAnimatedFilm();
       this.teardownCvWorker();
       this.cvWorkerReady = null;
       this.reportOutcome(this.solveSessionId, solvedForReport);
@@ -263,6 +273,7 @@ export class CaptchaKrakenSolver {
     this.stepIndex = 0;
     this.solveStartMs = start;
     await this.human.reset(page);
+    await this.stopAnimatedFilm();
     this.resetSolveState();
     const done = (): SolveResult => ({ isSolved: true, finalMousePosition: this.lastMousePosition, tokenUsage: aggregateTokenUsage(cumulativeTokenUsage) });
 
@@ -493,16 +504,23 @@ export class CaptchaKrakenSolver {
       const ask = (imagePath: string) => this.getSolution(imagePath, puzzleSource, retryMode, textMode);
       const askAnimated = () => this.ph(Phase.INFERENCE, () => this.withIdleWander(page, captchaElement, () => this.getAnimatedSolution(burstDir as string)));
       if (isAnimated) {
+        // The camera was paused while the last answer was performed; from here the board is its own again.
+        this.animatedFilm?.resume();
         if (this.animatedPlan) {
           burstDir = this.animatedPlan.burstDir;
           response = this.animatedPlan.response;
           console.log('[animated] reusing the recorded answer — same board, same screens');
         } else {
-          const rec = this.pendingBurst ?? this.startKeyframeBurst(captchaElement);
+          const rec = this.animatedFilm ?? this.pendingBurst ?? this.startKeyframeBurst(captchaElement, true);
           this.pendingBurst = null;
-          const film = await this.ph(Phase.BURST, () => rec.finish());
+          // First slice of a board waits for it to show a cycle or settle; a later one does not, because the
+          // camera has been running through the whole previous round and already holds more than that.
+          const first = this.animatedFilm !== rec;
+          if (first) await this.ph(Phase.BURST, () => rec.settledOrCycled());
+          const film = await rec.snapshot();
           if (probing) this.knownAnimated = film.moved;
           if (!probing || film.moved) {
+            this.animatedFilm = rec;
             burstDir = film.dir;
             response = await askAnimated();
             this.animatedPlan = { burstDir, response };
@@ -513,6 +531,8 @@ export class CaptchaKrakenSolver {
             const rested = rec.stableFrame();
             if (rested && fs.existsSync(rested)) fs.copyFileSync(rested, screenshotPath);
             rmdir(film.dir);
+            if (this.animatedFilm === rec) this.animatedFilm = null;
+            await rec.abandon();
             isAnimated = false;
           }
         }
@@ -568,8 +588,17 @@ export class CaptchaKrakenSolver {
       console.log('[answer] ' + JSON.stringify({ actions: actionList }));
       // A repeated answer is not re-performed: the widget already refused it, and every extra press is
       // behaviour a vendor scores. Re-asking with a fresh sample or a recording is the round's only move.
-      if (this.noteAnswer(actionList, retryMode)) return { didInteract: false, tokenUsage: allTokenUsage };
+      if (this.noteAnswer(actionList, retryMode)) {
+        // For an animated board that re-ask is only possible if the plan goes: the stored answer is
+        // identical by construction, so keeping it would hand the fence the same signature three rounds
+        // running. Dropping it sends the next round back to a film that is now a whole round longer.
+        this.discardAnimatedPlan();
+        return { didInteract: false, tokenUsage: allTokenUsage };
+      }
       console.log(`Executing ${actionList.length} actions.`);
+      // Stop filming before we touch it. Everything from here to the vendor's verdict is our own answer
+      // landing, and a frame of the board wearing our clicks is not a screen the board ever showed.
+      this.animatedFilm?.pause();
 
       for (const action of actionList) {
         if (action.action === ActionKind.CLICK) {
@@ -1147,20 +1176,35 @@ export class CaptchaKrakenSolver {
    * recording an animated answer is sliced from. Every window is wall-clock. A cycle is a screen that
    * comes back; a board that shows nothing new for a floor window has settled. There is deliberately no
    * "enough screens, stop" exit: measured on number_with_highest_value_video it failed every seed either way.
+   *
+   * `continuous` keeps the camera rolling past the first answer, for the whole solve. A one-shot burst can
+   * only ever show the model the screens that happened to fall inside its window — measured, a 4s burst
+   * against a 5.3s cycle showed two screens of three, and when the answer lived on the third there was no
+   * second chance, because the reused answer is identical by construction. Filming on means every later
+   * round slices a STRICTLY LONGER film: more repetitions for `_detect_cycle` to confirm against, and, on a
+   * board that never repeats, six evenly-spread picks across the whole solve instead of across four seconds.
    */
-  private startKeyframeBurst(captchaElement: ElementHandle): {
+  private startKeyframeBurst(captchaElement: ElementHandle, continuous = false): {
     moved: () => boolean;
     screensSeen: () => number;
     stableFrame: () => string | null;
     ready: () => Promise<SettleVerdict>;
     verdict: () => Promise<boolean>;
+    settledOrCycled: () => Promise<void>;
+    pause: () => void;
+    resume: () => void;
+    snapshot: () => Promise<{ dir: string; moved: boolean }>;
     abandon: () => Promise<void>;
     finish: () => Promise<{ dir: string; moved: boolean }>;
   } {
     const cfg = this.config;
     const fps = Math.max(1, cfg.videoBurstFps ?? 10);
     const floorMs = cfg.videoBurstDurationMs ?? 4000;
-    const ceilingMs = Math.max(floorMs, cfg.videoBurstMaxMs ?? 12_000);
+    // A continuous film ends with the solve, not on its own clock. The ceiling stays as a safety net so a
+    // widget that never stops changing cannot fill a disk; it is not the working limit.
+    const ceilingMs = continuous
+      ? Math.max(floorMs, cfg.videoFilmMaxMs ?? 120_000)
+      : Math.max(floorMs, cfg.videoBurstMaxMs ?? 12_000);
     const intervalMs = 1000 / fps;
     const t0 = Date.now();
     let nextAt = t0;
@@ -1176,17 +1220,31 @@ export class CaptchaKrakenSolver {
     let cycleClosed = false;
     let stopped = false;
     let runToEnd = false;
+    let paused = false;
+    let hangAt = hangDeadline;
+    // Names are contiguous across a pause and across a dropped frame, because the slicer sorts by name and
+    // spaces what it finds evenly. A gap in the numbering would tell it the board held a screen it never held.
+    let seq = 0;
 
     const loop = (async () => {
       for (let i = 0; elapsed() < ceilingMs && !stopped; i++) {
-        if (Date.now() > hangDeadline) {
+        if (paused) {
+          // The camera stays alive but films nothing: the next frames would be OUR answer landing, and a
+          // board carrying our own clicks is not a screen the board ever showed on its own.
+          await delay(intervalMs);
+          nextAt = Date.now();
+          hangAt = Date.now() + burstHangDeadlineMs(cfg);
+          continue;
+        }
+        if (Date.now() > hangAt) {
           console.warn(`[animated] the recording stalled: ${captured} frames in ${burstHangDeadlineMs(cfg)}ms — the widget is not screenshotting`);
           break;
         }
-        const frame = path.join(dir, `frame_${String(i).padStart(4, '0')}.png`); // zero-padded: the slicer sorts by name
+        const frame = path.join(dir, `frame_${String(seq).padStart(4, '0')}.png`); // zero-padded: the slicer sorts by name
         try {
           await this.shot(captchaElement, frame, cfg.elementScreenshotTimeoutMs ?? 8000, 'allow');
           captured++;
+          seq++;
           lastFrame = frame;
           try {
             const d = sha1(frame);
@@ -1198,12 +1256,14 @@ export class CaptchaKrakenSolver {
             }
           } catch { /* no digest, no early stop */ }
         } catch { /* a dropped frame costs a sample, not the recording */ }
+        // A continuous film reaches these same conditions and keeps rolling: they are what makes a SNAPSHOT
+        // ready to slice, not what makes the recording over. `settledOrCycled()` reads them without stopping.
         const elapsedMs = elapsed();
-        if (runToEnd && elapsedMs >= floorMs && elapsedMs - lastNewMs >= floorMs) {
+        if (!continuous && runToEnd && elapsedMs >= floorMs && elapsedMs - lastNewMs >= floorMs) {
           console.log(`[animated] no new screen for ${(floorMs / 1000).toFixed(1)}s (${order.length} seen) — the board has settled; stopping the burst`);
           break;
         }
-        if (runToEnd && cycleClosed && elapsedMs >= floorMs) {
+        if (!continuous && runToEnd && cycleClosed && elapsedMs >= floorMs) {
           console.log(`[animated] cycle closed after ${(elapsedMs / 1000).toFixed(1)}s (${order.length} screens); stopping the burst`);
           break;
         }
@@ -1254,6 +1314,55 @@ export class CaptchaKrakenSolver {
         if (!moved && (ended || stopped)) why = ended ? 'the recording ended' : 'abandoned';
         console.log(`[animated] burst verdict after ${(elapsed() / 1000).toFixed(1)}s: ${moved ? 'ANIMATED' : 'still'} (${order.length} screens; ${why})`);
         return moved;
+      },
+
+      /**
+       * Resolve once the film holds something worth slicing: a closed cycle, or a board that has shown
+       * nothing new for a floor window. The same two conditions `finish()` stops on — read, not acted on,
+       * so a continuous film can be sliced repeatedly without ever being ended.
+       */
+      settledOrCycled: async () => {
+        runToEnd = true;
+        while (!ended && !stopped) {
+          const elapsedMs = elapsed();
+          if (elapsedMs >= floorMs && (cycleClosed || elapsedMs - lastNewMs >= floorMs)) return;
+          await delay(intervalMs);
+        }
+      },
+
+      pause: () => { paused = true; },
+      resume: () => { paused = false; nextAt = Date.now(); hangAt = Date.now() + burstHangDeadlineMs(cfg); },
+
+      /**
+       * A stable copy of everything filmed so far, WITHOUT ending the recording.
+       *
+       * Hardlinked rather than copied: the slicer wants a directory it can sort by name and read to the end,
+       * and handing it the live one would have it read a directory being written underneath it — a frame
+       * half-flushed reads as a corrupt PNG, and a frame arriving mid-sort shifts every index after it.
+       * Links are near-free on the same filesystem, which is why this can be afforded once a round.
+       */
+      snapshot: async () => {
+        if (cfg.videoSolveEnabled !== false && !this.videoBudgetGranted) {
+          this.videoBudgetGranted = true;
+          this.videoBudgetMs = (cfg.videoBurstMaxMs ?? 12_000) + (cfg.keyframeWaitTimeoutMs ?? SOLVE_DEFAULTS.keyframeWaitTimeoutMs) + (cfg.videoExtraInferenceMs ?? 8000);
+        }
+        const names = fs.readdirSync(dir).filter((f) => f.endsWith('.png')).sort();
+        if (!names.length) {
+          const e: any = new Error('ANIMATED_CHALLENGE: could not record the animated challenge (no frame screenshotted).');
+          e.animated = true;
+          throw e;
+        }
+        const out = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_slice_'));
+        // The LAST name can be the frame currently being written. Dropping it costs one sample and removes
+        // the only torn read this can have.
+        for (const n of names.slice(0, -1)) {
+          try { fs.linkSync(path.join(dir, n), path.join(out, n)); } catch { fs.copyFileSync(path.join(dir, n), path.join(out, n)); }
+        }
+        const burstMs = Math.max(1, elapsed());
+        this.lastBurstFps = captured / (burstMs / 1000);
+        const animating = order.length > BURST_ANIMATED_SCREENS && burstMs - lastNewMs < floorMs;
+        console.log(`[animated] sliced ${names.length - 1} of ${captured} frames filmed over ${(burstMs / 1000).toFixed(1)}s (${order.length} screens) -> ${out}`);
+        return { dir: out, moved: cycleClosed || animating };
       },
 
       abandon: async () => {
@@ -1374,6 +1483,7 @@ export class CaptchaKrakenSolver {
           if (polls >= NOT_THIS_BOARD_POLLS && best > NOT_THIS_BOARD_DIFF) {
             console.log(`[animated] the widget no longer resembles the recorded board (best diff=${best.toFixed(4)} over ${polls} polls); not waiting out the budget`);
             this.discardAnimatedPlan();
+            await this.stopAnimatedFilm();
             return false;
           }
         } catch { /* a failed probe is one lost poll */ }
@@ -1383,6 +1493,7 @@ export class CaptchaKrakenSolver {
       unlink(probe);
     }
     this.discardAnimatedPlan();
+    await this.stopAnimatedFilm();
     console.log(`[animated] widget never matched the chosen keyframe within ${timeout}ms (closest diff=${best.toFixed(4)}); clicking on the model's coordinates anyway, and recording afresh next round`);
     return false;
   }
@@ -1443,10 +1554,28 @@ export class CaptchaKrakenSolver {
     return fresh;
   }
 
+  /**
+   * Drop the ANSWER, keep the camera.
+   *
+   * The two are deliberately separable. An answer the widget refused is spent — reusing it just presses the
+   * same wrong thing until the no-progress fence trips, three rounds in, with half the budget unspent. The
+   * film is the opposite: every second it keeps running makes the next slice a better question. So a
+   * refusal discards this and leaves `animatedFilm` alone; only a board that is GONE stops the camera.
+   */
   private discardAnimatedPlan(): void {
     const dir = this.animatedPlan?.burstDir;
     this.animatedPlan = null;
     if (dir && fs.existsSync(dir)) rmdir(dir);
+  }
+
+  /** The board is gone: its film can never describe the next one, so end it and free the frames. */
+  private async stopAnimatedFilm(): Promise<void> {
+    const film = this.animatedFilm;
+    this.animatedFilm = null;
+    // The plan's slice goes too. This runs from the solve's `finally`, so on a thrown solve it is the only
+    // thing that will, and a slice directory left behind is frames on what is a tmpfs on plenty of boxes.
+    this.discardAnimatedPlan();
+    if (film) await film.abandon();
   }
 
   /** Static or animated, decided by filming once. The film stays running for the branch that uses it. */

@@ -99,6 +99,7 @@
       "video_burst_fps",
       "video_burst_max_ms",
       "video_extra_inference_ms",
+      "video_film_max_ms",
       "video_solve_enabled"
     ],
     "solve_result_fields": [
@@ -490,6 +491,7 @@
       "videoBurstFps",
       "videoBurstMaxMs",
       "videoExtraInferenceMs",
+      "videoFilmMaxMs",
       "videoSolveEnabled"
     ],
     "solve_result_fields": [

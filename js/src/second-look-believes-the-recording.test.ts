@@ -31,7 +31,12 @@ function probing(moved: boolean, classified: string = 'settled'): { solver: any;
       screensSeen: () => (moved ? 7 : 1),
       stableFrame: () => rested,
       verdict: async () => moved,
+      settledOrCycled: async () => {},
+      pause: () => {},
+      resume: () => {},
       abandon: async () => {},
+      // The camera does not stop to be sliced: `snapshot` is what `finish` used to be, minus the ending.
+      snapshot: async () => { fs.writeFileSync(rested, 'the screen it came to rest on'); return { dir, moved }; },
       finish: async () => { fs.writeFileSync(rested, 'the screen it came to rest on'); return { dir, moved }; },
     };
   };
