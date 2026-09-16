@@ -241,3 +241,46 @@ test('a board that did not change is still re-asked over the whole film', async 
     + 'coming back was never replaced, so its film is read whole');
   await solver.stopAnimatedFilm();
 });
+
+test('a board that never repeats a screen is not mistaken for a new board', async () => {
+  // hCaptcha's continuous animations never show the same screen twice, so "a screen from before the answer
+  // came back" can never be proved for them — and a cut on the ABSENCE of that proof threw the whole film
+  // away every round and waited out the burst ceiling to do it. Measured: 110.3s and 78.4s boards against a
+  // 49s gate ceiling. A replacement has to be PROVED, not assumed.
+  const asks: number[] = [];
+  const solver: any = new CaptchaKrakenSolver({
+    videoBurstDurationMs: 120,
+    videoBurstMaxMs: 3_000,     // the ceiling this must not wait out on the re-ask
+    videoFilmMaxMs: 60_000,
+    videoBurstFps: 50,
+    speculativeBurstEnabled: false,
+  });
+  let n = 0;
+  solver.answerBox = async () => null;
+  solver.classifyByRecording = async () => 'animated';
+  solver.isCaptchaSolved = async () => false;
+  solver.waitForBoardPainted = async () => ({ waitedMs: 0 });
+  solver.getVerifyButton = async () => null;
+  solver.captchaFrameChangedSince = async () => false;
+  solver.executeClick = async () => {};
+  solver.emitStep = async () => {};
+  solver.shot = async (_el: any, dest: string) => fs.writeFileSync(dest, `unique-${n++}`);
+  solver.getSolution = async () => ANSWER;
+  solver.getAnimatedSolution = async (dir: string) => { asks.push(fs.readdirSync(dir).length); return ANSWER; };
+
+  await solver.solveSingle({}, WIDGET, 1, null);
+  await verdictWait();
+  await solver.solveSingle({}, WIDGET, 2, null);
+  await verdictWait();
+  const t0 = Date.now();
+  await solver.solveSingle({}, WIDGET, 3, null);
+  const reaskMs = Date.now() - t0;
+
+  assert.equal(asks.length, 2, 'the refused answer was re-pressed instead of re-asked');
+  assert.ok(asks[1] > asks[0],
+    `the re-ask saw ${asks[1]} frames against the first ask's ${asks[0]}; a board that never repeats a screen `
+    + 'has not been replaced, it has simply never repeated, and its film is the only record of it');
+  assert.ok(reaskMs < 2_500,
+    `the re-ask waited ${reaskMs}ms out of a 3000ms burst ceiling for a cycle that is never coming`);
+  await solver.stopAnimatedFilm();
+});

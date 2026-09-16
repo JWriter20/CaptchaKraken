@@ -49,7 +49,7 @@ def _burst(monkeypatch, payloads: Sequence[bytes], work_ms: Sequence[float] = ()
 
     monkeypatch.setattr(solver, "_screenshot", fake_shot)
     monkeypatch.setattr(cv2, "imread", lambda p: np.zeros((4, 4, 3), dtype=np.uint8))
-    frames, _order, _closed, burst_ms = solver._burst(object())
+    frames, _order, _moved, burst_ms, _cycled = solver._burst(object())
     return len(frames), burst_ms, captured
 
 

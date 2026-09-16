@@ -328,6 +328,9 @@ class PageSolver:
         # The digests of every screen the film holds: what a later burst is checked against to answer
         # "is this still the same board?" — see `_record_keyframes`.
         self._film_digests: Set[str] = set()
+        # Has this board EVER shown the same screen twice? A board that has not cannot prove it was replaced
+        # and has no cycle left to find, so a re-ask neither re-films it at length nor throws its film away.
+        self._film_cycled: bool = False
         self._reset_animated_state()
 
     @property
@@ -1060,14 +1063,15 @@ class PageSolver:
         return (cfg.video_solve_enabled and cfg.speculative_burst_enabled and not self._acted_on_board
                 and puzzle_source != Vendor.RECAPTCHA and not text_mode)
 
-    def _burst(self, element: Any, known: AbstractSet[str] = frozenset()) -> Tuple[List[Any], List[str], bool, float]:
+    def _burst(self, element: Any, known: AbstractSet[str] = frozenset(),
+               max_ms: Optional[float] = None) -> Tuple[List[Any], List[str], bool, float, bool]:
         """Film the widget until a screen comes back (a cycle) or nothing new appears for a floor window.
 
         `known` is the screens an earlier burst of this solve already holds. One of them coming back proves
         the board was not replaced, and the film in hand already describes it, so there is nothing left to
         film — that exit is the difference between a re-ask costing a frame and costing a whole window.
 
-        Returns `(frames, distinct_digests, moved, elapsed_ms)`. `moved` is a closed cycle OR a board still
+        Returns `(frames, distinct_digests, moved, elapsed_ms, cycle_closed)`. `moved` is a closed cycle OR a board still
         producing new screens past the floor with more than BURST_ANIMATED_SCREENS seen: a continuous animation
         never repeats and never settles, so without that verdict it read as a still and was clicked as one.
         Both bounds are wall-clock. There is no "enough screens, stop" exit: both spellings were measured on
@@ -1077,7 +1081,7 @@ class PageSolver:
 
         cfg = self.config
         floor_ms = float(cfg.video_burst_duration_ms)
-        max_ms = max(floor_ms, float(cfg.video_burst_max_ms))
+        max_ms = max(floor_ms, float(cfg.video_burst_max_ms if max_ms is None else max_ms))
         interval = 1.0 / max(1, int(cfg.video_burst_fps))
         frames: List[Any] = []
         order: List[str] = []
@@ -1126,8 +1130,14 @@ class PageSolver:
                 # Sleep to a fixed grid, not `interval - work`: per-frame overshoot would otherwise accumulate and a
                 # loaded runner films fewer frames than the floor window holds. A stalled frame skips, not bunches.
                 next_at = max(next_at + interval, time.monotonic())
+                # END on the frame that would land past the ceiling rather than declining to sleep for it:
+                # declining left the loop spinning at whatever rate the screenshots came back, which on a
+                # ceiling that is not a whole number of intervals filmed thousands of junk frames into the
+                # tail of the clip (measured: 2487 frames in a 150ms window).
+                if (next_at - t0) * 1000.0 >= max_ms:
+                    break
                 wait = next_at - time.monotonic()
-                if wait > 0 and (next_at - t0) * 1000.0 < max_ms:
+                if wait > 0:
                     time.sleep(wait)
         finally:
             _unlink(shot)
@@ -1141,7 +1151,7 @@ class PageSolver:
             why = "no new screen for a full floor window — it moved once and settled"
         _log(f"[animated] burst verdict after {elapsed_ms / 1000:.1f}s: "
              f"{'ANIMATED' if cycle_closed or animating else 'still'} ({len(order)} screens; {why})")
-        return frames, order, cycle_closed or animating, elapsed_ms
+        return frames, order, cycle_closed or animating, elapsed_ms, cycle_closed
 
     def _slice(self, frames: List[Any], burst_ms: float) -> Tuple[List[str], str]:
         """Cut a burst with the training-side slicer; the model answers with a frame number into it."""
@@ -1189,7 +1199,13 @@ class PageSolver:
                 f"budget is left and an animated recording needs {cfg.video_burst_duration_ms}ms — not "
                 "starting one that would be cut off mid-way. Raise overall_solve_timeout_ms or "
                 "video_extra_inference_ms, or set video_solve_enabled=False.")
-        frames, order, moved, burst_ms = self._burst(element, known=self._film_digests)
+        # A board that has never repeated a screen has nothing further to show: another ceiling-long window
+        # is more of the same animation, and three of them is most of the solve budget. Measured on the gate:
+        # boards at 54.6s and 59.1s against a 49s ceiling, all of them boards that never repeat.
+        reask = bool(self._film_frames)
+        frames, order, moved, burst_ms, cycled = self._burst(
+            element, known=self._film_digests,
+            max_ms=float(cfg.video_burst_duration_ms) if reask and not self._film_cycled else None)
         if not frames:
             raise AnimatedChallengeError("could not record the animated challenge (no frame screenshotted)")
         _log(f"[animated] recorded {len(frames)} frames in {burst_ms / 1000:.1f}s "
@@ -1198,7 +1214,10 @@ class PageSolver:
         # holds, and keyframes cut across both name screens that no longer exist: the model answers with one
         # and the click waits out `keyframe_wait_timeout_ms` for a picture that is gone. Nothing coming back
         # is what says so, and the film restarts on the board that is actually there.
-        if self._film_frames and not (self._film_digests & set(order)):
+        # Cut ONLY on proof of a replacement: this burst repeated a screen, and none of what it repeated was
+        # in the film. A board that never repeats cannot produce that proof either way and has not been
+        # replaced — it has simply never repeated, and its film is the only record of it.
+        if reask and cycled and not (self._film_digests & set(order)):
             _log("[animated] nothing the film holds came back — the board was replaced; the film restarts here")
             self._film_frames, self._film_ms, self._film_digests = [], 0.0, set()
         # The cap is a safety net on memory, not the working limit: frames are decoded images, and a board
@@ -1207,6 +1226,7 @@ class PageSolver:
             self._film_frames.extend(frames)
             self._film_ms += burst_ms
             self._film_digests.update(order)
+        self._film_cycled = self._film_cycled or cycled
         if len(self._film_frames) > len(frames):
             _log(f"[animated] slicing {len(self._film_frames)} frames filmed over "
                  f"{self._film_ms / 1000:.1f}s — every round of this board, not just this one")
@@ -1223,7 +1243,7 @@ class PageSolver:
         try:
             fut = pool.submit(self._get_solution, shot, puzzle_source, retry_mode, text_mode)
             with self._phase(Phase.BURST):
-                frames, order, moved, burst_ms = self._burst(element)
+                frames, order, moved, burst_ms, _cycled = self._burst(element)
             if not moved:
                 with self._phase(Phase.INFERENCE):
                     actions, usage = fut.result()
@@ -1277,6 +1297,7 @@ class PageSolver:
         self._film_frames = []
         self._film_ms = 0.0
         self._film_digests = set()
+        self._film_cycled = False
 
     def _answer_region_recurs(self, keyframe_path: str, ref: Any, box: Any) -> bool:
         """Does the chosen keyframe's answer area appear in a sibling keyframe of the same clip?"""

@@ -159,3 +159,47 @@ def test_a_board_that_came_back_keeps_its_whole_film(monkeypatch):
     assert len(solver._film_frames) > first, (
         "a board whose screens kept coming back was never replaced, so its film is kept and added to")
     assert sliced[1] == len(solver._film_frames)
+
+
+def test_a_board_that_never_repeats_keeps_its_film_and_is_not_refilmed(monkeypatch):
+    # hCaptcha's continuous animations never show the same screen twice, so "a screen the film holds came
+    # back" can never be proved for them. Restarting on the ABSENCE of that proof threw the film away every
+    # round and spent a full ceiling-long window rebuilding it: measured on the gate, boards at 54.6s and
+    # 59.1s against a 49s ceiling. A replacement has to be PROVED, not assumed.
+    import cv2
+    import numpy as np
+
+    install(monkeypatch, page_solver)
+    cfg = PageSolverConfig()
+    solver = PageSolver(config=cfg)
+    solver._reset_animated_state()
+    solver._deadline_ms = None
+    sliced: list = []
+    n = {"i": 0}
+
+    def fake_shot(element, path, animations="allow", timeout_ms=None):
+        with open(path, "wb") as fh:
+            fh.write(b"unique-%d" % n["i"])
+        n["i"] += 1
+
+    monkeypatch.setattr(solver, "_screenshot", fake_shot)
+    monkeypatch.setattr(solver, "_slice",
+                        lambda frames, ms: (sliced.append(len(frames)), (["/tmp/k.png"], "/tmp/d"))[1])
+    monkeypatch.setattr(cv2, "imread", lambda p: np.zeros((4, 4, 3), dtype=np.uint8))
+
+    solver._record_keyframes(object())
+    first, first_ms = len(solver._film_frames), solver._film_ms
+    assert first_ms >= cfg.video_burst_max_ms * 0.9, (
+        f"a board that never repeats never settles and never cycles, so the first window runs to the "
+        f"{cfg.video_burst_max_ms}ms ceiling; this one stopped at {first_ms:.0f}ms")
+
+    solver._record_keyframes(object())
+
+    assert len(solver._film_frames) > first, (
+        "a board that never repeats a screen has not been replaced, it has simply never repeated; throwing "
+        "its film away leaves the re-ask with less of the board than the ask that was refused")
+    assert sliced[1] == len(solver._film_frames)
+    reask_ms = solver._film_ms - first_ms
+    assert reask_ms < cfg.video_burst_max_ms * 0.75, (
+        f"the re-ask filmed another {reask_ms:.0f}ms out of a {cfg.video_burst_max_ms}ms ceiling, waiting "
+        f"for a cycle this board is never going to close")
