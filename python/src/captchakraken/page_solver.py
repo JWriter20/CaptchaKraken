@@ -356,6 +356,9 @@ class PageSolver:
         self._keyframe_steady_screens = 0
         self._last_answer_sig: Optional[str] = None
         self._no_progress_rounds = 0
+        # Refused animated answers in a row. A longer film gives a DIFFERENT answer every round, so the
+        # signature fence never sees a repeat and an animated board ran every loop however hopeless it was.
+        self._refused_animated_asks = 0
         self._resample_level = 0
         self._apply_sampling()
 
@@ -1226,6 +1229,7 @@ class PageSolver:
         plan = self._animated_plan
         if plan is None or plan[2] is None:
             return
+        self._refused_animated_asks += 1
         if self._keyframe_steady_screens < 2:
             self._discard_animated_plan()
             self._keyframe_mode, self._keyframe_steady_screens = None, 0
@@ -1756,6 +1760,10 @@ class PageSolver:
                 raise CaptchaSolveError(
                     f"no progress: the model returned the same answer {self._no_progress_rounds + 1} times "
                     f"running and the challenge is still up (attempt {attempt}/{cfg.max_solve_loops})")
+            if self._refused_animated_asks >= cfg.max_no_progress_rounds:
+                raise CaptchaSolveError(
+                    f"no progress: the widget refused {self._refused_animated_asks} answers read off the "
+                    f"recording and the challenge is still up (attempt {attempt}/{cfg.max_solve_loops})")
             render_waits = 0
             usage.extend(round_usage)
 

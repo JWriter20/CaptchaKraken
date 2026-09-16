@@ -184,6 +184,9 @@ export class CaptchaKrakenSolver {
   private solveDeadlineAt = 0;
   private lastAnswerSig: string | null = null;
   private noProgressRounds = 0;
+  /** Refused animated answers in a row. A longer film gives a DIFFERENT answer every round, so the signature
+   *  fence never sees a repeat and an animated board ran all six loops however hopeless it was. */
+  private refusedAnimatedAsks = 0;
   private resampleLevel = 0;
   /** The recording `classifyByRecording` started and left running for the branch below to finish or drop. */
   private pendingBurst: ReturnType<CaptchaKrakenSolver['startKeyframeBurst']> | null = null;
@@ -349,6 +352,9 @@ export class CaptchaKrakenSolver {
 
       if (this.noProgressRounds >= (cfg.maxNoProgressRounds ?? 2)) {
         throw new Error(`No progress: the model returned the same answer ${this.noProgressRounds + 1} times running and the challenge is still up (attempt ${attempt}/${maxSolveLoops}). Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
+      }
+      if (this.refusedAnimatedAsks >= (cfg.maxNoProgressRounds ?? 2)) {
+        throw new Error(`No progress: the widget refused ${this.refusedAnimatedAsks} answers read off the recording and the challenge is still up (attempt ${attempt}/${maxSolveLoops}). Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
       }
       renderWaits = 0;
       cumulativeTokenUsage.push(...tokenUsage);
@@ -1518,6 +1524,7 @@ export class CaptchaKrakenSolver {
   private resetSolveState(): void {
     this.solutionCache.clear();
     this.repeatedAnswerSeen = false;
+    this.refusedAnimatedAsks = 0;
     this.knownAnimated = false;
     this.animatedProbeDone = false;
     this.discardAnimatedPlan();
@@ -1546,7 +1553,9 @@ export class CaptchaKrakenSolver {
   /** The recording still stands; dropping only the refused answer makes the retry an inference, not a burst. */
   private invalidateAnimatedAnswer(): void {
     const plan = this.animatedPlan;
-    if (plan?.response) this.animatedPlan = { burstDir: plan.burstDir, response: null };
+    if (!plan?.response) return;
+    this.animatedPlan = { burstDir: plan.burstDir, response: null };
+    this.refusedAnimatedAsks++;
   }
 
   /** True when this answer already ran and changed nothing: resample, and let the recording path have a go. */
