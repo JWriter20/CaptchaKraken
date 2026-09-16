@@ -16,7 +16,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from . import planner
 from .action_types import CaptchaAction
@@ -325,6 +325,9 @@ class PageSolver:
         self._animated_plan: Optional[Tuple[List[str], str, Any, Any]] = None
         self._film_frames: List[Any] = []
         self._film_ms: float = 0.0
+        # The digests of every screen the film holds: what a later burst is checked against to answer
+        # "is this still the same board?" — see `_record_keyframes`.
+        self._film_digests: Set[str] = set()
         self._reset_animated_state()
 
     @property
@@ -1057,8 +1060,12 @@ class PageSolver:
         return (cfg.video_solve_enabled and cfg.speculative_burst_enabled and not self._acted_on_board
                 and puzzle_source != Vendor.RECAPTCHA and not text_mode)
 
-    def _burst(self, element: Any) -> Tuple[List[Any], List[str], bool, float]:
+    def _burst(self, element: Any, known: AbstractSet[str] = frozenset()) -> Tuple[List[Any], List[str], bool, float]:
         """Film the widget until a screen comes back (a cycle) or nothing new appears for a floor window.
+
+        `known` is the screens an earlier burst of this solve already holds. One of them coming back proves
+        the board was not replaced, and the film in hand already describes it, so there is nothing left to
+        film — that exit is the difference between a re-ask costing a frame and costing a whole window.
 
         Returns `(frames, distinct_digests, moved, elapsed_ms)`. `moved` is a closed cycle OR a board still
         producing new screens past the floor with more than BURST_ANIMATED_SCREENS seen: a continuous animation
@@ -1096,6 +1103,12 @@ class PageSolver:
                 if img is not None:
                     frames.append(img)
                     d = _sha1(shot)
+                    if d in known:
+                        _log("[animated] a screen the film already holds came back — the board is unchanged")
+                        cycle_closed = True
+                        if d not in order:
+                            order.append(d)
+                        break
                     if d != last_digest:
                         if d in order and len(order) >= 2:
                             cycle_closed = True
@@ -1155,6 +1168,12 @@ class PageSolver:
         question: more repetitions for `_detect_cycle` to confirm, and, on a board that never repeats, the
         slicer's even picks spread across the whole solve rather than across four seconds.
 
+        WHAT IT IS NOT IS A FILM OF TWO BOARDS. Accumulating across a board the vendor replaced is worse
+        than not accumulating at all — six keyframes cut across both states describe neither, `_detect_cycle`
+        gives up on the extra screens, and the frame the model names is one the widget will never show
+        again. A screen coming back is the proof the board is the same one; nothing coming back restarts
+        the film below.
+
         THE JS PORT FILMS CONTINUOUSLY AND THIS ONE CANNOT. There the recorder is an async loop on the same
         event loop, so it keeps filming through inference and through the verdict wait. Sync Playwright is
         thread-affine — `_speculate` says so where it hands only the HTTP call to a worker — so a background
@@ -1170,16 +1189,24 @@ class PageSolver:
                 f"budget is left and an animated recording needs {cfg.video_burst_duration_ms}ms — not "
                 "starting one that would be cut off mid-way. Raise overall_solve_timeout_ms or "
                 "video_extra_inference_ms, or set video_solve_enabled=False.")
-        frames, _order, moved, burst_ms = self._burst(element)
+        frames, order, moved, burst_ms = self._burst(element, known=self._film_digests)
         if not frames:
             raise AnimatedChallengeError("could not record the animated challenge (no frame screenshotted)")
         _log(f"[animated] recorded {len(frames)} frames in {burst_ms / 1000:.1f}s "
              f"({measured_fps(len(frames), burst_ms, cfg.video_burst_fps):.1f}fps)")
+        # ONE FILM, ONE BOARD. A vendor that deals a fresh puzzle on a miss has replaced everything the film
+        # holds, and keyframes cut across both name screens that no longer exist: the model answers with one
+        # and the click waits out `keyframe_wait_timeout_ms` for a picture that is gone. Nothing coming back
+        # is what says so, and the film restarts on the board that is actually there.
+        if self._film_frames and not (self._film_digests & set(order)):
+            _log("[animated] nothing the film holds came back — the board was replaced; the film restarts here")
+            self._film_frames, self._film_ms, self._film_digests = [], 0.0, set()
         # The cap is a safety net on memory, not the working limit: frames are decoded images, and a board
         # that never settles would otherwise film for the whole solve budget.
         if self._film_ms < cfg.video_film_max_ms:
             self._film_frames.extend(frames)
             self._film_ms += burst_ms
+            self._film_digests.update(order)
         if len(self._film_frames) > len(frames):
             _log(f"[animated] slicing {len(self._film_frames)} frames filmed over "
                  f"{self._film_ms / 1000:.1f}s — every round of this board, not just this one")
@@ -1249,6 +1276,7 @@ class PageSolver:
         self._discard_animated_plan()
         self._film_frames = []
         self._film_ms = 0.0
+        self._film_digests = set()
 
     def _answer_region_recurs(self, keyframe_path: str, ref: Any, box: Any) -> bool:
         """Does the chosen keyframe's answer area appear in a sibling keyframe of the same clip?"""

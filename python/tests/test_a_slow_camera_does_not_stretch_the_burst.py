@@ -127,7 +127,9 @@ def test_a_cycling_board_is_still_judged_on_its_screens(monkeypatch):
 
 def test_the_js_port_counts_the_same_window_in_milliseconds():
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    assert "elapsedMs - lastNewMs >= floorMs" in js, (
+    # A wall-clock subtraction, whatever it is spelled: `lastNewAt` is a timestamp rather than an offset
+    # since a continuous film measures its settle window from the CUT, not from when the camera started.
+    assert "Date.now() - lastNewAt >= floorMs" in js, (
         "the JS burst still counts its settled window in frames: a camera "
         "slower than the interval stretches the window there while the python "
         "port holds it to videoBurstDurationMs")

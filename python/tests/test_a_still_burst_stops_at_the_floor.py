@@ -64,7 +64,7 @@ def test_a_board_that_never_changes_stops_at_the_burst_floor(monkeypatch):
 
 def test_the_js_port_has_the_same_still_exit():
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    assert "elapsedMs - lastNewMs >= floorMs" in js, (
+    assert "Date.now() - lastNewAt >= floorMs" in js, (
         "the JS burst has no settled exit: a board that stops producing new "
         "screens can never close a cycle, so it films to videoBurstMaxMs while "
         "the python port stops once it has settled")
