@@ -49,7 +49,7 @@ def _burst(monkeypatch, payloads: Sequence[bytes], work_ms: Sequence[float] = ()
 
     monkeypatch.setattr(solver, "_screenshot", fake_shot)
     monkeypatch.setattr(cv2, "imread", lambda p: np.zeros((4, 4, 3), dtype=np.uint8))
-    frames, _order, _moved, burst_ms, _cycled = solver._burst(object())
+    frames, _order, _closed, burst_ms = solver._burst(object())
     return len(frames), burst_ms, captured
 
 
@@ -64,7 +64,7 @@ def test_a_board_that_never_changes_stops_at_the_burst_floor(monkeypatch):
 
 def test_the_js_port_has_the_same_still_exit():
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    assert "Date.now() - lastNewAt >= floorMs" in js, (
+    assert "elapsedMs - lastNewMs >= floorMs" in js, (
         "the JS burst has no settled exit: a board that stops producing new "
         "screens can never close a cycle, so it films to videoBurstMaxMs while "
         "the python port stops once it has settled")

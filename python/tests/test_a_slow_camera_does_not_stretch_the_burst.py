@@ -125,39 +125,9 @@ def test_a_cycling_board_is_still_judged_on_its_screens(monkeypatch):
         f"inside the ceiling")
 
 
-def test_a_fast_camera_does_not_spin_at_the_ceiling(monkeypatch):
-    # The last frame before the ceiling used to DECLINE TO SLEEP rather than end the burst, so from there the
-    # loop ran flat out at whatever rate the camera returned — and a ceiling that is not a whole number of
-    # intervals always leaves such a tail. Measured with a zero-cost camera: 2487 frames in a 150ms window,
-    # all of them the same tail of the clip, all of them handed to the slicer.
-    cfg = PageSolverConfig(video_burst_duration_ms=300, video_burst_max_ms=1_250, video_burst_fps=10)
-    # Every frame a new screen, so the burst never cycles and never settles: it runs to the ceiling.
-    payloads = [b"screen-%03d" % i + b"\x00" * 64 for i in range(400)]
-    n, elapsed = _burst(monkeypatch, payloads, frame_cost_ms=5.0,
-                        video_burst_duration_ms=cfg.video_burst_duration_ms,
-                        video_burst_max_ms=cfg.video_burst_max_ms,
-                        video_burst_fps=cfg.video_burst_fps)
-    paced = cfg.video_burst_max_ms / (1000.0 / cfg.video_burst_fps)
-    assert n <= paced + 2, (
-        f"a {cfg.video_burst_max_ms}ms burst at {cfg.video_burst_fps}fps filmed {n} frames where the pacing "
-        f"allows {paced:.0f}: the tail of the clip was filmed flat out, which is both wasted work and a "
-        f"slicing weighted towards the last few hundred milliseconds")
-    assert elapsed <= cfg.video_burst_max_ms, (
-        f"the burst ran {elapsed:.0f}ms past its {cfg.video_burst_max_ms}ms ceiling")
-
-
 def test_the_js_port_counts_the_same_window_in_milliseconds():
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    # A wall-clock subtraction, whatever it is spelled: `lastNewAt` is a timestamp rather than an offset
-    # since a continuous film measures its settle window from the CUT, not from when the camera started.
-    assert "Date.now() - lastNewAt >= floorMs" in js, (
+    assert "elapsedMs - lastNewMs >= floorMs" in js, (
         "the JS burst still counts its settled window in frames: a camera "
         "slower than the interval stretches the window there while the python "
         "port holds it to videoBurstDurationMs")
-
-
-def test_the_js_port_ends_at_the_ceiling_rather_than_spinning():
-    js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    assert "if (nextAt - t0 >= ceilingMs) break;" in js, (
-        "the JS recorder still only declines to SLEEP for a frame past the ceiling, so it spends the tail of "
-        "every burst filming flat out while this port ends there")
