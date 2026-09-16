@@ -41,7 +41,9 @@ def test_the_probe_is_spent_once():
 def test_the_recording_reports_whether_the_board_moved(monkeypatch):
     solver = PageSolver(config=PageSolverConfig())
     solver._reset_animated_state()
-    monkeypatch.setattr(solver, "_burst", lambda _element: (["f0", "f1"], ["a", "b"], False, 4200.0))
+    monkeypatch.setattr(solver, "_burst",
+                        lambda _element, known=frozenset(), max_ms=None:
+                        (["f0", "f1"], ["a", "b"], False, 4200.0, False))
     monkeypatch.setattr(solver, "_slice", lambda _frames, _ms: (["k0", "k1"], "/tmp/ck_kf"))
     assert solver._record_keyframes(object()) == (["k0", "k1"], "/tmp/ck_kf", False)
 

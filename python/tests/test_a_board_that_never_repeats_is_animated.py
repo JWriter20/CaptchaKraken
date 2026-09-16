@@ -28,7 +28,7 @@ def _burst(monkeypatch, screen_for_frame):
 
     monkeypatch.setattr(solver, "_screenshot", fake_shot)
     monkeypatch.setattr(cv2, "imread", lambda p: np.zeros((4, 4, 3), dtype=np.uint8))
-    _frames, order, moved, _ms = solver._burst(object())
+    _frames, order, moved, _ms, _cycled = solver._burst(object())
     return order, moved
 
 
