@@ -515,11 +515,21 @@ export class CaptchaKrakenSolver {
           // last answer was sent, so re-slicing now covers a round more of the board than the ask that was
           // refused. Re-asking the SAME frames would put the same question up and get the same answer back,
           // which is the loop this invariant exists to break.
-          const grown = this.animatedFilm ? await this.animatedFilm.snapshot() : null;
+          //
+          // But it has to be the SAME BOARD. The wait below is what decides: it ends the moment a screen
+          // from before our answer comes back — usually one frame — and otherwise runs until the board that
+          // IS there has shown itself, and the slice is cut to that. Skipping it re-asked over a film that
+          // held nothing of the current board at all.
+          const film = this.animatedFilm;
+          let grown: { dir: string; moved: boolean } | null = null;
+          if (film) {
+            await this.ph(Phase.BURST, () => film.settledOrCycled());
+            grown = await film.snapshot();
+          }
           if (grown) rmdir(this.animatedPlan.burstDir);
           burstDir = grown?.dir ?? this.animatedPlan.burstDir;
           console.log(grown
-            ? '[animated] the last answer was refused — re-asking on a film a round longer'
+            ? '[animated] the last answer was refused — re-asking on the film as it stands now'
             : '[animated] the last answer was refused — re-asking on the frames already recorded');
           response = await askAnimated();
           this.animatedPlan = { burstDir, response };
@@ -1191,6 +1201,10 @@ export class CaptchaKrakenSolver {
    * second chance, because the reused answer is identical by construction. Filming on means every later
    * round slices a STRICTLY LONGER film: more repetitions for `_detect_cycle` to confirm against, and, on a
    * board that never repeats, six evenly-spread picks across the whole solve instead of across four seconds.
+   *
+   * Longer, but never of TWO boards. A vendor that deals a fresh puzzle on a miss has replaced everything
+   * filmed so far, and keyframes cut across both states describe neither. `resume` cuts the film where our
+   * answer landed; a screen from before the cut coming back is what un-cuts it. See `snapshot`.
    */
   private startKeyframeBurst(captchaElement: ElementHandle, continuous = false): {
     moved: () => boolean;
@@ -1222,8 +1236,23 @@ export class CaptchaKrakenSolver {
     const order: string[] = [];
     let captured = 0;
     let lastDigest: string | null = null;
-    let lastNewMs = 0;
+    let lastNewAt = t0;
     let lastChangeMs = 0;
+    // WHERE THE BOARD ON SCREEN STARTED. A film can only describe ONE board, and a vendor that refuses an
+    // answer sometimes deals a fresh puzzle rather than the same one again. The boundary is where OUR ANSWER
+    // LANDED — `pause` — because that is the moment a board can be replaced; `sawPreCut` is the proof it was
+    // not, a screen from before that boundary coming back. `filmStart` is the committed one: once a film has
+    // been cut, the footage before the cut is gone for good and a later repeat cannot resurrect it.
+    let filmStart = 0;
+    let filmT0 = t0;
+    let cutAt = 0;
+    let cutT0 = t0;
+    let sawPreCut = false;
+    // A cycle closed among screens first seen SINCE the cut: the board on screen now repeats, and it is not
+    // repeating anything the film already held. That, and only that, is evidence of a replacement — a board
+    // that never repeats a screen at all cannot produce the proof either way, and is not a new board.
+    let segCycled = false;
+    const firstSeen = new Map<string, number>();
     let lastFrame: string | null = null;
     let cycleClosed = false;
     let stopped = false;
@@ -1258,8 +1287,13 @@ export class CaptchaKrakenSolver {
             const d = sha1(frame);
             if (d !== lastDigest) {
               lastChangeMs = elapsed();
-              if (order.includes(d) && order.length >= 2) cycleClosed = true;
-              else if (!order.includes(d)) { order.push(d); lastNewMs = elapsed(); }
+              const seen = firstSeen.get(d);
+              if (seen === undefined) { firstSeen.set(d, seq - 1); order.push(d); lastNewAt = Date.now(); }
+              else {
+                if (order.length >= 2) cycleClosed = true;
+                if (seen >= cutAt) segCycled = true;
+                else if (seen >= filmStart) sawPreCut = true;
+              }
               lastDigest = d;
             }
           } catch { /* no digest, no early stop */ }
@@ -1267,7 +1301,7 @@ export class CaptchaKrakenSolver {
         // A continuous film reaches these same conditions and keeps rolling: they are what makes a SNAPSHOT
         // ready to slice, not what makes the recording over. `settledOrCycled()` reads them without stopping.
         const elapsedMs = elapsed();
-        if (!continuous && runToEnd && elapsedMs >= floorMs && elapsedMs - lastNewMs >= floorMs) {
+        if (!continuous && runToEnd && elapsedMs >= floorMs && Date.now() - lastNewAt >= floorMs) {
           console.log(`[animated] no new screen for ${(floorMs / 1000).toFixed(1)}s (${order.length} seen) — the board has settled; stopping the burst`);
           break;
         }
@@ -1277,9 +1311,13 @@ export class CaptchaKrakenSolver {
         }
         // Sleep to a fixed grid, not `interval - work`: per-frame overshoot would otherwise accumulate and a
         // loaded runner films fewer frames than the floor window holds. A stalled frame skips, not bunches.
+        // End on the frame that would land past the ceiling rather than declining to sleep for it: declining
+        // left the loop spinning at whatever rate the screenshots came back, filming junk into the tail of
+        // the clip (measured on the python twin: 2487 frames in a 150ms window).
         nextAt = Math.max(nextAt + intervalMs, Date.now());
+        if (nextAt - t0 >= ceilingMs) break;
         const wait = nextAt - Date.now();
-        if (wait > 0 && nextAt - t0 < ceilingMs) await delay(wait);
+        if (wait > 0) await delay(wait);
       }
     })();
     let ended = false;
@@ -1313,7 +1351,7 @@ export class CaptchaKrakenSolver {
         while (!cycleClosed && !ended && !stopped) {
           const elapsedMs = elapsed();
           if (elapsedMs >= floorMs) {
-            if (elapsedMs - lastNewMs >= floorMs) { why = 'no new screen for a full floor window — it moved once and settled'; break; }
+            if (Date.now() - lastNewAt >= floorMs) { why = 'no new screen for a full floor window — it moved once and settled'; break; }
             if (order.length > BURST_ANIMATED_SCREENS) { animating = true; why = `${order.length} screens and still arriving — animating continuously`; break; }
           }
           await delay(intervalMs);
@@ -1336,19 +1374,50 @@ export class CaptchaKrakenSolver {
         // cycles and never settles held the first slice until the CAMERA's ceiling. The wait keeps the
         // burst ceiling it always had; the camera keeps running afterwards regardless.
         const waitUntil = Math.max(floorMs, cfg.videoBurstMaxMs ?? 12_000);
+        // Nothing has been answered on this board yet, so there is a cycle to go and find.
+        const firstSlice = cutAt === filmStart;
         while (!ended && !stopped) {
-          const elapsedMs = elapsed();
-          if (elapsedMs >= floorMs && (cycleClosed || elapsedMs - lastNewMs >= floorMs)) return;
-          if (elapsedMs >= waitUntil) {
-            console.log(`[animated] no cycle and no settle in ${(elapsedMs / 1000).toFixed(1)}s — slicing what the film holds`);
+          // A screen from before our answer came back: the board was NOT replaced, so the film already in
+          // hand describes the board that is on screen and there is nothing left to wait for. This is the
+          // common case and it costs a frame, not a window.
+          if (sawPreCut) return;
+          const segMs = Date.now() - cutT0;
+          if (segMs >= floorMs) {
+            if (segCycled) return;
+            if (Date.now() - lastNewAt >= floorMs) return;
+            // A board that never repeated a screen BEFORE our answer will not start now: there is no cycle
+            // to wait for and no replacement it could prove, so the film in hand is everything there is to
+            // know and waiting out the ceiling every round is pure cost. Measured: one such board took
+            // 110.3s that way, against a 49s gate ceiling.
+            if (!firstSlice && !cycleClosed) return;
+          }
+          if (segMs >= waitUntil) {
+            console.log(`[animated] no cycle and no settle in ${(segMs / 1000).toFixed(1)}s — slicing what the film holds`);
             return;
           }
           await delay(intervalMs);
         }
       },
 
-      pause: () => { paused = true; },
-      resume: () => { paused = false; nextAt = Date.now(); hangAt = Date.now() + burstHangDeadlineMs(cfg); },
+      /**
+       * Our answer is about to land, so this frame is the boundary: everything after it is whatever board
+       * the vendor leaves behind, which may not be the one filmed up to here. Only a screen from before the
+       * boundary coming back proves it is still the same board — see `snapshot`.
+       */
+      pause: () => {
+        paused = true;
+        cutAt = seq;
+        sawPreCut = false;
+        segCycled = false;
+      },
+
+      resume: () => {
+        paused = false;
+        nextAt = Date.now();
+        cutT0 = Date.now();
+        lastNewAt = Date.now();
+        hangAt = Date.now() + burstHangDeadlineMs(cfg);
+      },
 
       /**
        * A stable copy of everything filmed so far, WITHOUT ending the recording.
@@ -1370,16 +1439,28 @@ export class CaptchaKrakenSolver {
           throw e;
         }
         const out = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_slice_'));
+        // ONE FILM, ONE BOARD. Frames from a board the vendor has already replaced name screens that no
+        // longer exist: the model answers with one, the widget never shows it, and the click waits out
+        // `keyframeWaitTimeoutMs` for a picture that is gone. So a film whose board was replaced is read
+        // from the cut; one whose screens kept coming back is read whole, which is the point of filming on.
         // The LAST name can be the frame currently being written. Dropping it costs one sample and removes
         // the only torn read this can have.
-        for (const n of names.slice(0, -1)) {
+        // Cut ONLY on proof of a replacement: this board repeats, and nothing it repeats was in the film.
+        // Defaulting the other way threw away the whole film on every board that never repeats a screen —
+        // exactly the boards a film running the whole solve exists to accumulate.
+        let from = (!sawPreCut && segCycled) ? cutAt : filmStart;
+        if (names.length - 1 - from < 1) from = filmStart;
+        // Committed: a board that was replaced stays replaced, so a repeat two rounds later cannot pull its
+        // screens back into the film.
+        if (from !== filmStart) { filmStart = from; filmT0 = cutT0; }
+        for (const n of names.slice(from, -1)) {
           try { fs.linkSync(path.join(dir, n), path.join(out, n)); } catch { fs.copyFileSync(path.join(dir, n), path.join(out, n)); }
         }
-        const burstMs = Math.max(1, elapsed());
-        this.lastBurstFps = captured / (burstMs / 1000);
-        const animating = order.length > BURST_ANIMATED_SCREENS && burstMs - lastNewMs < floorMs;
-        console.log(`[animated] sliced ${names.length - 1} of ${captured} frames filmed over ${(burstMs / 1000).toFixed(1)}s (${order.length} screens) -> ${out}`);
-        return { dir: out, moved: cycleClosed || animating };
+        const burstMs = Math.max(1, Date.now() - filmT0);
+        this.lastBurstFps = (names.length - 1 - from) / (burstMs / 1000);
+        const animating = order.length > BURST_ANIMATED_SCREENS && Date.now() - lastNewAt < floorMs;
+        console.log(`[animated] sliced ${names.length - 1 - from} of ${captured} frames filmed over ${(burstMs / 1000).toFixed(1)}s (${order.length} screens)${from ? ' since the board was replaced' : ''} -> ${out}`);
+        return { dir: out, moved: cycleClosed || sawPreCut || animating };
       },
 
       abandon: async () => {
@@ -1404,7 +1485,7 @@ export class CaptchaKrakenSolver {
         }
         const burstMs = Math.max(1, elapsed());
         this.lastBurstFps = captured / (burstMs / 1000);
-        const animating = order.length > BURST_ANIMATED_SCREENS && burstMs - lastNewMs < floorMs;
+        const animating = order.length > BURST_ANIMATED_SCREENS && Date.now() - lastNewAt < floorMs;
         console.log(`[animated] recorded ${captured} frames in ${(burstMs / 1000).toFixed(1)}s (${this.lastBurstFps.toFixed(1)}fps) -> ${dir}`);
         return { dir, moved: cycleClosed || animating };
       },
