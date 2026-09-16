@@ -104,6 +104,8 @@ export interface CaptchaKrakenConfig {
   keyframeWaitPollMs?: number;
   /** Burst ceiling for a board that never repeats a screen. Default 12000. */
   videoBurstMaxMs?: number;
+  /** Safety ceiling on the camera that films an animated board across rounds. Default 120000: it is meant to end with the solve, not on this clock. */
+  videoFilmMaxMs?: number;
   /** Consecutive moved settle polls that mean animated. Default 5. */
   animatedMotionStreak?: number;
   /** Record while the still is being read, so a cycling board is known before its answer runs. Default true. */

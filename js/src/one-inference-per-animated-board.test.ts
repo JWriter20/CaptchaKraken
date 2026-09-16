@@ -1,5 +1,6 @@
-// The plan is reused across rounds and dropped only when the gate never saw its screen; per-round cleanup must not delete the
-// keyframe dir the plan still holds.
+// The plan is reused across rounds so one animated board costs one inference; it is dropped when the gate never saw its screen,
+// and when the widget REFUSED it, because a refused answer is identical next round by construction and would spend the whole
+// no-progress fence re-pressing itself. Per-round cleanup must not delete the keyframe dir a live plan still holds.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -44,6 +45,20 @@ test('the plan is dropped when the gate never saw its screen', async () => {
   solver.discardAnimatedPlan();
   assert.equal(solver.animatedPlan, null,
     'a spent plan would re-click a cell chosen from pictures that are gone');
+});
+
+test('a refused answer drops the plan, so the next round asks again', async () => {
+  const { solver } = animatedSolver();
+  await round(solver);
+  const first = solver.animatedPlan;
+  assert.ok(first, 'nothing was planned');
+
+  // What `noteAnswer` returning true does: the widget refused it, and reusing it would press the same
+  // thing until the fence trips three rounds later with half the solve budget unspent.
+  solver.discardAnimatedPlan();
+  await round(solver);
+  assert.ok(solver.animatedPlan, 'the next round had nothing to ask with');
+  assert.notEqual(solver.animatedPlan, first, 'the refused plan came back');
 });
 
 test('a new solve starts with no plan', async () => {

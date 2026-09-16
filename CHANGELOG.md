@@ -3,7 +3,23 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [Unreleased]
+## [3.1.0] - 2026-09-15
+
+### Fixed
+
+- **The recording does not stop when the answer is sent.** Builds directly on
+  "drop the ANSWER, keep the FRAMES": the frames now grow, because the camera
+  keeps running. Re-asking the same frames puts the same question up and gets
+  the same answer back, which cannot help a board whose answer sat on a screen
+  the first window never caught. The
+  recording of a cycling board now runs for the whole solve instead of stopping
+  at the first answer, so each round asks against a strictly longer film. Before
+  this, the stored answer was reused unchanged — greedy sampling over the same
+  frames gives the same answer — and the no-progress fence ended the attempt at
+  round 3 of 6 with half the budget unspent. Boards whose answer sat on a screen
+  the first window missed could not be solved at all. New knob
+  `videoFilmMaxMs` / `video_film_max_ms` (default 120000) bounds the recording;
+  it is a safety net, not the working limit.
 
 ### Changed
 
