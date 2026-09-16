@@ -197,15 +197,8 @@ def test_a_board_that_never_repeats_keeps_its_film_and_is_not_refilmed(monkeypat
 
     assert len(solver._film_frames) > first, (
         "a board that never repeats a screen has not been replaced, it has simply never repeated; throwing "
-        "its film away leaves nothing for a board that later starts repeating to be checked against")
-    # The RECENT window, not the accumulation: a board that never repeats cannot say whether it was
-    # replaced, so the re-ask asks about the footage nearest to now, which is of whatever is on screen
-    # either way — and one burst-length of it is the shape the model was trained on.
-    assert sliced[1] < len(solver._film_frames), (
-        f"the re-ask sliced all {sliced[1]} frames of a film spanning the whole solve; six picks spread that "
-        f"wide is not a clip, and half of it may be a board the vendor has already replaced")
-    assert sliced[1] <= sliced[0], (
-        f"the re-ask sliced {sliced[1]} frames against the first ask's {sliced[0]}")
+        "its film away leaves the re-ask with less of the board than the ask that was refused")
+    assert sliced[1] == len(solver._film_frames)
     reask_ms = solver._film_ms - first_ms
     assert reask_ms < cfg.video_burst_max_ms * 0.75, (
         f"the re-ask filmed another {reask_ms:.0f}ms out of a {cfg.video_burst_max_ms}ms ceiling, waiting "

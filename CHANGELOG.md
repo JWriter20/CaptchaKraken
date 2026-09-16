@@ -3,7 +3,7 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [3.1.0] - 2026-09-16
+## [3.1.0] - 2026-09-15
 
 ### Fixed
 
@@ -20,25 +20,6 @@ semantic versioning; v2 is a major, **breaking** release.
   the first window missed could not be solved at all. New knob
   `videoFilmMaxMs` / `video_film_max_ms` (default 120000) bounds the recording;
   it is a safety net, not the working limit.
-
-- **One film, one board.** A film that runs for the whole solve is only better
-  while it is filming the same board, and a vendor that refuses an answer
-  sometimes deals a fresh puzzle instead of the same one again. Keyframes cut
-  across both states describe neither: the frame the model names is one the
-  widget will never show again, so the click waits out the whole keyframe
-  timeout for a picture that is gone. The film is now cut where the answer
-  landed, and only on proof that the board was replaced — it repeated a screen,
-  and none of what it repeated was in the film. A board whose screens keep
-  coming back is still re-asked over the whole film; a board that never repeats
-  a screen has not been replaced, it has simply never repeated, and is neither
-  re-filmed at length nor cut.
-
-- **The burst no longer films the tail of its window flat out.** The frame that
-  would land past the ceiling used to decline to sleep rather than end the
-  recording, so from there the loop ran at whatever rate the camera returned.
-  A ceiling that is not a whole number of frame intervals always leaves such a
-  tail; with a fast camera that was thousands of near-identical frames, all of
-  them handed to the slicer.
 
 ### Changed
 

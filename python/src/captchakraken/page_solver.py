@@ -1230,14 +1230,7 @@ class PageSolver:
         if len(self._film_frames) > len(frames):
             _log(f"[animated] slicing {len(self._film_frames)} frames filmed over "
                  f"{self._film_ms / 1000:.1f}s — every round of this board, not just this one")
-        # A board that never repeats cannot say whether it was replaced, so neither keeping the whole film
-        # nor cutting it is right: what it gets is the most RECENT window. The footage is of whatever is on
-        # screen now either way, and one burst-length of it is the shape the model was trained on, where six
-        # picks spread over a minute of solve is not. The JS port slices its film back by the same window.
-        recent = reask and not self._film_cycled
-        cut = frames if recent else (self._film_frames or frames)
-        cut_ms = burst_ms if recent else (self._film_ms or burst_ms)
-        paths, temp_dir = self._slice(cut, cut_ms)
+        paths, temp_dir = self._slice(self._film_frames or frames, self._film_ms or burst_ms)
         return paths, temp_dir, moved
 
     def _speculate(self, element: Any, shot: str, puzzle_source: Vendor, retry_mode: Optional[RetryMode],

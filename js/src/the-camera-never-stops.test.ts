@@ -277,13 +277,9 @@ test('a board that never repeats a screen is not mistaken for a new board', asyn
   const reaskMs = Date.now() - t0;
 
   assert.equal(asks.length, 2, 'the refused answer was re-pressed instead of re-asked');
-  assert.ok(asks[1] > 1, 'the re-ask had no frames of the board at all');
-  // The RECENT window, not the whole span: a board that never repeats cannot say whether it was replaced,
-  // so the re-ask asks about the footage nearest to now, which is of whatever is on screen either way.
-  assert.ok(asks[1] <= asks[0],
-    `the re-ask was cut over ${asks[1]} frames against the first ask's ${asks[0]}; six picks spread across a `
-    + 'whole solve is not a clip, and half of it may be a board the vendor has already replaced');
-  assert.ok(solver.animatedFilm, 'the camera was stopped, so the next round has nothing to re-ask against');
+  assert.ok(asks[1] > asks[0],
+    `the re-ask saw ${asks[1]} frames against the first ask's ${asks[0]}; a board that never repeats a screen `
+    + 'has not been replaced, it has simply never repeated, and its film is the only record of it');
   assert.ok(reaskMs < 2_500,
     `the re-ask waited ${reaskMs}ms out of a 3000ms burst ceiling for a cycle that is never coming`);
   await solver.stopAnimatedFilm();
