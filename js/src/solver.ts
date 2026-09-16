@@ -1446,9 +1446,17 @@ export class CaptchaKrakenSolver {
         // The LAST name can be the frame currently being written. Dropping it costs one sample and removes
         // the only torn read this can have.
         // Cut ONLY on proof of a replacement: this board repeats, and nothing it repeats was in the film.
-        // Defaulting the other way threw away the whole film on every board that never repeats a screen —
-        // exactly the boards a film running the whole solve exists to accumulate.
+        // Defaulting the other way threw away the whole film on every board that never repeats a screen.
         let from = (!sawPreCut && segCycled) ? cutAt : filmStart;
+        // A BOARD THAT NEVER REPEATS CANNOT ANSWER THE QUESTION EITHER WAY, so neither answer is right for
+        // it: keeping the whole film asks about screens the widget may have replaced, and cutting throws
+        // away the only record of it. What it gets instead is the most RECENT window — the footage is of
+        // whatever is on screen now either way, and one burst-length of it is the shape the model was
+        // trained on, where six picks spread over a minute of solve is not.
+        if (cutAt > filmStart && !cycleClosed) {
+          const windowFrames = Math.max(2, Math.round((cfg.videoBurstDurationMs ?? 4000) / intervalMs));
+          from = Math.max(from, names.length - 1 - windowFrames);
+        }
         if (names.length - 1 - from < 1) from = filmStart;
         // Committed: a board that was replaced stays replaced, so a repeat two rounds later cannot pull its
         // screens back into the film.
