@@ -1528,8 +1528,17 @@ class PageSolver:
                 if self._animated_plan is not None:
                     keyframes, keyframe_dir, actions, all_usage = self._animated_plan
                     reused = actions is not None
+                    if not reused:
+                        # Drop the ANSWER, keep the FRAMES — and the frames grow. Filming another chunk and
+                        # re-slicing the accumulation puts a better question up; re-asking the same frames
+                        # puts the same question up and gets the same answer back.
+                        with self._phase(Phase.BURST):
+                            keyframes, new_dir, moved = self._record_keyframes(element)
+                        shutil.rmtree(keyframe_dir, ignore_errors=True)
+                        keyframe_dir = new_dir
+                        self._known_animated = self._known_animated or moved
                     _log("[animated] reusing the recorded answer" if reused
-                         else "[animated] re-asking on the frames already recorded")
+                         else "[animated] re-asking on a film a round longer")
                 else:
                     reused = False
                     with self._phase(Phase.BURST):
@@ -1570,11 +1579,8 @@ class PageSolver:
             _log("[answer] " + json.dumps({"actions": [_as_dict(a) for a in actions]}, default=str))
             # A repeated answer is not re-performed: the widget already refused it, and every extra press is
             # behaviour a vendor scores. Re-asking with a fresh sample or a recording is the round's only move.
+            # `_note_answer` drops the refused animated answer on its way through, so the next round re-asks.
             if self._note_answer(actions, retry_mode):
-                # For an animated board the stored answer is identical next round by construction, so keeping
-                # it would hand the fence the same signature three rounds running. Dropping it sends the next
-                # round back to film another chunk and slice everything filmed so far.
-                self._discard_animated_plan()
                 return False, all_usage
             _log(f"executing {len(actions)} action(s)")
 

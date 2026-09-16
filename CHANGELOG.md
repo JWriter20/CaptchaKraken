@@ -7,7 +7,11 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
-- **A refused answer on an animated board is re-asked, not re-pressed.** The
+- **The recording does not stop when the answer is sent.** Builds directly on
+  "drop the ANSWER, keep the FRAMES": the frames now grow, because the camera
+  keeps running. Re-asking the same frames puts the same question up and gets
+  the same answer back, which cannot help a board whose answer sat on a screen
+  the first window never caught. The
   recording of a cycling board now runs for the whole solve instead of stopping
   at the first answer, so each round asks against a strictly longer film. Before
   this, the stored answer was reused unchanged — greedy sampling over the same

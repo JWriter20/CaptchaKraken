@@ -92,6 +92,9 @@ def test_the_js_port_also_keeps_filming():
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
     assert "private animatedFilm" in js, (
         "the JS port has no camera outliving a round, so a refused animated answer there is still re-pressed")
-    assert "this.discardAnimatedPlan();" in js.split("if (this.noteAnswer(")[1][:600], (
-        "the JS port keeps a refused animated plan, which hands the no-progress fence the same signature "
+    assert "this.invalidateAnimatedAnswer();" in js, (
+        "the JS port keeps a refused animated answer, which hands the no-progress fence the same signature "
         "three rounds running while this port re-asks")
+    assert "await this.animatedFilm.snapshot()" in js, (
+        "the JS port re-asks a refused answer on the SAME frames, so the question does not change and "
+        "neither does the answer; this port re-slices a film that has grown")
