@@ -113,3 +113,35 @@ test('the film ends with the solve, not with the round', async () => {
   await solver.stopAnimatedFilm();
   assert.equal(solver.animatedFilm, null, 'a camera left running outlives the page it is filming');
 });
+
+test('a refused answer with no camera still re-asks on the frames it has', async () => {
+  // #41's path, and it has to keep working: the plan can outlive the film — the board changed, the camera
+  // was stopped, and only the slice the answer came from is left. Re-asking on that is worse than re-asking
+  // on a longer one, and much better than pressing the refused answer again.
+  const { solver, slices } = cyclingSolver();
+  await solver.solveSingle({}, WIDGET, 1, null);
+  const held = solver.animatedPlan.burstDir;
+
+  // How this arises for real: the speculative path banks a plan from a burst it started itself and never
+  // installs it as `animatedFilm`, so a refusal there leaves frames with no camera behind them.
+  // Abandon rather than just drop the handle: a recorder nobody holds keeps filming to its own ceiling.
+  // The plan's slice is a separate hardlinked directory, so it outlives the film it was cut from.
+  await solver.animatedFilm.abandon();
+  solver.animatedFilm = null;
+  solver.animatedPlan = { burstDir: held, response: null };
+  await solver.solveSingle({}, WIDGET, 2, null);
+
+  assert.equal(slices.length, 2, 'the refused answer was not re-asked');
+  assert.equal(solver.animatedPlan.burstDir, held, 'it filmed afresh instead of using the frames in hand');
+});
+
+test('stopping a camera that is not the current one leaves the current one alone', async () => {
+  const { solver } = cyclingSolver();
+  await solver.solveSingle({}, WIDGET, 1, null);
+  const film = solver.animatedFilm;
+  assert.ok(film, 'nothing was filmed');
+  await solver.stopAnimatedFilm();
+  assert.equal(solver.animatedFilm, null);
+  await solver.stopAnimatedFilm();            // idempotent: a second stop must not throw
+  assert.equal(solver.animatedFilm, null);
+});
