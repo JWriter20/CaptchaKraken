@@ -3,7 +3,7 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [3.1.0] - 2026-09-15
+## [3.1.0] - 2026-09-16
 
 ### Fixed
 
@@ -20,6 +20,34 @@ semantic versioning; v2 is a major, **breaking** release.
   the first window missed could not be solved at all. New knob
   `videoFilmMaxMs` / `video_film_max_ms` (default 120000) bounds the recording;
   it is a safety net, not the working limit.
+
+- **One film, one board.** A film that runs for the whole solve is only better
+  while it is filming the same board, and a vendor that refuses an answer
+  sometimes deals a fresh puzzle rather than the same one again. Keyframes cut
+  across both states describe neither: the frame the model names is one the
+  widget will never show again, so the click waits out the whole keyframe
+  timeout for a picture that is gone. The film is now cut where the answer
+  LANDED, and only on proof the board was replaced — it repeated a screen, and
+  none of what it repeated was in the film. A board whose screens keep coming
+  back is still re-asked over the whole film; a board that never repeats a
+  screen has not been replaced, it has simply never repeated.
+
+- **A refused animated answer is re-asked against the board that is there.**
+  The JS port re-sliced the instant the widget refused, with the camera paused
+  since before the click — so the "grown" film held not one frame of the board
+  then on screen. It now waits for that board to show itself first: one frame
+  when it is the same board, a window when it is not.
+
+- **The burst no longer films the tail of its window flat out.** The frame that
+  would land past the ceiling declined to SLEEP rather than ending the
+  recording, so from there the loop ran at whatever rate the camera returned. A
+  ceiling that is not a whole number of frame intervals always leaves such a
+  tail; measured, that was 2487 frames in a 150 ms window, every one of them
+  handed to the slicer. This was not only a video bug — it was corrupting the
+  animated second look's clip on ordinary still boards too.
+
+  Together these take an animated board from 66-73 verify-to-verify rounds
+  across the fixture suite down to 53, with the same pass rate.
 
 ### Changed
 
