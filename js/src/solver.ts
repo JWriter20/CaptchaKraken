@@ -1331,9 +1331,18 @@ export class CaptchaKrakenSolver {
        */
       settledOrCycled: async () => {
         runToEnd = true;
+        // HOW LONG TO WAIT BEFORE SLICING, which is NOT how long the camera may run. Those are different
+        // quantities and conflating them cost a board 121.9s against a 20s gate ceiling: a film that never
+        // cycles and never settles held the first slice until the CAMERA's ceiling. The wait keeps the
+        // burst ceiling it always had; the camera keeps running afterwards regardless.
+        const waitUntil = Math.max(floorMs, cfg.videoBurstMaxMs ?? 12_000);
         while (!ended && !stopped) {
           const elapsedMs = elapsed();
           if (elapsedMs >= floorMs && (cycleClosed || elapsedMs - lastNewMs >= floorMs)) return;
+          if (elapsedMs >= waitUntil) {
+            console.log(`[animated] no cycle and no settle in ${(elapsedMs / 1000).toFixed(1)}s — slicing what the film holds`);
+            return;
+          }
           await delay(intervalMs);
         }
       },

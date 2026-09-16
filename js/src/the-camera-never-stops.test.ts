@@ -145,3 +145,26 @@ test('stopping a camera that is not the current one leaves the current one alone
   await solver.stopAnimatedFilm();            // idempotent: a second stop must not throw
   assert.equal(solver.animatedFilm, null);
 });
+
+test('a film that never cycles does not hold the first slice to the camera ceiling', async () => {
+  // MEASURED: a board took 121.9s against a 20s gate ceiling, because the wait before slicing ran until the
+  // recorder loop ended and a continuous loop ends at videoFilmMaxMs. How long to wait before slicing and
+  // how long the camera may run are different numbers; this pins the first to the burst ceiling.
+  const solver: any = new CaptchaKrakenSolver({
+    videoBurstDurationMs: 60,
+    videoBurstMaxMs: 200,        // the slice wait
+    videoFilmMaxMs: 60_000,      // the camera, deliberately far longer
+    videoBurstFps: 50,
+  });
+  let n = 0;
+  // Every frame a brand new screen: never a closed cycle, never a settle.
+  solver.shot = async (_el: any, dest: string) => fs.writeFileSync(dest, `unique-${n++}`);
+
+  const rec = solver.startKeyframeBurst({}, true);
+  const t0 = Date.now();
+  await rec.settledOrCycled();
+  const waited = Date.now() - t0;
+  await rec.abandon();
+
+  assert.ok(waited < 2_000, `waited ${waited}ms before slicing; the burst ceiling is 200ms and the camera's is 60s`);
+});
