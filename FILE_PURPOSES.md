@@ -182,6 +182,8 @@ a behaviour is a regression: the bug it describes actually happened.
 | `js/src/animated-budget.test.ts` | Escalating to a recording has to fit inside the overall solve budget, which was sized for rounds only. |
 | `js/src/one-inference-per-animated-board.test.ts` | A cycling board is asked about once per distinct answer: reused across rounds, dropped when the widget refuses it. |
 | `js/src/the-camera-never-stops.test.ts` | The recording of an animated board outlives the round that sliced it, so a refused answer is re-asked against a longer film. |
+| `js/src/a-new-board-ends-the-film.test.ts` | A board the vendor replaces ends its film, so the recorded answer is never replayed onto the board that followed it. |
+| `js/src/a-replaced-board-has-not-failed-yet.test.ts` | Evidence that arms the second look belongs to the board it was found on; the boards dealt after it are not filmed for it. |
 | `js/src/cycling-board-waits-for-its-screen.test.ts` | The frame gate was off on every real animated captcha: the driver must hold until the page shows the keyframe the model chose. |
 | `js/src/speculative-burst.test.ts` | Asking the model and watching the board can overlap, and the burst must not be wasted when they do. |
 | `js/src/burst-window-is-wall-clock.test.ts` | The burst's windows are budgets in milliseconds, so a camera slower than the interval must not spend more of the solve than a fast one. |
@@ -314,6 +316,8 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_grid_detection_ci.py` | The hermetic grid-detection smoke tests: the checks that need no corpus of real captures. |
 | `python/tests/test_grid_geometry_gates.py` | Every geometry gate `find_grid` applies, one test per bug that happened while they were written. |
 | `python/tests/test_the_film_outlives_the_answer.py` | The film of an animated board accumulates across rounds and dies with the board, not with the answer. |
+| `python/tests/test_a_new_board_ends_the_film.py` | `_fresh_board()` drops the recorded answer, the animated verdict and the slice, so none of them cross onto the next board. |
+| `python/tests/test_a_replaced_board_has_not_failed_yet.py` | A failed round arms the second look only while its board is still up, and a replaced board drops an arm the previous one set. |
 | `python/tests/test_the_second_look_believes_its_recording.py` | The second look at a board that failed once is a question, and the clip it records answers it: a board that never moved goes back to the still expert. |
 | `python/tests/test_the_notice_travels_with_the_package.py` | The LGPL notice for Cursory has to reach both published packages, and three copies are three chances to drift. |
 | `python/tests/test_a_grid_is_a_regular_lattice.py` | Every other grid check asks what is inside the cells; a click board over a photo passes those and is not a lattice. |

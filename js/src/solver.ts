@@ -367,6 +367,16 @@ export class CaptchaKrakenSolver {
         if (await this.isChallengeFreshlyRendered(page)) {
           this.resampleLevel = 0;
           this.actedOnBoard = false;
+          // ONE FILM, ONE BOARD — enforced where the board actually changes. The recorded answer
+          // describes the board it was cut from, so replaying it here presses that board's
+          // coordinates onto this one: live, a keyframe answer from an earlier board landed on
+          // hCaptcha's reference photo and then pressed Skip, six rounds running.
+          await this.stopAnimatedFilm();
+          this.knownAnimated = false;
+          // Its own second look, but only once IT fails: what armed it was evidence about the previous board,
+          // and left set it filmed every still board after a solve's first miss.
+          this.repeatedAnswerSeen = false;
+          this.animatedProbeDone = false;
           break;
         }
         await delay(cfg.postSolveOutcomePollMs ?? 75);
