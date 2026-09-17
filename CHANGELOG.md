@@ -7,6 +7,19 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
+- **A solve the vendor accepted is no longer lost to a closing widget.**
+  `answer_needs_element_box` called `.get` on each action, but the planner
+  returns TYPED actions as readily as dicts, so it raised
+  `AttributeError: 'ClickAction' object has no attribute 'get'`. It runs only
+  when the element has no bounding box — which is what a widget that is CLOSING
+  looks like, and it closes because the answer was accepted. Measured against
+  the hosted endpoint: five puzzle types graded `solved: true` on the board and
+  then ended the attempt with that error. The reader now takes either shape; a
+  widget with no box is asked whether the captcha is solved before the attempt
+  is failed; and `bounding box of captcha element` joins the stale-handle
+  patterns, which the JS port has always had. Twelve attempts across six types,
+  0 lost solves.
+
 - **One ask cannot outlive the solve it belongs to.** A request in flight
   cannot be cancelled — the deadline is only read between steps — so the
   timeout it was SENT with is the only thing bounding it. The planner sent

@@ -321,6 +321,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_a_new_board_ends_the_film.py` | `_fresh_board()` drops the recorded answer, the animated verdict and the slice, so none of them cross onto the next board. |
 | `python/tests/test_a_replaced_board_has_not_failed_yet.py` | A failed round arms the second look only while its board is still up, and a replaced board drops an arm the previous one set. |
 | `python/tests/test_an_unusable_answer_is_not_a_dead_page.py` | The same rule in the Python port: an unusable answer is a reason to look again, not to end the solve. |
+| `python/tests/test_a_solved_board_is_not_lost_to_a_typed_action.py` | A typed answer reads like a dict one, so a widget closing on an accepted board is not a failed solve. |
 | `python/tests/test_one_ask_cannot_outlive_the_solve.py` | The planner's request timeout is the caller's remaining budget, floored, and the request actually sends it. |
 | `python/tests/test_the_second_look_believes_its_recording.py` | The second look at a board that failed once is a question, and the clip it records answers it: a board that never moved goes back to the still expert. |
 | `python/tests/test_the_notice_travels_with_the_package.py` | The LGPL notice for Cursory has to reach both published packages, and three copies are three chances to drift. |
