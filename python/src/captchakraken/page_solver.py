@@ -357,6 +357,7 @@ class PageSolver:
         self._animated_probe_armed = False
         self._animated_probe_done = False
         self._video_budget_granted = False
+        self._retried_unusable_answer = False
         self._stop_animated_film()
         self._keyframe_mode: Optional[KeyframeMode] = None
         self._keyframe_steady_screens = 0
@@ -392,6 +393,20 @@ class PageSolver:
         self._no_progress_rounds = 0
         self._last_answer_sig = sig
         return False
+
+    def _bound_ask_to_the_budget(self) -> None:
+        """Give the planner what is LEFT of the solve, so one ask cannot outlive the whole thing.
+
+        A request in flight cannot be cancelled — `_check_deadline` is only read between steps — so the
+        only thing that bounds it is the timeout it was sent with. Measured on the hosted endpoint: one
+        ask hung and gave up after ~124s inside a 45s budget, and the attempt ran 143s.
+        """
+        target = getattr(self._solver, "planner", None)
+        if target is None or self._deadline_ms is None:
+            return
+        left_s = (self._deadline_ms - _now()) / 1000.0
+        target.request_timeout_s = max(planner.MIN_REQUEST_TIMEOUT_S,
+                                       min(planner.DEFAULT_REQUEST_TIMEOUT_S, left_s))
 
     def _apply_sampling(self) -> None:
         target = getattr(self._solver, "planner", None)
@@ -1748,6 +1763,7 @@ class PageSolver:
             # filmed every still board after a solve's first miss: 4-8s each, a 41.8s session became 49s.
             if attempt >= 2 and self._acted_on_board:
                 self._arm_animated_probe()
+            self._bound_ask_to_the_budget()
             # The deadline, not the bare config: a recording extends it once per solve (`_grant_video_budget`), and
             # a loop head reading only overall_solve_timeout_ms quit video solves at 45s with 29s still granted.
             deadline = self._deadline_ms if self._deadline_ms is not None else start + cfg.overall_solve_timeout_ms
@@ -1863,6 +1879,18 @@ class PageSolver:
             if not self.detect_captcha(page):
                 return done()
             if not did_interact and not self._no_progress_rounds:
+                # AN ANSWER WITH NOTHING TO EXECUTE IS NOT PROOF THE PAGE IS STUCK. The abort below
+                # exists for a driver that cannot act at all; an answer the driver could not use is a
+                # different thing, and on an animated board it is what a still expert returns when the
+                # board is not a still — measured on the hosted arms: a drag with no source box, "slide
+                # action, but the widget has neither a slider nor a draggable piece", solve over in 6s
+                # with the recording never taken. So buy the recording path one round first.
+                if self.config.video_solve_enabled and not self._retried_unusable_answer:
+                    self._retried_unusable_answer = True
+                    self._arm_animated_probe()
+                    _log("the answer had nothing this widget could execute; taking a second look "
+                         "before giving up")
+                    continue
                 raise CaptchaSolveError(
                     "captcha still detected but the solver performed no interactions; aborting to avoid an infinite loop")
 

@@ -31,6 +31,10 @@ import { SELECTORS, VENDORS, VendorSelectors, WIDGET_PROBES, WidgetProbe, RESPON
   TEXT_INPUT_SELECTORS, TEXT_INPUT_VENDOR_SELECTORS, SLIDER_HANDLE_SELECTORS, PIECE_SELECTORS } from './selectors';
 
 const execFileAsync = promisify(execFile);
+/** The ceiling on one ask, matching the Python planner's own default. */
+const CLI_ASK_TIMEOUT_MS = 120_000;
+/** And the floor, so a nearly-spent budget still gets a real attempt rather than a certain timeout. */
+const CLI_ASK_MIN_TIMEOUT_MS = 10_000;
 const log = (message: string, ...args: any[]) => console.log(`[Solver] ${message}`, ...args);
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const tmp = (prefix: string) => path.join(os.tmpdir(), `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1e9)}.png`);
@@ -175,6 +179,7 @@ export class CaptchaKrakenSolver {
   /** Answers keyed by screenshot hash; a hit means the answer already ran and changed nothing. */
   private solutionCache: Map<string, CliResponse> = new Map();
   private repeatedAnswerSeen = false;
+  private retriedUnusableAnswer = false;
   private knownAnimated = false;
   private animatedProbeDone = false;
   /** The one recording for the animated board on screen, and its answer until the widget refuses it. */
@@ -398,6 +403,17 @@ export class CaptchaKrakenSolver {
 
       if (!(await this.detectCaptcha(page))) return done();
       if (!didInteract && !this.noProgressRounds) {
+        // AN ANSWER WITH NOTHING TO EXECUTE IS NOT PROOF THE PAGE IS STUCK. The throw below is for a
+        // driver that cannot act at all; an answer the driver could not use is a different thing, and
+        // on an animated board it is what a still expert returns when the board is not a still —
+        // measured on the hosted arms: a drag with no source box, "slide action, but the widget has
+        // neither a slider nor a draggable piece", solve over in 6s with the recording never taken.
+        if (cfg.videoSolveEnabled !== false && !this.retriedUnusableAnswer) {
+          this.retriedUnusableAnswer = true;
+          this.repeatedAnswerSeen = true;   // what arms the second look
+          console.log('[animated] the answer had nothing this widget could execute; taking a second look before giving up.');
+          continue;
+        }
         throw new Error(`Captcha still detected but solver performed no interactions; aborting to avoid an infinite loop. Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
       }
     }
@@ -859,6 +875,18 @@ export class CaptchaKrakenSolver {
     const py = resolvePythonCommand({ configured: pythonCommand, venvPython: getVenvPython(cliRoot), exists: commandExists });
     this.cliCache = { cliRoot, py };
     return this.cliCache;
+  }
+
+  /** What is LEFT of the solve, as a bound on one ask.
+   *
+   * The CLI is a child process and the solve deadline is only read between steps, so nothing stops an
+   * ask already in flight — measured against the hosted endpoint, one hung for ~124s inside a 45s
+   * budget and the attempt ran 143s. Never below the floor: a keyframe ask carries six images, and a
+   * timeout shorter than the work turns a busy endpoint into a guaranteed failure. */
+  private askTimeoutMs(): number {
+    const ceiling = CLI_ASK_TIMEOUT_MS;
+    if (!this.solveDeadlineAt) return ceiling;
+    return Math.max(CLI_ASK_MIN_TIMEOUT_MS, Math.min(ceiling, this.solveDeadlineAt - Date.now()));
   }
 
   /** One-shot CLI tool call; `{}` on any failure so polling callers keep going. */
@@ -1510,7 +1538,7 @@ export class CaptchaKrakenSolver {
     const args = ['-m', 'captchakraken.cli', 'solve-animated', '--frames-dir', framesDir,
       '--fps', String(this.lastBurstFps ?? this.config.videoBurstFps ?? 10), ...(m ? ['--model', m] : [])];
     try {
-      const { stdout, stderr } = await execFileAsync(py, args, { cwd: cliRoot, env: this.solveEnvironment(cliRoot, apiKey), maxBuffer: 10 * 1024 * 1024 });
+      const { stdout, stderr } = await execFileAsync(py, args, { cwd: cliRoot, env: this.solveEnvironment(cliRoot, apiKey), maxBuffer: 10 * 1024 * 1024, timeout: this.askTimeoutMs(), killSignal: 'SIGKILL' });
       if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
       const parsed = JSON.parse(stdout.trim());
       if (parsed.keyframe_mode != null && !isOneOf(KeyframeMode, parsed.keyframe_mode)) throw new Error(`engine reported an unknown keyframe_mode '${parsed.keyframe_mode}'`);
@@ -1609,6 +1637,7 @@ export class CaptchaKrakenSolver {
   private resetSolveState(): void {
     this.solutionCache.clear();
     this.repeatedAnswerSeen = false;
+    this.retriedUnusableAnswer = false;
     this.knownAnimated = false;
     this.animatedProbeDone = false;
     this.discardAnimatedPlan();
@@ -1745,7 +1774,7 @@ export class CaptchaKrakenSolver {
     const args = buildSolveArgs({ imagePath, model: this.modelName(cliRoot), puzzleSource, retryMode, textMode, expert: this.config.expert });
     console.log(`Executing CaptchaKraken CLI: ${redactCommand([py, ...args].join(' '), apiKey)}`);
     try {
-      const { stdout, stderr } = await execFileAsync(py, args, { cwd: cliRoot, env: this.solveEnvironment(cliRoot, apiKey), maxBuffer: 10 * 1024 * 1024 });
+      const { stdout, stderr } = await execFileAsync(py, args, { cwd: cliRoot, env: this.solveEnvironment(cliRoot, apiKey), maxBuffer: 10 * 1024 * 1024, timeout: this.askTimeoutMs(), killSignal: 'SIGKILL' });
       console.log('CaptchaKraken CLI stdout:', stdout);
       if (stderr) console.error('CaptchaKraken CLI stderr:', stderr);
       if (!stdout.trim()) throw new Error(`CLI returned empty output. Stderr: ${stderr}`);
