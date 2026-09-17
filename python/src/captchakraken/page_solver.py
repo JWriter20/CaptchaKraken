@@ -402,6 +402,15 @@ class PageSolver:
             _log(f"[resample] temperature {sampling['temperature']}, seed {sampling['seed']}")
 
     def _fresh_board(self) -> None:
+        # ONE FILM, ONE BOARD — enforced where the board actually changes. The recorded answer describes the
+        # board it was cut from, so replaying it here presses that board's coordinates onto this one: live, a
+        # keyframe answer from an earlier board landed on hCaptcha's reference photo and then pressed Skip,
+        # six rounds running.
+        self._stop_animated_film()
+        self._known_animated = False
+        # Its own second look, but only once IT fails: an arm set on the previous board is evidence about that one.
+        self._animated_probe_armed = False
+        self._animated_probe_done = False
         self._resample_level = 0
         self._acted_on_board = False
         self._apply_sampling()
@@ -1734,11 +1743,19 @@ class PageSolver:
             return SolveResult(True, self._last_mouse, _aggregate(usage))
 
         for attempt in range(1, cfg.max_solve_loops + 1):
-            if attempt >= 2:
+            # A round that failed arms the second look only while its board is still up. A board the vendor has
+            # replaced (`_fresh_board` clears `_acted_on_board`) has failed nothing yet, and arming it anyway
+            # filmed every still board after a solve's first miss: 4-8s each, a 41.8s session became 49s.
+            if attempt >= 2 and self._acted_on_board:
                 self._arm_animated_probe()
-            if _now() - start > cfg.overall_solve_timeout_ms:
+            # The deadline, not the bare config: a recording extends it once per solve (`_grant_video_budget`), and
+            # a loop head reading only overall_solve_timeout_ms quit video solves at 45s with 29s still granted.
+            deadline = self._deadline_ms if self._deadline_ms is not None else start + cfg.overall_solve_timeout_ms
+            if _now() > deadline:
+                granted = deadline - start - cfg.overall_solve_timeout_ms
                 raise CaptchaSolveError(
-                    f"captcha solve timed out after {cfg.overall_solve_timeout_ms}ms (attempt {attempt}/{cfg.max_solve_loops})")
+                    f"captcha solve timed out after {deadline - start:.0f}ms (attempt {attempt}/{cfg.max_solve_loops})"
+                    + (f", including {granted:.0f}ms granted for recording an animated challenge" if granted > 0 else ""))
             if has_interacted and self.is_captcha_solved(page):
                 _log("captcha reports solved; finishing.")
                 return done()

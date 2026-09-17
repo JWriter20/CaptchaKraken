@@ -7,6 +7,35 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
+- **A board the vendor replaces ends its film.** The whole-solve camera lets a
+  recorded answer be reused once — the widget refuses it, the no-progress fence
+  spots the repeat, and the next round re-asks on a longer film. That reuse was
+  never bounded to the board it was cut from, so when the vendor dealt a
+  DIFFERENT puzzle the plan survived it and the next animated round replayed the
+  previous board's coordinates onto the new one. Measured live against hCaptcha,
+  a keyframe answer cut from one board was pressed onto a board two deals later
+  — landing on the reference photo in the banner, then submitting, which with
+  nothing selected reads as Skip. Six rounds could pass without a real attempt.
+  The film, the animated verdict and the slice now end the moment a next round
+  paints, which is what `stopAnimatedFilm` already documented.
+
+  The second look is per board too, and so is what arms it. A new board used to
+  inherit the arm: in Python a failed round armed it at every loop head, and in
+  JS a repeat seen on any board kept it armed. With each board granted its own
+  look, that filmed every still board dealt after a solve's first miss, even
+  boards nobody had answered yet: 28.8s of recording in a 48.3s session, against
+  the 45s budget. Now only a board that failed and is still up gets its second
+  look.
+
+- **Python honours the recording budget at the top of every round.** A
+  recording extends the solve's deadline once, and the checks inside a round
+  already read the extended deadline. The loop head did not: it compared
+  elapsed time with the bare `overall_solve_timeout_ms`, so a video solve that
+  had been granted its recording budget still quit at round 5 once 45s had
+  passed. JS always counted the grant there, so on a five-board video fixture
+  the two ports gave different answers. The timeout message now says how much
+  was granted, as JS's does.
+
 - **The recording does not stop when the answer is sent.** Builds directly on
   "drop the ANSWER, keep the FRAMES": the frames now grow, because the camera
   keeps running. Re-asking the same frames puts the same question up and gets
