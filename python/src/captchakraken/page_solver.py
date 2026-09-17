@@ -90,16 +90,30 @@ class PageClosedError(CaptchaSolveError):
     pass
 
 
-_STALE_HANDLE_RE = re.compile(r"Timeout .*exceeded|not visible|not attached|detached", re.IGNORECASE)
+#: `bounding box of captcha element` is in here because the JS port has always had it
+#: (`isStaleHandleError`): a widget with no box has moved on under us — hCaptcha swapped rounds, GeeTest
+#: closed on accept — and re-detecting is right where failing the attempt is not. Without it the Python
+#: port turned an accepted board into a failed solve.
+_STALE_HANDLE_RE = re.compile(
+    r"Timeout .*exceeded|not visible|not attached|detached|bounding box of captcha element",
+    re.IGNORECASE)
 # A closed target is not a stale handle: retried as one, a dead page was re-detected three times and the
 # error that finally escaped named whichever call ran last.
 _CLOSED_TARGET_RE = re.compile(
     r"Target (?:page, context or browser )?(?:has been )?closed|Session closed", re.IGNORECASE)
 
 
-def answer_needs_element_box(actions: List[Dict[str, Any]]) -> bool:
-    """An allow-list of what needs nothing: the other direction raises instead of clicking at the origin."""
-    return any((a or {}).get("action") != ActionKind.DONE for a in actions)
+def answer_needs_element_box(actions: Sequence[Any]) -> bool:
+    """An allow-list of what needs nothing: the other direction raises instead of clicking at the origin.
+
+    Takes actions in EITHER shape. The planner returns typed actions (`ClickAction`, `TypeAction`,
+    `DoneAction`) and every other reader here goes through `_as_dict` first; this one called `.get` on
+    them. It only runs when the element has no bounding box, which is what a widget that is CLOSING
+    looks like — so a solve the vendor had just accepted ended as
+    `AttributeError: 'ClickAction' object has no attribute 'get'` instead of as a success. Tier 3 saw
+    it as a lost solve on five types.
+    """
+    return any(_as_dict(a).get("action") != ActionKind.DONE for a in actions if a is not None)
 
 
 @dataclass
@@ -1647,6 +1661,13 @@ class PageSolver:
 
             element_box = element.bounding_box()
             if not element_box and answer_needs_element_box(actions):
+                # A WIDGET WITH NO BOX IS USUALLY A WIDGET THAT IS CLOSING, and it closes because the
+                # answer was accepted. Asking costs one call; not asking cost the solve — measured on
+                # 2026-09-17, five types graded `solved: true` on the board and then ended the attempt
+                # here, which Tier 3 reports as an answer the board would have taken, reported failed.
+                if self.is_captcha_solved(page):
+                    _log("the widget has no box because it is closing on a solved board; finishing.")
+                    return False, all_usage
                 raise CaptchaSolveError("could not get bounding box of captcha element")
 
             _log("[answer] " + json.dumps({"actions": [_as_dict(a) for a in actions]}, default=str))
