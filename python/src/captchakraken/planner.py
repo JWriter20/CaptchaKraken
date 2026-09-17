@@ -162,6 +162,16 @@ def _sampling_from_env() -> Dict[str, Any]:
         return {}
 
 
+#: The ceiling on one ask, and the old hardcoded value. Measured why it matters: against the hosted
+#: endpoint a single request hung and returned "the write operation timed out" after ~124s, inside a
+#: solve whose whole budget was 45s + 29s of recording — the attempt ran 143s. A timeout longer than
+#: the budget it sits inside cannot protect it, so callers with a deadline pass their own.
+DEFAULT_REQUEST_TIMEOUT_S: float = 120.0
+#: Never ask for less than this: a keyframe ask carries six images and a short timeout would turn a
+#: busy endpoint into a guaranteed failure rather than a slow success.
+MIN_REQUEST_TIMEOUT_S: float = 10.0
+
+
 class ActionPlanner:
 
     def __init__(
@@ -178,6 +188,10 @@ class ActionPlanner:
         self.base_url = base_url or config.base_url()
         self.api_key = api_key or config.api_key()
         self.sampling: Dict[str, Any] = {}
+        #: Seconds a single ask may take. The CALLER owns this: a solve has a budget, and a request
+        #: that outlives it cannot be cancelled once it is in flight — the deadline is only read
+        #: between steps. Left alone it is the old ceiling; `PageSolver` lowers it to what remains.
+        self.request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S
         _prompt_key = (self.model if prompts.canonical_model_id(self.model)
                        else config.lora_adapter())
         self.prompts = prompts.resolve(_prompt_key)
@@ -292,7 +306,8 @@ class ActionPlanner:
         self._log(f"POST {url} model={model} max_tokens={max_tokens} "
                   f"images={len(parts)}")
 
-        resp = self._http.post(url, headers=headers, json=payload, timeout=120)
+        resp = self._http.post(url, headers=headers, json=payload,
+                               timeout=self.request_timeout_s or DEFAULT_REQUEST_TIMEOUT_S)
 
         if not resp.ok:
             raise errors.from_response(resp, url)

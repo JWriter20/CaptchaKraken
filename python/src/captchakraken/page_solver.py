@@ -394,6 +394,20 @@ class PageSolver:
         self._last_answer_sig = sig
         return False
 
+    def _bound_ask_to_the_budget(self) -> None:
+        """Give the planner what is LEFT of the solve, so one ask cannot outlive the whole thing.
+
+        A request in flight cannot be cancelled — `_check_deadline` is only read between steps — so the
+        only thing that bounds it is the timeout it was sent with. Measured on the hosted endpoint: one
+        ask hung and gave up after ~124s inside a 45s budget, and the attempt ran 143s.
+        """
+        target = getattr(self._solver, "planner", None)
+        if target is None or self._deadline_ms is None:
+            return
+        left_s = (self._deadline_ms - _now()) / 1000.0
+        target.request_timeout_s = max(planner.MIN_REQUEST_TIMEOUT_S,
+                                       min(planner.DEFAULT_REQUEST_TIMEOUT_S, left_s))
+
     def _apply_sampling(self) -> None:
         target = getattr(self._solver, "planner", None)
         if target is None:
@@ -1749,6 +1763,7 @@ class PageSolver:
             # filmed every still board after a solve's first miss: 4-8s each, a 41.8s session became 49s.
             if attempt >= 2 and self._acted_on_board:
                 self._arm_animated_probe()
+            self._bound_ask_to_the_budget()
             # The deadline, not the bare config: a recording extends it once per solve (`_grant_video_budget`), and
             # a loop head reading only overall_solve_timeout_ms quit video solves at 45s with 29s still granted.
             deadline = self._deadline_ms if self._deadline_ms is not None else start + cfg.overall_solve_timeout_ms

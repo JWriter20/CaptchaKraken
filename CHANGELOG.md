@@ -7,6 +7,17 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
+- **One ask cannot outlive the solve it belongs to.** A request in flight
+  cannot be cancelled — the deadline is only read between steps — so the
+  timeout it was SENT with is the only thing bounding it. The planner sent
+  every request with a hardcoded 120s, 2.7x the whole 45s solve budget, and the
+  JS port ran the inference CLI as a child process with no timeout at all.
+  Measured against the hosted endpoint: one ask hung, gave up after ~124s with
+  "the write operation timed out", and the attempt ran 143.3s of which 123.9s
+  was that single call. The caller now passes what is LEFT of its budget, with
+  a 10s floor so a nearly-spent budget still buys a real attempt, and the child
+  process is killed rather than waited on.
+
 - **An answer with nothing to execute is not proof the page is stuck.** The
   driver aborts a solve when a round performs no interactions, which is right
   for a page with nothing to press and wrong for an answer it simply could not
