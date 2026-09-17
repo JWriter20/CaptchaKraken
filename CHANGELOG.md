@@ -7,6 +7,17 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
+- **A distorted-text board is asked about as text, on the first round.** Which
+  expert answers a round is decided by "is there a text box in this widget",
+  and that runs at the top of the round — before the vendor's frame has
+  necessarily painted. Measured under camoufox: `yandex_text` and
+  `mtcaptcha_text` had a RESOLVED frame holding zero elements, so the box was
+  missed and a distorted-text board went to the still expert, with only the
+  second round routing to `text`; Chromium painted faster and hid it. A frame
+  that is still empty now gets a short moment to paint, paid only when it is
+  empty. Three of four measured attempts moved from two rounds to one, and from
+  ~10-16s to 4-6s.
+
 - **A solve the vendor accepted is no longer lost to a closing widget.**
   `answer_needs_element_box` called `.get` on each action, but the planner
   returns TYPED actions as readily as dicts, so it raised

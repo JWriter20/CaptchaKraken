@@ -324,6 +324,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_a_solved_board_is_not_lost_to_a_typed_action.py` | A typed answer reads like a dict one, so a widget closing on an accepted board is not a failed solve. |
 | `python/tests/test_one_ask_cannot_outlive_the_solve.py` | The planner's request timeout is the caller's remaining budget, floored, and the request actually sends it. |
 | `python/tests/test_the_second_look_believes_its_recording.py` | The second look at a board that failed once is a question, and the clip it records answers it: a board that never moved goes back to the still expert. |
+| `python/tests/test_the_text_box_decides_the_expert.py` | A frame that has not painted yet does not get a text board sent to the still expert. |
 | `python/tests/test_the_notice_travels_with_the_package.py` | The LGPL notice for Cursory has to reach both published packages, and three copies are three chances to drift. |
 | `python/tests/test_a_grid_is_a_regular_lattice.py` | Every other grid check asks what is inside the cells; a click board over a photo passes those and is not a lattice. |
 | `python/tests/test_grid_dims_must_be_possible.py` | `find_grid` proposes lattices; a shape no vendor actually ships is a false positive. |
