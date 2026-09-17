@@ -175,6 +175,7 @@ export class CaptchaKrakenSolver {
   /** Answers keyed by screenshot hash; a hit means the answer already ran and changed nothing. */
   private solutionCache: Map<string, CliResponse> = new Map();
   private repeatedAnswerSeen = false;
+  private retriedUnusableAnswer = false;
   private knownAnimated = false;
   private animatedProbeDone = false;
   /** The one recording for the animated board on screen, and its answer until the widget refuses it. */
@@ -398,6 +399,17 @@ export class CaptchaKrakenSolver {
 
       if (!(await this.detectCaptcha(page))) return done();
       if (!didInteract && !this.noProgressRounds) {
+        // AN ANSWER WITH NOTHING TO EXECUTE IS NOT PROOF THE PAGE IS STUCK. The throw below is for a
+        // driver that cannot act at all; an answer the driver could not use is a different thing, and
+        // on an animated board it is what a still expert returns when the board is not a still —
+        // measured on the hosted arms: a drag with no source box, "slide action, but the widget has
+        // neither a slider nor a draggable piece", solve over in 6s with the recording never taken.
+        if (cfg.videoSolveEnabled !== false && !this.retriedUnusableAnswer) {
+          this.retriedUnusableAnswer = true;
+          this.repeatedAnswerSeen = true;   // what arms the second look
+          console.log('[animated] the answer had nothing this widget could execute; taking a second look before giving up.');
+          continue;
+        }
         throw new Error(`Captcha still detected but solver performed no interactions; aborting to avoid an infinite loop. Total usage: ${JSON.stringify(aggregateTokenUsage(cumulativeTokenUsage))}`);
       }
     }
@@ -1609,6 +1621,7 @@ export class CaptchaKrakenSolver {
   private resetSolveState(): void {
     this.solutionCache.clear();
     this.repeatedAnswerSeen = false;
+    this.retriedUnusableAnswer = false;
     this.knownAnimated = false;
     this.animatedProbeDone = false;
     this.discardAnimatedPlan();

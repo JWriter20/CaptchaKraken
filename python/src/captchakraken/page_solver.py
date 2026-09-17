@@ -357,6 +357,7 @@ class PageSolver:
         self._animated_probe_armed = False
         self._animated_probe_done = False
         self._video_budget_granted = False
+        self._retried_unusable_answer = False
         self._stop_animated_film()
         self._keyframe_mode: Optional[KeyframeMode] = None
         self._keyframe_steady_screens = 0
@@ -1863,6 +1864,18 @@ class PageSolver:
             if not self.detect_captcha(page):
                 return done()
             if not did_interact and not self._no_progress_rounds:
+                # AN ANSWER WITH NOTHING TO EXECUTE IS NOT PROOF THE PAGE IS STUCK. The abort below
+                # exists for a driver that cannot act at all; an answer the driver could not use is a
+                # different thing, and on an animated board it is what a still expert returns when the
+                # board is not a still — measured on the hosted arms: a drag with no source box, "slide
+                # action, but the widget has neither a slider nor a draggable piece", solve over in 6s
+                # with the recording never taken. So buy the recording path one round first.
+                if self.config.video_solve_enabled and not self._retried_unusable_answer:
+                    self._retried_unusable_answer = True
+                    self._arm_animated_probe()
+                    _log("the answer had nothing this widget could execute; taking a second look "
+                         "before giving up")
+                    continue
                 raise CaptchaSolveError(
                     "captcha still detected but the solver performed no interactions; aborting to avoid an infinite loop")
 

@@ -7,6 +7,18 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
+- **An answer with nothing to execute is not proof the page is stuck.** The
+  driver aborts a solve when a round performs no interactions, which is right
+  for a page with nothing to press and wrong for an answer it simply could not
+  use. On an animated board that is what a still answer looks like: measured
+  against the hosted endpoint, a board came back as a drag with no source box,
+  the driver logged "slide action, but the widget has neither a slider nor a
+  draggable piece", and the solve ended 6.0s into its 45s budget with the
+  recording never taken — three animated types failed every attempt that way
+  while the same boards solved on another adapter. Such a round now buys the
+  recording path one look before the solve is abandoned, in both ports. A page
+  that takes nothing at all still gives up, one round later than before.
+
 - **A board the vendor replaces ends its film.** The whole-solve camera lets a
   recorded answer be reused once — the widget refuses it, the no-progress fence
   spots the repeat, and the next round re-asks on a longer film. That reuse was
