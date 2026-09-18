@@ -427,6 +427,31 @@ blue sky plus something white.
 
 ## Rounds, bursts and gates
 
+**The board paints before the round asks anything about it.** A round opens on
+two questions — which expert answers it, read out of the DOM as "is there a text
+box in here", and whether the board cycles, read off its motion — and both were
+asked at the top of the round, before the widget had necessarily drawn. A
+resolved vendor frame holding nothing answers both wrongly in the same way: no
+box to find, and no motion but its own arrival. The paint wait is not new and
+was not added for this; it already ran a few lines further down, and it moved
+ahead of the two decisions that depend on it. Anything that wants to know what
+the board IS goes after it.
+
+A reCAPTCHA round is the exception, and it is not a special case so much as the
+same rule read the other way: it is asked neither question — never typed, never
+filmed — and it waits for its board at the grid gate, on the cells themselves.
+Waiting for the paint in front of that gate measured 0.8-1.8s a round on the
+family with the tightest per-board budget, and covered a board the gate below
+already covers.
+
+**A verdict is read off the film, not off the clock the film ran on.** The
+speculative round films the widget while the model reads one screen of it, then
+asks the film whether the board moved. The ask is what takes the time, so on a
+slow round the recording is over before it is questioned — and a verdict that
+only ever read a film still rolling called every finished one a still. The
+Python port never had this: its burst is synchronous, so it computes its verdict
+at the end of its own window. The JS recorder now answers the same way.
+
 **The blank-board gate exists because the settle gate cannot see a blank
 rebuild.** Measured on gt4.geetest.com's slide demo on 2026-09-12 over ten live
 attempts: six of fifty-two requests carried a board with under 5% ink and every
@@ -469,6 +494,47 @@ against the work it supervises: 16 of the Python port's 69 failed attempts in
 one run were it firing on a still board. There is no "enough screens, stop
 filming" exit: both spellings were measured on number_with_highest_value_video
 and failed every seed either way.
+
+**The second look is a question, and the clip it records answers it.** A board
+that failed a round buys one recording, because "settled" is not proof of
+static. That probe used to declare the board animated *before* filming it, so an
+ordinary miss on a still board — a slide landing 3% wide, a grid read wrong —
+went to the video expert, which can only answer a still with a frame number no
+widget will take. The answer then repeated until the no-progress fence tripped:
+three rounds and twenty-three seconds where one re-ask would have done, and a
+board that needs a second drag never got one. The clip decides now, and it may
+only PROMOTE: an animation the settle classifier already measured is never
+demoted by a film that ends on a settled screen, which is exactly what a board
+that plays once and stops films like.
+
+**The camera does not stop when the answer is sent.** A burst can only show the
+model the screens that fell inside its window, and the answer it produces is
+identical next round by construction: sampling is greedy (`RESAMPLE_TEMPERATURES
+= (0.0,)`), so the same frames give the same answer. A board whose answer lived
+on a screen the window missed therefore had no second chance — the stored plan
+was re-pressed until the no-progress fence tripped at round 3 of 6, with half
+the budget unspent. Measured live on 2026-09-15 against the vendors' own pages,
+hCaptcha's animated board read **2/15 and 6/12** on the two served models, where
+the driver that still re-filmed every round had recorded **36/36**. Re-filming
+had been retired as a defect — it did exhaust the budget — without anyone
+noticing it was also the only retry an animated board had.
+
+So the film now runs for the whole solve and every round slices a **strictly
+longer** one. This works because a keyframe is a distinct SCREEN, not a frame:
+`_detect_cycle` returns one representative per screen in the cycle, so a longer
+film converges on the cycle instead of growing the request, and on a board that
+never repeats `_even_indices` spreads its six picks across the whole solve
+rather than across four seconds. A refused answer drops the PLAN and keeps the
+film; only a board that is gone stops the camera.
+
+**The two ports accumulate differently, and that is not a divergence to fix.**
+The JS recorder is an async loop on the solver's own event loop, so it films
+continuously — through inference, through the verdict wait — and pauses only
+while we click, because a frame of the board wearing our own answer is not a
+screen the board ever showed. Sync Playwright is thread-affine, so the Python
+port cannot run a camera on another thread at all; it films another chunk each
+round and slices the accumulation. Same contract — a refused animated answer is
+re-asked against strictly more of the board — at a sparser sample.
 
 **`measurePieceBox` must not set `actedOnBoard`.** It runs during detection,
 and marking there disabled `shouldSpeculate` on every slide solve, so the

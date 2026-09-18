@@ -16,7 +16,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from . import planner
 from .action_types import CaptchaAction
@@ -78,6 +78,15 @@ class AnimatedChallengeError(CaptchaSolveError):
     pass
 
 
+class NothingFilmedError(AnimatedChallengeError):
+    """The burst caught no frame at all.
+
+    `_burst` only returns nothing when EVERY screenshot in its window failed, so this is not a verdict
+    about the board — a still photographs fine. It is a widget that would not screenshot, and the
+    commonest reason for that is that it is closing, because the answer was accepted.
+    """
+
+
 class UnsupportedChallengeError(CaptchaSolveError):
     pass
 
@@ -90,16 +99,30 @@ class PageClosedError(CaptchaSolveError):
     pass
 
 
-_STALE_HANDLE_RE = re.compile(r"Timeout .*exceeded|not visible|not attached|detached", re.IGNORECASE)
+#: `bounding box of captcha element` is in here because the JS port has always had it
+#: (`isStaleHandleError`): a widget with no box has moved on under us — hCaptcha swapped rounds, GeeTest
+#: closed on accept — and re-detecting is right where failing the attempt is not. Without it the Python
+#: port turned an accepted board into a failed solve.
+_STALE_HANDLE_RE = re.compile(
+    r"Timeout .*exceeded|not visible|not attached|detached|bounding box of captcha element",
+    re.IGNORECASE)
 # A closed target is not a stale handle: retried as one, a dead page was re-detected three times and the
 # error that finally escaped named whichever call ran last.
 _CLOSED_TARGET_RE = re.compile(
     r"Target (?:page, context or browser )?(?:has been )?closed|Session closed", re.IGNORECASE)
 
 
-def answer_needs_element_box(actions: List[Dict[str, Any]]) -> bool:
-    """An allow-list of what needs nothing: the other direction raises instead of clicking at the origin."""
-    return any((a or {}).get("action") != ActionKind.DONE for a in actions)
+def answer_needs_element_box(actions: Sequence[Any]) -> bool:
+    """An allow-list of what needs nothing: the other direction raises instead of clicking at the origin.
+
+    Takes actions in EITHER shape. The planner returns typed actions (`ClickAction`, `TypeAction`,
+    `DoneAction`) and every other reader here goes through `_as_dict` first; this one called `.get` on
+    them. It only runs when the element has no bounding box, which is what a widget that is CLOSING
+    looks like — so a solve the vendor had just accepted ended as
+    `AttributeError: 'ClickAction' object has no attribute 'get'` instead of as a success. Tier 3 saw
+    it as a lost solve on five types.
+    """
+    return any(_as_dict(a).get("action") != ActionKind.DONE for a in actions if a is not None)
 
 
 @dataclass
@@ -194,6 +217,9 @@ class PageSolverConfig:
     animated_probe_enabled: bool = True
     video_burst_duration_ms: int = 4_000
     video_burst_max_ms: int = 12_000
+    # Safety ceiling on the film an animated board accumulates across rounds. It is meant to end with the
+    # solve, not on this clock; frames are decoded images, so this bounds memory rather than the recording.
+    video_film_max_ms: int = 120_000
     speculative_burst_enabled: bool = True
     video_burst_fps: int = 10
     # GeeTest svg dwells up to 2.7s a screen, so a 3-screen cycle is 8.1s; 6s gave up one screen short.
@@ -320,6 +346,14 @@ class PageSolver:
         self._deadline_ms: Optional[float] = None
         self._budget: Optional[PhaseBudget] = None
         self._animated_plan: Optional[Tuple[List[str], str, Any, Any]] = None
+        self._film_frames: List[Any] = []
+        self._film_ms: float = 0.0
+        # The digests of every screen the film holds: what a later burst is checked against to answer
+        # "is this still the same board?" — see `_record_keyframes`.
+        self._film_digests: Set[str] = set()
+        # Has this board EVER shown the same screen twice? A board that has not cannot prove it was replaced
+        # and has no cycle left to find, so a re-ask neither re-films it at length nor throws its film away.
+        self._film_cycled: bool = False
         self._reset_animated_state()
 
     @property
@@ -346,7 +380,8 @@ class PageSolver:
         self._animated_probe_armed = False
         self._animated_probe_done = False
         self._video_budget_granted = False
-        self._discard_animated_plan()
+        self._retried_unusable_answer = False
+        self._stop_animated_film()
         self._keyframe_mode: Optional[KeyframeMode] = None
         self._keyframe_steady_screens = 0
         self._last_answer_sig: Optional[str] = None
@@ -382,6 +417,20 @@ class PageSolver:
         self._last_answer_sig = sig
         return False
 
+    def _bound_ask_to_the_budget(self) -> None:
+        """Give the planner what is LEFT of the solve, so one ask cannot outlive the whole thing.
+
+        A request in flight cannot be cancelled — `_check_deadline` is only read between steps — so the
+        only thing that bounds it is the timeout it was sent with. Measured on the hosted endpoint: one
+        ask hung and gave up after ~124s inside a 45s budget, and the attempt ran 143s.
+        """
+        target = getattr(self._solver, "planner", None)
+        if target is None or self._deadline_ms is None:
+            return
+        left_s = (self._deadline_ms - _now()) / 1000.0
+        target.request_timeout_s = max(planner.MIN_REQUEST_TIMEOUT_S,
+                                       min(planner.DEFAULT_REQUEST_TIMEOUT_S, left_s))
+
     def _apply_sampling(self) -> None:
         target = getattr(self._solver, "planner", None)
         if target is None:
@@ -391,6 +440,15 @@ class PageSolver:
             _log(f"[resample] temperature {sampling['temperature']}, seed {sampling['seed']}")
 
     def _fresh_board(self) -> None:
+        # ONE FILM, ONE BOARD — enforced where the board actually changes. The recorded answer describes the
+        # board it was cut from, so replaying it here presses that board's coordinates onto this one: live, a
+        # keyframe answer from an earlier board landed on hCaptcha's reference photo and then pressed Skip,
+        # six rounds running.
+        self._stop_animated_film()
+        self._known_animated = False
+        # Its own second look, but only once IT fails: an arm set on the previous board is evidence about that one.
+        self._animated_probe_armed = False
+        self._animated_probe_done = False
         self._resample_level = 0
         self._acted_on_board = False
         self._apply_sampling()
@@ -1026,16 +1084,19 @@ class PageSolver:
             return True
         with self._phase(Phase.SETTLE):
             verdict = self._wait_for_element_settled(element)
-        if verdict != SettleVerdict.ANIMATED:
-            # 'settled' is not proof of static; a repeated answer arms one recording to find out.
+        animated = verdict == SettleVerdict.ANIMATED
+        if not animated:
+            # 'settled' is not proof of static; a repeated answer arms one recording to find out. The clip
+            # that recording brings back is what decides — `_known_animated` is set from it, not from here.
             if not self._animated_probe_armed or self._animated_probe_done:
                 return False
             self._animated_probe_done, self._animated_probe_armed = True, False
             _log("[animated] a second look at a board that did not solve as a still — recording it")
-        self._known_animated = True
+        self._known_animated = animated
         if not self.config.video_solve_enabled:
             raise AnimatedChallengeError("the challenge never settles and video_solve_enabled is off")
-        _log("[animated] challenge is animated — solving it from keyframes")
+        if animated:
+            _log("[animated] challenge is animated — solving it from keyframes")
         return True
 
     def _arm_animated_probe(self) -> None:
@@ -1049,10 +1110,15 @@ class PageSolver:
         return (cfg.video_solve_enabled and cfg.speculative_burst_enabled and not self._acted_on_board
                 and puzzle_source != Vendor.RECAPTCHA and not text_mode)
 
-    def _burst(self, element: Any) -> Tuple[List[Any], List[str], bool, float]:
+    def _burst(self, element: Any, known: AbstractSet[str] = frozenset(),
+               max_ms: Optional[float] = None) -> Tuple[List[Any], List[str], bool, float, bool]:
         """Film the widget until a screen comes back (a cycle) or nothing new appears for a floor window.
 
-        Returns `(frames, distinct_digests, moved, elapsed_ms)`. `moved` is a closed cycle OR a board still
+        `known` is the screens an earlier burst of this solve already holds. One of them coming back proves
+        the board was not replaced, and the film in hand already describes it, so there is nothing left to
+        film — that exit is the difference between a re-ask costing a frame and costing a whole window.
+
+        Returns `(frames, distinct_digests, moved, elapsed_ms, cycle_closed)`. `moved` is a closed cycle OR a board still
         producing new screens past the floor with more than BURST_ANIMATED_SCREENS seen: a continuous animation
         never repeats and never settles, so without that verdict it read as a still and was clicked as one.
         Both bounds are wall-clock. There is no "enough screens, stop" exit: both spellings were measured on
@@ -1062,7 +1128,7 @@ class PageSolver:
 
         cfg = self.config
         floor_ms = float(cfg.video_burst_duration_ms)
-        max_ms = max(floor_ms, float(cfg.video_burst_max_ms))
+        max_ms = max(floor_ms, float(cfg.video_burst_max_ms if max_ms is None else max_ms))
         interval = 1.0 / max(1, int(cfg.video_burst_fps))
         frames: List[Any] = []
         order: List[str] = []
@@ -1088,6 +1154,12 @@ class PageSolver:
                 if img is not None:
                     frames.append(img)
                     d = _sha1(shot)
+                    if d in known:
+                        _log("[animated] a screen the film already holds came back — the board is unchanged")
+                        cycle_closed = True
+                        if d not in order:
+                            order.append(d)
+                        break
                     if d != last_digest:
                         if d in order and len(order) >= 2:
                             cycle_closed = True
@@ -1105,8 +1177,14 @@ class PageSolver:
                 # Sleep to a fixed grid, not `interval - work`: per-frame overshoot would otherwise accumulate and a
                 # loaded runner films fewer frames than the floor window holds. A stalled frame skips, not bunches.
                 next_at = max(next_at + interval, time.monotonic())
+                # END on the frame that would land past the ceiling rather than declining to sleep for it:
+                # declining left the loop spinning at whatever rate the screenshots came back, which on a
+                # ceiling that is not a whole number of intervals filmed thousands of junk frames into the
+                # tail of the clip (measured: 2487 frames in a 150ms window).
+                if (next_at - t0) * 1000.0 >= max_ms:
+                    break
                 wait = next_at - time.monotonic()
-                if wait > 0 and (next_at - t0) * 1000.0 < max_ms:
+                if wait > 0:
                     time.sleep(wait)
         finally:
             _unlink(shot)
@@ -1120,7 +1198,7 @@ class PageSolver:
             why = "no new screen for a full floor window — it moved once and settled"
         _log(f"[animated] burst verdict after {elapsed_ms / 1000:.1f}s: "
              f"{'ANIMATED' if cycle_closed or animating else 'still'} ({len(order)} screens; {why})")
-        return frames, order, cycle_closed or animating, elapsed_ms
+        return frames, order, cycle_closed or animating, elapsed_ms, cycle_closed
 
     def _slice(self, frames: List[Any], burst_ms: float) -> Tuple[List[str], str]:
         """Cut a burst with the training-side slicer; the model answers with a frame number into it."""
@@ -1134,10 +1212,31 @@ class PageSolver:
         _log(f"[animated] sliced to {len(paths)} keyframe(s) (mode={kfset.mode})")
         return paths, temp_dir
 
-    def _record_keyframes(self, element: Any) -> Tuple[List[str], str]:
-        """Record the widget and return `(keyframe_paths, temp_dir)`; the caller removes the dir.
+    def _record_keyframes(self, element: Any) -> Tuple[List[str], str, bool]:
+        """Record the widget and return `(keyframe_paths, temp_dir, moved)`; the caller removes the dir.
 
         Frames stay in memory: the intermediate mp4 this used to write was mp4v, which the serving side may not decode.
+
+        THE FILM IS NEVER THROWN AWAY MID-SOLVE. One burst can only show the model the screens that fell
+        inside its window — measured, a 4s burst against a 5.3s cycle showed two screens of three — and the
+        answer it produces is identical next round by construction, because sampling is greedy over the same
+        frames. So a refused answer used to be re-pressed until the no-progress fence tripped. Every round
+        now films ANOTHER chunk and slices the whole accumulation, so the next ask is a strictly better
+        question: more repetitions for `_detect_cycle` to confirm, and, on a board that never repeats, the
+        slicer's even picks spread across the whole solve rather than across four seconds.
+
+        WHAT IT IS NOT IS A FILM OF TWO BOARDS. Accumulating across a board the vendor replaced is worse
+        than not accumulating at all — six keyframes cut across both states describe neither, `_detect_cycle`
+        gives up on the extra screens, and the frame the model names is one the widget will never show
+        again. A screen coming back is the proof the board is the same one; nothing coming back restarts
+        the film below.
+
+        THE JS PORT FILMS CONTINUOUSLY AND THIS ONE CANNOT. There the recorder is an async loop on the same
+        event loop, so it keeps filming through inference and through the verdict wait. Sync Playwright is
+        thread-affine — `_speculate` says so where it hands only the HTTP call to a worker — so a background
+        camera here would be a second thread touching the page, which Playwright forbids. Accumulating
+        per-round chunks is the same contract with a sparser film: both ports re-ask a refused animated
+        answer against strictly more of the board than the last ask saw.
         """
         cfg = self.config
         self._grant_video_budget()
@@ -1147,12 +1246,46 @@ class PageSolver:
                 f"budget is left and an animated recording needs {cfg.video_burst_duration_ms}ms — not "
                 "starting one that would be cut off mid-way. Raise overall_solve_timeout_ms or "
                 "video_extra_inference_ms, or set video_solve_enabled=False.")
-        frames, _order, _closed, burst_ms = self._burst(element)
+        # A board that has never repeated a screen has nothing further to show: another ceiling-long window
+        # is more of the same animation, and three of them is most of the solve budget. Measured on the gate:
+        # boards at 54.6s and 59.1s against a 49s ceiling, all of them boards that never repeat.
+        reask = bool(self._film_frames)
+        frames, order, moved, burst_ms, cycled = self._burst(
+            element, known=self._film_digests,
+            max_ms=float(cfg.video_burst_duration_ms) if reask and not self._film_cycled else None)
         if not frames:
+            # ONLY the speculative second look gets the soft landing. A board this solve has PROVEN
+            # animated is a real dead end when it will not film, and must fail loudly as it always
+            # has: measured, treating both the same took the two video types from 3 solved and 10
+            # keyframe calls to 0 and 0, because the first failed film spends `_animated_probe_done`
+            # and every round after it is answered as a still.
+            if not self._known_animated:
+                raise NothingFilmedError("could not record the animated challenge (no frame screenshotted)")
             raise AnimatedChallengeError("could not record the animated challenge (no frame screenshotted)")
         _log(f"[animated] recorded {len(frames)} frames in {burst_ms / 1000:.1f}s "
              f"({measured_fps(len(frames), burst_ms, cfg.video_burst_fps):.1f}fps)")
-        return self._slice(frames, burst_ms)
+        # ONE FILM, ONE BOARD. A vendor that deals a fresh puzzle on a miss has replaced everything the film
+        # holds, and keyframes cut across both name screens that no longer exist: the model answers with one
+        # and the click waits out `keyframe_wait_timeout_ms` for a picture that is gone. Nothing coming back
+        # is what says so, and the film restarts on the board that is actually there.
+        # Cut ONLY on proof of a replacement: this burst repeated a screen, and none of what it repeated was
+        # in the film. A board that never repeats cannot produce that proof either way and has not been
+        # replaced — it has simply never repeated, and its film is the only record of it.
+        if reask and cycled and not (self._film_digests & set(order)):
+            _log("[animated] nothing the film holds came back — the board was replaced; the film restarts here")
+            self._film_frames, self._film_ms, self._film_digests = [], 0.0, set()
+        # The cap is a safety net on memory, not the working limit: frames are decoded images, and a board
+        # that never settles would otherwise film for the whole solve budget.
+        if self._film_ms < cfg.video_film_max_ms:
+            self._film_frames.extend(frames)
+            self._film_ms += burst_ms
+            self._film_digests.update(order)
+        self._film_cycled = self._film_cycled or cycled
+        if len(self._film_frames) > len(frames):
+            _log(f"[animated] slicing {len(self._film_frames)} frames filmed over "
+                 f"{self._film_ms / 1000:.1f}s — every round of this board, not just this one")
+        paths, temp_dir = self._slice(self._film_frames or frames, self._film_ms or burst_ms)
+        return paths, temp_dir, moved
 
     def _speculate(self, element: Any, shot: str, puzzle_source: Vendor, retry_mode: Optional[RetryMode],
                    text_mode: bool) -> Tuple[List[CaptchaAction], List[Dict[str, Any]], Optional[str]]:
@@ -1164,7 +1297,7 @@ class PageSolver:
         try:
             fut = pool.submit(self._get_solution, shot, puzzle_source, retry_mode, text_mode)
             with self._phase(Phase.BURST):
-                frames, order, moved, burst_ms = self._burst(element)
+                frames, order, moved, burst_ms, _cycled = self._burst(element)
             if not moved:
                 with self._phase(Phase.INFERENCE):
                     actions, usage = fut.result()
@@ -1178,6 +1311,7 @@ class PageSolver:
                         _debug(f"settled re-read failed: {exc}")
                 return actions, usage, None
             _log("[animated] the widget moved while the model was reading it — finishing the recording")
+            self._known_animated = True
             fut.result()
             self._grant_video_budget()
             paths, keyframe_dir = self._slice(frames, burst_ms)
@@ -1200,10 +1334,24 @@ class PageSolver:
         self._animated_plan = (plan[0], plan[1], None, None)
 
     def _discard_animated_plan(self) -> None:
+        """Drop the ANSWER, keep the film.
+
+        An answer the widget refused is spent: reusing it presses the same wrong thing until the fence trips
+        three rounds in, with half the budget unspent. The frames are the opposite — every chunk added makes
+        the next ask a better question — so only a board that is GONE clears them, via `_stop_animated_film`.
+        """
         plan = self._animated_plan
         self._animated_plan = None
         if plan and plan[1]:
             shutil.rmtree(plan[1], ignore_errors=True)
+
+    def _stop_animated_film(self) -> None:
+        """The board is gone: its film can never describe the next one."""
+        self._discard_animated_plan()
+        self._film_frames = []
+        self._film_ms = 0.0
+        self._film_digests = set()
+        self._film_cycled = False
 
     def _answer_region_recurs(self, keyframe_path: str, ref: Any, box: Any) -> bool:
         """Does the chosen keyframe's answer area appear in a sibling keyframe of the same clip?"""
@@ -1262,12 +1410,12 @@ class PageSolver:
                     polls += 1
                     if polls >= _NOT_THIS_BOARD_POLLS and best > _NOT_THIS_BOARD_DIFF:
                         _log("[animated] the widget no longer resembles the recorded board")
-                        self._discard_animated_plan()
+                        self._stop_animated_film()
                         return False
                 _delay(cfg.keyframe_wait_poll_ms)
         finally:
             _unlink(probe)
-        self._discard_animated_plan()
+        self._stop_animated_film()
         _log(f"[animated] widget never matched the chosen keyframe within {wait_ms}ms (closest diff={best:.4f})")
         return False
 
@@ -1441,10 +1589,6 @@ class PageSolver:
         element, puzzle_source, role = widget.element, widget.vendor, widget.role
         frame = element.content_frame()
         scope = frame or widget.at
-        # Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
-        text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, widget.at) is not None
-        if text_mode:
-            _log("widget has a text box; solving as a distorted-text captcha")
 
         if frame and role == FrameRole.CHALLENGE and SELECTORS[puzzle_source].images:
             if self._last_submit_frame_hash:
@@ -1453,6 +1597,22 @@ class PageSolver:
                 self._last_submit_frame_hash = None
             with self._phase(Phase.HCAPTCHA_IMAGES):
                 self._wait_for_board_images(frame, SELECTORS[puzzle_source])
+
+        # THE TWO QUESTIONS BELOW ARE PUT TO A PAINTED BOARD. Which expert answers the round is read out of
+        # the DOM and whether the board cycles is read off its motion, and a widget that has not drawn yet
+        # has no text box to find and no motion but its own arrival.
+        #
+        # A reCAPTCHA board is asked NEITHER — it is never typed and never filmed — and it waits for its
+        # board at the grid gate below, on the cells themselves. Waiting here as well put 0.8-1.8s in front
+        # of that gate on every dynamic round, on the family with the tightest per-board budget.
+        if puzzle_source != Vendor.RECAPTCHA:
+            with self._phase(Phase.BOARD_PAINT):
+                self._wait_for_board_painted(element)
+
+        # Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
+        text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, widget.at) is not None
+        if text_mode:
+            _log("widget has a text box; solving as a distorted-text captcha")
 
         # A checkbox is clicked, not filmed, and a reCAPTCHA board is read by its grid below.
         filmable = role != FrameRole.CHECKBOX and puzzle_source != Vendor.RECAPTCHA and not text_mode
@@ -1471,8 +1631,10 @@ class PageSolver:
                 if element_box:
                     return self._solve_recaptcha_grid(page, element, retry_mode, grid, element_box)
 
-        with self._phase(Phase.BOARD_PAINT):
-            self._wait_for_board_painted(element)
+        # The board a reCAPTCHA round photographs, for the rounds that do not take the grid path above.
+        if puzzle_source == Vendor.RECAPTCHA:
+            with self._phase(Phase.BOARD_PAINT):
+                self._wait_for_board_painted(element)
 
         shot = _tmp_png("captcha")
         performed = slid = answered = have_shot = False
@@ -1483,18 +1645,30 @@ class PageSolver:
                 if self._animated_plan is not None:
                     keyframes, keyframe_dir, actions, all_usage = self._animated_plan
                     reused = actions is not None
+                    if not reused:
+                        # Drop the ANSWER, keep the FRAMES — and the frames grow. Filming another chunk and
+                        # re-slicing the accumulation puts a better question up; re-asking the same frames
+                        # puts the same question up and gets the same answer back.
+                        with self._phase(Phase.BURST):
+                            keyframes, new_dir, moved = self._record_keyframes(element)
+                        shutil.rmtree(keyframe_dir, ignore_errors=True)
+                        keyframe_dir = new_dir
+                        self._known_animated = self._known_animated or moved
                     _log("[animated] reusing the recorded answer" if reused
-                         else "[animated] re-asking on the frames already recorded")
+                         else "[animated] re-asking on a film a round longer")
                 else:
                     reused = False
                     with self._phase(Phase.BURST):
-                        keyframes, keyframe_dir = self._record_keyframes(element)
-                if len(keyframes) < 2:
-                    _log("[animated] the recording shows one picture; solving it as a still")
+                        keyframes, keyframe_dir, moved = self._record_keyframes(element)
+                    self._known_animated = self._known_animated or moved
+                # The clip answers the question the probe asked: a board that never moved is a still, and the
+                # video expert can only answer a still with a frame number the widget will not take.
+                if len(keyframes) < 2 or not self._known_animated:
+                    _log("[animated] the recording shows a still board; solving it as a still")
                     is_animated = False
-                    shutil.copyfile(keyframes[0], shot)
+                    shutil.copyfile(keyframes[-1], shot)
                     have_shot = True
-                    self._discard_animated_plan()
+                    self._stop_animated_film()
                     shutil.rmtree(keyframe_dir, ignore_errors=True)
                     keyframe_dir = None
                 elif not reused:
@@ -1517,11 +1691,19 @@ class PageSolver:
 
             element_box = element.bounding_box()
             if not element_box and answer_needs_element_box(actions):
+                # A WIDGET WITH NO BOX IS USUALLY A WIDGET THAT IS CLOSING, and it closes because the
+                # answer was accepted. Asking costs one call; not asking cost the solve — measured on
+                # 2026-09-17, five types graded `solved: true` on the board and then ended the attempt
+                # here, which Tier 3 reports as an answer the board would have taken, reported failed.
+                if self.is_captcha_solved(page):
+                    _log("the widget has no box because it is closing on a solved board; finishing.")
+                    return False, all_usage
                 raise CaptchaSolveError("could not get bounding box of captcha element")
 
             _log("[answer] " + json.dumps({"actions": [_as_dict(a) for a in actions]}, default=str))
             # A repeated answer is not re-performed: the widget already refused it, and every extra press is
             # behaviour a vendor scores. Re-asking with a fresh sample or a recording is the round's only move.
+            # `_note_answer` drops the refused animated answer on its way through, so the next round re-asks.
             if self._note_answer(actions, retry_mode):
                 return False, all_usage
             _log(f"executing {len(actions)} action(s)")
@@ -1627,11 +1809,20 @@ class PageSolver:
             return SolveResult(True, self._last_mouse, _aggregate(usage))
 
         for attempt in range(1, cfg.max_solve_loops + 1):
-            if attempt >= 2:
+            # A round that failed arms the second look only while its board is still up. A board the vendor has
+            # replaced (`_fresh_board` clears `_acted_on_board`) has failed nothing yet, and arming it anyway
+            # filmed every still board after a solve's first miss: 4-8s each, a 41.8s session became 49s.
+            if attempt >= 2 and self._acted_on_board:
                 self._arm_animated_probe()
-            if _now() - start > cfg.overall_solve_timeout_ms:
+            self._bound_ask_to_the_budget()
+            # The deadline, not the bare config: a recording extends it once per solve (`_grant_video_budget`), and
+            # a loop head reading only overall_solve_timeout_ms quit video solves at 45s with 29s still granted.
+            deadline = self._deadline_ms if self._deadline_ms is not None else start + cfg.overall_solve_timeout_ms
+            if _now() > deadline:
+                granted = deadline - start - cfg.overall_solve_timeout_ms
                 raise CaptchaSolveError(
-                    f"captcha solve timed out after {cfg.overall_solve_timeout_ms}ms (attempt {attempt}/{cfg.max_solve_loops})")
+                    f"captcha solve timed out after {deadline - start:.0f}ms (attempt {attempt}/{cfg.max_solve_loops})"
+                    + (f", including {granted:.0f}ms granted for recording an animated challenge" if granted > 0 else ""))
             if has_interacted and self.is_captcha_solved(page):
                 _log("captcha reports solved; finishing.")
                 return done()
@@ -1656,6 +1847,30 @@ class PageSolver:
             retry_mode, pending_retry_mode = pending_retry_mode, None
             try:
                 did_interact, round_usage = self._solve_single(page, widget, retry_mode)
+            except NothingFilmedError as nothing_filmed:
+                # A WIDGET THAT WILL NOT SCREENSHOT IS USUALLY A WIDGET THAT IS CLOSING, and it closes
+                # because the answer was accepted. Every other failure in this loop asks
+                # `is_captcha_solved` before giving up; this one re-raised through the branch below and
+                # threw away boards the vendor had already taken. Measured: prosopo_grid_3x3 was 8/8
+                # green across six runs on 09-12 and 09-13, then lost four attempts on 09-17 to exactly
+                # this — each one after its FIRST board came back from /fx/verify graded `solved: true`,
+                # with the solve dying on the second board the vendor dealt.
+                if has_interacted:
+                    try:
+                        if self.is_captcha_solved(page):
+                            _log("nothing left to film because the board was accepted; finishing.")
+                            return done()
+                    except Exception:
+                        pass
+                    # Not solved: the handle is stale for the same reason it is unscreenshottable, so
+                    # take the stale-handle recovery rather than ending a solve with loops still in it.
+                    if stale_retries < cfg.max_stale_element_retries:
+                        stale_retries += 1
+                        _log(f"the widget would not screenshot; re-detecting "
+                             f"({stale_retries}/{cfg.max_stale_element_retries}).")
+                        _delay(cfg.stale_element_backoff_ms)
+                        continue
+                raise
             except AnimatedChallengeError:
                 raise
             except UnsupportedCaptchaError as unsupported:
@@ -1739,6 +1954,18 @@ class PageSolver:
             if not self.detect_captcha(page):
                 return done()
             if not did_interact and not self._no_progress_rounds:
+                # AN ANSWER WITH NOTHING TO EXECUTE IS NOT PROOF THE PAGE IS STUCK. The abort below
+                # exists for a driver that cannot act at all; an answer the driver could not use is a
+                # different thing, and on an animated board it is what a still expert returns when the
+                # board is not a still — measured on the hosted arms: a drag with no source box, "slide
+                # action, but the widget has neither a slider nor a draggable piece", solve over in 6s
+                # with the recording never taken. So buy the recording path one round first.
+                if self.config.video_solve_enabled and not self._retried_unusable_answer:
+                    self._retried_unusable_answer = True
+                    self._arm_animated_probe()
+                    _log("the answer had nothing this widget could execute; taking a second look "
+                         "before giving up")
+                    continue
                 raise CaptchaSolveError(
                     "captcha still detected but the solver performed no interactions; aborting to avoid an infinite loop")
 

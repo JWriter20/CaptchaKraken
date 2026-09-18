@@ -16,7 +16,7 @@ function speculating(moved: boolean) {
   solver.startKeyframeBurst = () => ({
     moved: () => moved,
     abandon: async () => { abandoned = true; },
-    finish: async () => { finished = true; return '/tmp/ck_burst_fake'; },
+    finish: async () => { finished = true; return { dir: '/tmp/ck_burst_fake', moved }; },
   });
   solver.getSolution = async () => { calls.push('still'); return STILL; };
   solver.getAnimatedSolution = async () => { calls.push('video'); return VIDEO; };
@@ -43,8 +43,8 @@ test('a moving board drops the still answer and finishes the recording', async (
   const rec = solver.startKeyframeBurst();
   await solver.solveFrameFreshnessGuarded({} as any, '/tmp/s.png', () => solver.getSolution());
   assert.equal(rec.moved(), true);
-  const dir = await rec.finish();
-  const video = await solver.getAnimatedSolution(dir);
+  const film = await rec.finish();
+  const video = await solver.getAnimatedSolution(film.dir);
   assert.deepEqual(calls, ['still', 'video'],
     'the still call is expected — it is the one that overlaps the recording');
   assert.equal(state().finished, true);
@@ -80,8 +80,8 @@ test('the speculative round does not wander the cursor over what it is filming',
   const fs = require('node:fs') as typeof import('fs');
   const path = require('node:path') as typeof import('path');
   const src = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'solver.ts'), 'utf8');
-  const start = src.indexOf('} else if (this.shouldSpeculate(');
-  const end = src.indexOf('} else {', start);
+  const start = src.indexOf('if (!response && this.shouldSpeculate(');
+  const end = src.indexOf('} else if (!response) {', start);
   assert.ok(start > 0 && end > start, 'could not find the speculative branch');
   const branch = src.slice(start, end);
   assert.ok(

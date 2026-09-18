@@ -171,6 +171,7 @@ a behaviour is a regression: the bug it describes actually happened.
 | `js/src/slide-aims-before-it-corrects.test.ts` | The slider opens with one sweep at the slot and corrects from what the screen shows, instead of spending two nudges calibrating before the drag starts. |
 | `js/src/slide-hidpi.test.ts` | The slider missed every attempt on a phone: device pixel ratio was applied twice. |
 | `js/src/board-paint-gate.test.ts` | A still board is not a loaded board: the driver waits for the widget to paint a puzzle before photographing it for the model. |
+| `js/src/a-board-that-will-not-film-may-already-be-solved.test.ts` | A recording that caught nothing is a widget that would not screenshot — usually one closing on an accepted answer — so the loop asks before it gives up. |
 | `js/src/a-missing-prompt-is-not-a-reason-to-wait.test.ts` | A readiness gate must not block on an element that is not there — a board with no `.prompt-text` paid the whole timeout, silently, per board. |
 | `js/src/geetest-accept-is-a-signal.test.ts` | GeeTest's accepted state is a banner inside the still-open panel, not a token and not an absence — reading it saves an inference per solve. |
 | `js/src/slide-reads-the-piece-off-the-page.test.ts` | The slider steers by the piece element's own box, not by a pixel diff whose under-measured width releases the drag short of the notch. |
@@ -178,8 +179,15 @@ a behaviour is a regression: the bug it describes actually happened.
 | `js/src/hosted-default.test.ts` | Against our own endpoint the client asks for the hosted-only model by its routing alias; against anyone else's it asks for the downloadable default. |
 | `js/src/no-progress.test.ts` | A solve that repeats itself stops instead of running the clock out. |
 | `js/src/repeated-answer.test.ts` | A board that cycles was being solved as a still, forever. |
+| `js/src/second-look-believes-the-recording.test.ts` | The second look at a board that failed once is a question, and the clip it records answers it: a board that never moved goes back to the still expert. |
 | `js/src/animated-budget.test.ts` | Escalating to a recording has to fit inside the overall solve budget, which was sized for rounds only. |
-| `js/src/one-inference-per-animated-board.test.ts` | A cycling board is recorded once and asked about once. |
+| `js/src/one-inference-per-animated-board.test.ts` | A cycling board is asked about once per distinct answer: reused across rounds, dropped when the widget refuses it. |
+| `js/src/the-camera-never-stops.test.ts` | The recording of an animated board outlives the round that sliced it, so a refused answer is re-asked against a longer film. |
+| `js/src/a-new-board-ends-the-film.test.ts` | A board the vendor replaces ends its film, so the recorded answer is never replayed onto the board that followed it. |
+| `js/src/a-finished-recording-still-answers-the-question.test.ts` | A film of a board that never stopped changing is not a still, however late the verdict is asked for. |
+| `js/src/a-replaced-board-has-not-failed-yet.test.ts` | Evidence that arms the second look belongs to the board it was found on; the boards dealt after it are not filmed for it. |
+| `js/src/an-unusable-answer-is-not-a-dead-page.test.ts` | An answer the widget cannot take buys the recording path a round; a page that takes nothing still gives up. |
+| `js/src/one-ask-cannot-outlive-the-solve.test.ts` | Every inference ask is bounded by what is left of the solve, and the source test refuses a new call site that is not. |
 | `js/src/cycling-board-waits-for-its-screen.test.ts` | The frame gate was off on every real animated captcha: the driver must hold until the page shows the keyframe the model chose. |
 | `js/src/speculative-burst.test.ts` | Asking the model and watching the board can overlap, and the burst must not be wasted when they do. |
 | `js/src/burst-window-is-wall-clock.test.ts` | The burst's windows are budgets in milliseconds, so a camera slower than the interval must not spend more of the solve than a fast one. |
@@ -283,6 +291,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | File | Purpose |
 |---|---|
 | `python/tests/test_a_blank_board_is_not_photographed.py` | The load gate in front of every inference screenshot, and the fences that stop it stalling a legitimately sparse puzzle. |
+| `python/tests/test_a_board_that_will_not_film_may_already_be_solved.py` | A burst that caught no frame is not a verdict about the board; it must not discard a board the vendor already took. |
 | `python/tests/test_a_board_that_never_repeats_is_animated.py` | A continuous animation never repeats and never settles; the burst calls it animated rather than a still. |
 | `python/tests/test_geetest_accept_is_a_signal.py` | GeeTest's accept banner is a solve; its refuse banner, and its closed popup wrapper, are not. |
 | `python/tests/test_a_missing_prompt_is_not_a_reason_to_wait.py` | A readiness gate must not block on an element that is not there — a board with no `.prompt-text` paid the whole timeout, silently, per board. |
@@ -311,6 +320,14 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_humanizer.py` | Humanisation is an input device, not a realism dial: the mobile device never emits a mouse event. |
 | `python/tests/test_grid_detection_ci.py` | The hermetic grid-detection smoke tests: the checks that need no corpus of real captures. |
 | `python/tests/test_grid_geometry_gates.py` | Every geometry gate `find_grid` applies, one test per bug that happened while they were written. |
+| `python/tests/test_the_film_outlives_the_answer.py` | The film of an animated board accumulates across rounds and dies with the board, not with the answer. |
+| `python/tests/test_a_new_board_ends_the_film.py` | `_fresh_board()` drops the recorded answer, the animated verdict and the slice, so none of them cross onto the next board. |
+| `python/tests/test_a_replaced_board_has_not_failed_yet.py` | A failed round arms the second look only while its board is still up, and a replaced board drops an arm the previous one set. |
+| `python/tests/test_an_unusable_answer_is_not_a_dead_page.py` | The same rule in the Python port: an unusable answer is a reason to look again, not to end the solve. |
+| `python/tests/test_a_solved_board_is_not_lost_to_a_typed_action.py` | A typed answer reads like a dict one, so a widget closing on an accepted board is not a failed solve. |
+| `python/tests/test_one_ask_cannot_outlive_the_solve.py` | The planner's request timeout is the caller's remaining budget, floored, and the request actually sends it. |
+| `python/tests/test_the_second_look_believes_its_recording.py` | The second look at a board that failed once is a question, and the clip it records answers it: a board that never moved goes back to the still expert. |
+| `python/tests/test_a_board_is_routed_and_watched_once_it_has_painted.py` | A widget that has not drawn yet picks the wrong expert and reads as a still; both questions wait for the paint. |
 | `python/tests/test_the_notice_travels_with_the_package.py` | The LGPL notice for Cursory has to reach both published packages, and three copies are three chances to drift. |
 | `python/tests/test_a_grid_is_a_regular_lattice.py` | Every other grid check asks what is inside the cells; a click board over a photo passes those and is not a lattice. |
 | `python/tests/test_grid_dims_must_be_possible.py` | `find_grid` proposes lattices; a shape no vendor actually ships is a false positive. |

@@ -98,7 +98,7 @@ def test_the_wait_for_the_model_is_named(monkeypatch):
 
 def test_the_js_burst_does_not_wait_on_its_inference_either():
     js = (Path(__file__).resolve().parents[2] / "js" / "src" / "solver.ts").read_text()
-    marker = "elapsedMs - lastNewMs >= floorMs"
+    marker = "Date.now() - lastNewAt >= floorMs"
     assert marker in js, "the JS burst has lost its settled exit"
     line = next(l for l in js.splitlines() if marker in l)
     assert "done" not in line and "await" not in line, (

@@ -84,3 +84,48 @@ def test_the_default_budget_is_enough_for_an_escalation_on_the_last_round():
     spent_on_rounds = (cfg.max_solve_loops - 1) * 7_000
     left = cfg.overall_solve_timeout_ms - spent_on_rounds + cfg.video_budget_ms()
     assert left >= cfg.video_burst_duration_ms + cfg.keyframe_wait_timeout_ms
+
+
+def _rounds_of(monkeypatch, round_ms: float, solved_after: int):
+    """Drive the solve loop on a fake clock; every round records, so the grant is in force from round 1."""
+    from captchakraken import page_solver
+
+    solver = _solver(post_solve_outcome_timeout_ms=1, post_solve_outcome_poll_ms=1)
+    clock = {"now": 0.0}
+
+    def now() -> float:
+        clock["now"] += 1.0  # the verdict window polls until the clock passes it
+        return clock["now"]
+
+    monkeypatch.setattr(page_solver, "_now", now)
+    rounds = []
+
+    def solve_single(page, widget, retry_mode):
+        rounds.append(clock["now"])
+        solver._grant_video_budget()
+        clock["now"] += round_ms
+        return True, []
+
+    solver._reset_animated_state()
+    solver._deadline_ms = solver.config.overall_solve_timeout_ms
+    solver.detect_captcha = lambda page: object()
+    solver._solve_single = solve_single
+    solver.is_captcha_solved = lambda page: len(rounds) >= solved_after
+    solver._banner_kind = lambda page: None
+    solver._is_challenge_freshly_rendered = lambda page: False
+    return solver, rounds
+
+
+def test_the_loop_head_honours_the_granted_budget(monkeypatch):
+    """JS's loop head reads the configured budget plus the grant. Python's read the bare config, so a video
+    solve that had been granted its recording budget still quit at the head of round 5 once 45s had passed."""
+    solver, rounds = _rounds_of(monkeypatch, round_ms=12_000, solved_after=5)
+    assert solver._solve_impl(object(), 0.0, []).is_solved
+    assert len(rounds) == 5
+
+
+def test_the_granted_budget_still_ends(monkeypatch):
+    solver, _ = _rounds_of(monkeypatch, round_ms=20_000, solved_after=99)
+    with pytest.raises(CaptchaSolveError, match=r"granted for recording an animated challenge") as excinfo:
+        solver._solve_impl(object(), 0.0, [])
+    assert "attempt 5/" in str(excinfo.value)

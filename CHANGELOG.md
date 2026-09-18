@@ -3,7 +3,141 @@
 All notable changes to CaptchaKraken are documented here. This project follows
 semantic versioning; v2 is a major, **breaking** release.
 
-## [Unreleased]
+## [3.1.0] - 2026-09-18
+
+### Fixed
+
+- **A round is decided from the board it can see.** Two questions open every
+  round, and both were asked before the widget had necessarily drawn anything:
+  WHICH EXPERT answers it, read out of the DOM as "is there a text box in
+  here", and WHETHER THE BOARD CYCLES, read off its motion. A vendor frame that
+  has resolved but painted nothing holds no text box, so a distorted-text board
+  went to the still expert and only the second round asked about it as text;
+  and a classifier that started on a widget still arriving spent its window
+  there and called a board that cycles a still — which is then answered from
+  one screen, clicked, and refused. The round now waits for the board to paint
+  before it asks either question. That wait is not new: it is the one the round
+  already paid a few lines further down, moved ahead of the two decisions that
+  depend on it. Measured on the fixture suite, both ports: a distorted-text
+  board is asked about as text on its first round and solves in 4-6s against
+  ~10-16s.
+
+- **A recording that has ended still answers "is this board cycling".** A
+  speculative round films the widget while the model reads one screen of it,
+  then asks the film whether the board moved. On a slow round the ask outlived
+  the recording, and the verdict then fell back to "a screen came back" and
+  ignored the screens the film actually held — so a board that cycled for its
+  whole window read as a still, and its one-screen answer was pressed onto a
+  widget that scores behaviour. A finished film is now read by the same rule as
+  one still rolling, off its own clock rather than the wall's. JS only; the
+  Python port films that decision synchronously and was never exposed.
+
+- **A solve the vendor accepted is no longer lost to a closing widget.**
+  `answer_needs_element_box` called `.get` on each action, but the planner
+  returns TYPED actions as readily as dicts, so it raised
+  `AttributeError: 'ClickAction' object has no attribute 'get'`. It runs only
+  when the element has no bounding box — which is what a widget that is CLOSING
+  looks like, and it closes because the answer was accepted. Measured against
+  the hosted endpoint: five puzzle types graded `solved: true` on the board and
+  then ended the attempt with that error. The reader now takes either shape; a
+  widget with no box is asked whether the captcha is solved before the attempt
+  is failed; and `bounding box of captcha element` joins the stale-handle
+  patterns, which the JS port has always had. Twelve attempts across six types,
+  0 lost solves.
+
+- **One ask cannot outlive the solve it belongs to.** A request in flight
+  cannot be cancelled — the deadline is only read between steps — so the
+  timeout it was SENT with is the only thing bounding it. The planner sent
+  every request with a hardcoded 120s, 2.7x the whole 45s solve budget, and the
+  JS port ran the inference CLI as a child process with no timeout at all.
+  Measured against the hosted endpoint: one ask hung, gave up after ~124s with
+  "the write operation timed out", and the attempt ran 143.3s of which 123.9s
+  was that single call. The caller now passes what is LEFT of its budget, with
+  a 10s floor so a nearly-spent budget still buys a real attempt, and the child
+  process is killed rather than waited on.
+
+- **An answer with nothing to execute is not proof the page is stuck.** The
+  driver aborts a solve when a round performs no interactions, which is right
+  for a page with nothing to press and wrong for an answer it simply could not
+  use. On an animated board that is what a still answer looks like: measured
+  against the hosted endpoint, a board came back as a drag with no source box,
+  the driver logged "slide action, but the widget has neither a slider nor a
+  draggable piece", and the solve ended 6.0s into its 45s budget with the
+  recording never taken — three animated types failed every attempt that way
+  while the same boards solved on another adapter. Such a round now buys the
+  recording path one look before the solve is abandoned, in both ports. A page
+  that takes nothing at all still gives up, one round later than before.
+
+- **A board the vendor replaces ends its film.** The whole-solve camera lets a
+  recorded answer be reused once — the widget refuses it, the no-progress fence
+  spots the repeat, and the next round re-asks on a longer film. That reuse was
+  never bounded to the board it was cut from, so when the vendor dealt a
+  DIFFERENT puzzle the plan survived it and the next animated round replayed the
+  previous board's coordinates onto the new one. Measured live against hCaptcha,
+  a keyframe answer cut from one board was pressed onto a board two deals later
+  — landing on the reference photo in the banner, then submitting, which with
+  nothing selected reads as Skip. Six rounds could pass without a real attempt.
+  The film, the animated verdict and the slice now end the moment a next round
+  paints, which is what `stopAnimatedFilm` already documented.
+
+  The second look is per board too, and so is what arms it. A new board used to
+  inherit the arm: in Python a failed round armed it at every loop head, and in
+  JS a repeat seen on any board kept it armed. With each board granted its own
+  look, that filmed every still board dealt after a solve's first miss, even
+  boards nobody had answered yet: 28.8s of recording in a 48.3s session, against
+  the 45s budget. Now only a board that failed and is still up gets its second
+  look.
+
+- **Python honours the recording budget at the top of every round.** A
+  recording extends the solve's deadline once, and the checks inside a round
+  already read the extended deadline. The loop head did not: it compared
+  elapsed time with the bare `overall_solve_timeout_ms`, so a video solve that
+  had been granted its recording budget still quit at round 5 once 45s had
+  passed. JS always counted the grant there, so on a five-board video fixture
+  the two ports gave different answers. The timeout message now says how much
+  was granted, as JS's does.
+
+- **The recording does not stop when the answer is sent.** Builds directly on
+  "drop the ANSWER, keep the FRAMES": the frames now grow, because the camera
+  keeps running. Re-asking the same frames puts the same question up and gets
+  the same answer back, which cannot help a board whose answer sat on a screen
+  the first window never caught. The
+  recording of a cycling board now runs for the whole solve instead of stopping
+  at the first answer, so each round asks against a strictly longer film. Before
+  this, the stored answer was reused unchanged — greedy sampling over the same
+  frames gives the same answer — and the no-progress fence ended the attempt at
+  round 3 of 6 with half the budget unspent. Boards whose answer sat on a screen
+  the first window missed could not be solved at all. New knob
+  `videoFilmMaxMs` / `video_film_max_ms` (default 120000) bounds the recording;
+  it is a safety net, not the working limit.
+
+- **One film, one board.** A film that runs for the whole solve is only better
+  while it is filming the same board, and a vendor that refuses an answer
+  sometimes deals a fresh puzzle rather than the same one again. Keyframes cut
+  across both states describe neither: the frame the model names is one the
+  widget will never show again, so the click waits out the whole keyframe
+  timeout for a picture that is gone. The film is now cut where the answer
+  LANDED, and only on proof the board was replaced — it repeated a screen, and
+  none of what it repeated was in the film. A board whose screens keep coming
+  back is still re-asked over the whole film; a board that never repeats a
+  screen has not been replaced, it has simply never repeated.
+
+- **A refused animated answer is re-asked against the board that is there.**
+  The JS port re-sliced the instant the widget refused, with the camera paused
+  since before the click — so the "grown" film held not one frame of the board
+  then on screen. It now waits for that board to show itself first: one frame
+  when it is the same board, a window when it is not.
+
+- **The burst no longer films the tail of its window flat out.** The frame that
+  would land past the ceiling declined to SLEEP rather than ending the
+  recording, so from there the loop ran at whatever rate the camera returned. A
+  ceiling that is not a whole number of frame intervals always leaves such a
+  tail; measured, that was 2487 frames in a 150 ms window, every one of them
+  handed to the slicer. This was not only a video bug — it was corrupting the
+  animated second look's clip on ordinary still boards too.
+
+  Together these take an animated board from 66-73 verify-to-verify rounds
+  across the fixture suite down to 53, with the same pass rate.
 
 ### Changed
 

@@ -666,5 +666,26 @@ plus a TypeScript build on every PR — no GPU or network. Release notes:
 
 ---
 
+## Credits
+
+**The mouse is not ours.** Every pointer path this driver performs comes from
+**[cursory](https://github.com/Vinyzu/cursory)**, by
+**[Vinyzu](https://github.com/Vinyzu)**. It does not model a hand: it searches a
+database of thousands of trajectories recorded from real people for the closest
+match to the requested movement, morphs that recording onto the endpoints, and
+re-noises it — realism that is measured rather than asserted. It replaced the
+hand-tuned curves we shipped before it; see
+[docs/usage.md § How it moves](./docs/usage.md#how-it-moves--mouse-mobile-none-or-yours).
+
+**[cursory-js](https://github.com/JWriter20/cursory-js)** is our TypeScript port
+of it, published so the JS driver has the same mouse. It is a port rather than a
+rewrite, so a seed gives the same trajectory in both ports.
+
+Both are **LGPL-3.0-or-later**, and both are ordinary installed dependencies —
+never vendored, inlined, or bundled — so you can swap in a modified build of
+either by reinstalling the package. Full third-party notice: **[NOTICE](./NOTICE)**.
+
+---
+
 > ⚠️ Use responsibly and lawfully — respect the terms of service of any site you
 > interact with. This project is for legitimate automation, research, and testing.
