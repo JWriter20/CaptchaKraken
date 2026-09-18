@@ -7,16 +7,30 @@ semantic versioning; v2 is a major, **breaking** release.
 
 ### Fixed
 
-- **A distorted-text board is asked about as text, on the first round.** Which
-  expert answers a round is decided by "is there a text box in this widget",
-  and that runs at the top of the round — before the vendor's frame has
-  necessarily painted. Measured under camoufox: `yandex_text` and
-  `mtcaptcha_text` had a RESOLVED frame holding zero elements, so the box was
-  missed and a distorted-text board went to the still expert, with only the
-  second round routing to `text`; Chromium painted faster and hid it. A frame
-  that is still empty now gets a short moment to paint, paid only when it is
-  empty. Three of four measured attempts moved from two rounds to one, and from
-  ~10-16s to 4-6s.
+- **A round is decided from the board it can see.** Two questions open every
+  round, and both were asked before the widget had necessarily drawn anything:
+  WHICH EXPERT answers it, read out of the DOM as "is there a text box in
+  here", and WHETHER THE BOARD CYCLES, read off its motion. A vendor frame that
+  has resolved but painted nothing holds no text box, so a distorted-text board
+  went to the still expert and only the second round asked about it as text;
+  and a classifier that started on a widget still arriving spent its window
+  there and called a board that cycles a still — which is then answered from
+  one screen, clicked, and refused. The round now waits for the board to paint
+  before it asks either question. That wait is not new: it is the one the round
+  already paid a few lines further down, moved ahead of the two decisions that
+  depend on it. Measured on the fixture suite, both ports: a distorted-text
+  board is asked about as text on its first round and solves in 4-6s against
+  ~10-16s.
+
+- **A recording that has ended still answers "is this board cycling".** A
+  speculative round films the widget while the model reads one screen of it,
+  then asks the film whether the board moved. On a slow round the ask outlived
+  the recording, and the verdict then fell back to "a screen came back" and
+  ignored the screens the film actually held — so a board that cycled for its
+  whole window read as a still, and its one-screen answer was pressed onto a
+  widget that scores behaviour. A finished film is now read by the same rule as
+  one still rolling, off its own clock rather than the wall's. JS only; the
+  Python port films that decision synchronously and was never exposed.
 
 - **A solve the vendor accepted is no longer lost to a closing widget.**
   `answer_needs_element_box` called `.get` on each action, but the planner

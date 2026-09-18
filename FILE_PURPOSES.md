@@ -184,6 +184,7 @@ a behaviour is a regression: the bug it describes actually happened.
 | `js/src/one-inference-per-animated-board.test.ts` | A cycling board is asked about once per distinct answer: reused across rounds, dropped when the widget refuses it. |
 | `js/src/the-camera-never-stops.test.ts` | The recording of an animated board outlives the round that sliced it, so a refused answer is re-asked against a longer film. |
 | `js/src/a-new-board-ends-the-film.test.ts` | A board the vendor replaces ends its film, so the recorded answer is never replayed onto the board that followed it. |
+| `js/src/a-finished-recording-still-answers-the-question.test.ts` | A film of a board that never stopped changing is not a still, however late the verdict is asked for. |
 | `js/src/a-replaced-board-has-not-failed-yet.test.ts` | Evidence that arms the second look belongs to the board it was found on; the boards dealt after it are not filmed for it. |
 | `js/src/an-unusable-answer-is-not-a-dead-page.test.ts` | An answer the widget cannot take buys the recording path a round; a page that takes nothing still gives up. |
 | `js/src/one-ask-cannot-outlive-the-solve.test.ts` | Every inference ask is bounded by what is left of the solve, and the source test refuses a new call site that is not. |
@@ -326,7 +327,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | `python/tests/test_a_solved_board_is_not_lost_to_a_typed_action.py` | A typed answer reads like a dict one, so a widget closing on an accepted board is not a failed solve. |
 | `python/tests/test_one_ask_cannot_outlive_the_solve.py` | The planner's request timeout is the caller's remaining budget, floored, and the request actually sends it. |
 | `python/tests/test_the_second_look_believes_its_recording.py` | The second look at a board that failed once is a question, and the clip it records answers it: a board that never moved goes back to the still expert. |
-| `python/tests/test_the_text_box_decides_the_expert.py` | A frame that has not painted yet does not get a text board sent to the still expert. |
+| `python/tests/test_a_board_is_routed_and_watched_once_it_has_painted.py` | A widget that has not drawn yet picks the wrong expert and reads as a still; both questions wait for the paint. |
 | `python/tests/test_the_notice_travels_with_the_package.py` | The LGPL notice for Cursory has to reach both published packages, and three copies are three chances to drift. |
 | `python/tests/test_a_grid_is_a_regular_lattice.py` | Every other grid check asks what is inside the cells; a click board over a photo passes those and is not a lattice. |
 | `python/tests/test_grid_dims_must_be_possible.py` | `find_grid` proposes lattices; a shape no vendor actually ships is a false positive. |

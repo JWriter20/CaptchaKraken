@@ -629,42 +629,11 @@ class PageSolver:
         with `#captchaCode` in a sibling div. The generic tail there would take a login form's own box.
         """
         inside = self._find_control(scope, TEXT_INPUT_SELECTORS)
-        if inside is None and self._frame_is_still_empty(scope):
-            # THE ROUND CAN START BEFORE THE VENDOR'S FRAME HAS PAINTED, and this answer decides which
-            # expert is asked. Measured on 2026-09-17 under camoufox: yandex_text and mtcaptcha_text had
-            # a resolved frame holding NO elements at all, so the box was missed, the still expert was
-            # asked about a distorted-text board, and only the second round routed to `text`. Chromium
-            # painted faster and hid it. The wait is paid only when the frame is empty — a board that has
-            # painted anything at all, text or not, never reaches it.
-            self._wait_for_frame_content(scope)
-            inside = self._find_control(scope, TEXT_INPUT_SELECTORS)
         if inside is not None or at is None:
             return inside
         around = (self._find_control(at.locator(f"xpath={axis}"), TEXT_INPUT_VENDOR_SELECTORS)
                   for axis in ("ancestor::fieldset[1]", "ancestor::form[1]"))
         return next((found for found in around if found is not None), None)
-
-    #: How long a frame with nothing in it may still be painting. Long enough for the fixtures and the
-    #: vendors measured here (a few hundred ms), short enough that a genuinely empty frame costs little.
-    _EMPTY_FRAME_TIMEOUT_MS = 750
-
-    def _frame_is_still_empty(self, scope: Any) -> bool:
-        """True when `scope` is a frame that has not painted anything yet."""
-        try:
-            return scope.locator("body *").count() == 0
-        except Exception:  # noqa: BLE001 — a detached or non-frame scope is simply not empty-and-waiting
-            return False
-
-    def _wait_for_frame_content(self, scope: Any) -> None:
-        """Hold until the frame has any element, or the short ceiling above."""
-        deadline = _now() + self._EMPTY_FRAME_TIMEOUT_MS
-        while _now() < deadline:
-            try:
-                if scope.locator("body *").count():
-                    return
-            except Exception:  # noqa: BLE001
-                return
-            _delay(50)
 
     def _execute_type(self, page: Any, scope: Any, action: Dict[str, Any], at: Any = None) -> bool:
         self._acted_on_board = True
@@ -1620,10 +1589,6 @@ class PageSolver:
         element, puzzle_source, role = widget.element, widget.vendor, widget.role
         frame = element.content_frame()
         scope = frame or widget.at
-        # Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
-        text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, widget.at) is not None
-        if text_mode:
-            _log("widget has a text box; solving as a distorted-text captcha")
 
         if frame and role == FrameRole.CHALLENGE and SELECTORS[puzzle_source].images:
             if self._last_submit_frame_hash:
@@ -1632,6 +1597,17 @@ class PageSolver:
                 self._last_submit_frame_hash = None
             with self._phase(Phase.HCAPTCHA_IMAGES):
                 self._wait_for_board_images(frame, SELECTORS[puzzle_source])
+
+        # EVERY QUESTION BELOW IS PUT TO A PAINTED BOARD. Which expert answers the round is read out of the
+        # DOM and whether the board cycles is read off its motion, and a widget that has not drawn yet has
+        # no text box to find and no motion but its own arrival.
+        with self._phase(Phase.BOARD_PAINT):
+            self._wait_for_board_painted(element)
+
+        # Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
+        text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, widget.at) is not None
+        if text_mode:
+            _log("widget has a text box; solving as a distorted-text captcha")
 
         # A checkbox is clicked, not filmed, and a reCAPTCHA board is read by its grid below.
         filmable = role != FrameRole.CHECKBOX and puzzle_source != Vendor.RECAPTCHA and not text_mode
@@ -1649,9 +1625,6 @@ class PageSolver:
                 element_box = element.bounding_box()
                 if element_box:
                     return self._solve_recaptcha_grid(page, element, retry_mode, grid, element_box)
-
-        with self._phase(Phase.BOARD_PAINT):
-            self._wait_for_board_painted(element)
 
         shot = _tmp_png("captcha")
         performed = slid = answered = have_shot = False
