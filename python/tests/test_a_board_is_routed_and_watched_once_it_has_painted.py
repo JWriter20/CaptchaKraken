@@ -35,10 +35,11 @@ class _Element:
         return {"x": 0, "y": 0, "width": 300, "height": 200}
 
 
-def _round(*, vendor=Vendor.UNKNOWN, has_text_box=True):
+def _round(*, vendor=Vendor.UNKNOWN, has_text_box=True, grid=False):
     """Drive one round over a widget that only holds its text box once it has painted.
 
     Returns `(trace, text_mode)` — the order the round asked its questions in, and the expert it chose.
+    `grid` puts a 3x3 lattice in the widget, which is the branch reCAPTCHA takes instead of both questions.
     """
     solver = PageSolver(config=PageSolverConfig())
     solver._reset_animated_state()
@@ -69,11 +70,20 @@ def _round(*, vendor=Vendor.UNKNOWN, has_text_box=True):
     solver._should_speculate = should_speculate
     solver.is_captcha_solved = lambda page: False
     solver._screenshot = lambda *a, **k: None
+    if grid:
+        def solve_grid(*a, **kw):
+            trace.append("grid")
+            raise _Stop()
+
+        solver._wait_for_grid_cells_loaded = lambda element: True
+        solver._get_grid_boxes = lambda element: {"boxes": [], "size": 3,
+                                                  "screenshot_w": 300, "screenshot_h": 300}
+        solver._solve_recaptcha_grid = solve_grid
 
     widget = Widget(element=_Element(), at=None, vendor=vendor, role=FrameRole.CHALLENGE)
     with pytest.raises(_Stop):
         solver._solve_single(object(), widget, None)
-    return trace, chose[0]
+    return trace, (chose[0] if chose else None)
 
 
 def test_the_board_paints_before_the_round_is_routed():
@@ -87,6 +97,14 @@ def test_the_board_paints_before_it_is_watched_for_motion():
     trace, _ = _round(has_text_box=False)
     assert trace.index("paint") < trace.index("watch"), (
         f"the board was classified while it was still arriving: {trace}")
+
+
+def test_a_grid_board_waits_on_its_cells_and_not_twice():
+    """reCAPTCHA is asked neither question and reads its board through the grid gate, which waits on the
+    cells themselves. Waiting for the paint in front of that gate measured 0.8-1.8s a round on the family
+    with the tightest per-board budget, and bought nothing: the gate below covers the same board."""
+    trace, _ = _round(vendor=Vendor.RECAPTCHA, grid=True)
+    assert trace == ["grid"], f"a grid round paid for a wait it does not use: {trace}"
 
 
 def test_a_vendor_that_never_types_is_not_asked():
@@ -105,3 +123,5 @@ def test_the_js_port_paints_before_it_routes():
     classify = src.index("this.classifyByRecording(")
     assert paint < route, "solver.ts chooses the expert before it waits for the board to paint"
     assert paint < classify, "solver.ts starts the classifier before the board has painted"
+    assert "if (puzzleSource !== Vendor.RECAPTCHA) {" in src[:paint][-200:], (
+        "solver.ts makes a grid round wait for a paint it does not use")
