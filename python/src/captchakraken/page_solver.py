@@ -1598,11 +1598,16 @@ class PageSolver:
             with self._phase(Phase.HCAPTCHA_IMAGES):
                 self._wait_for_board_images(frame, SELECTORS[puzzle_source])
 
-        # EVERY QUESTION BELOW IS PUT TO A PAINTED BOARD. Which expert answers the round is read out of the
-        # DOM and whether the board cycles is read off its motion, and a widget that has not drawn yet has
-        # no text box to find and no motion but its own arrival.
-        with self._phase(Phase.BOARD_PAINT):
-            self._wait_for_board_painted(element)
+        # THE TWO QUESTIONS BELOW ARE PUT TO A PAINTED BOARD. Which expert answers the round is read out of
+        # the DOM and whether the board cycles is read off its motion, and a widget that has not drawn yet
+        # has no text box to find and no motion but its own arrival.
+        #
+        # A reCAPTCHA board is asked NEITHER — it is never typed and never filmed — and it waits for its
+        # board at the grid gate below, on the cells themselves. Waiting here as well put 0.8-1.8s in front
+        # of that gate on every dynamic round, on the family with the tightest per-board budget.
+        if puzzle_source != Vendor.RECAPTCHA:
+            with self._phase(Phase.BOARD_PAINT):
+                self._wait_for_board_painted(element)
 
         # Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
         text_mode = puzzle_source not in VENDORS_WITH_BESPOKE_HANDLING and self._answer_box(scope, widget.at) is not None
@@ -1625,6 +1630,11 @@ class PageSolver:
                 element_box = element.bounding_box()
                 if element_box:
                     return self._solve_recaptcha_grid(page, element, retry_mode, grid, element_box)
+
+        # The board a reCAPTCHA round photographs, for the rounds that do not take the grid path above.
+        if puzzle_source == Vendor.RECAPTCHA:
+            with self._phase(Phase.BOARD_PAINT):
+                self._wait_for_board_painted(element)
 
         shot = _tmp_png("captcha")
         performed = slid = answered = have_shot = False

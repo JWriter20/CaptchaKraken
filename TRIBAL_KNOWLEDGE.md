@@ -437,6 +437,13 @@ was not added for this; it already ran a few lines further down, and it moved
 ahead of the two decisions that depend on it. Anything that wants to know what
 the board IS goes after it.
 
+A reCAPTCHA round is the exception, and it is not a special case so much as the
+same rule read the other way: it is asked neither question — never typed, never
+filmed — and it waits for its board at the grid gate, on the cells themselves.
+Waiting for the paint in front of that gate measured 0.8-1.8s a round on the
+family with the tightest per-board budget, and covered a board the gate below
+already covers.
+
 **A verdict is read off the film, not off the clock the film ran on.** The
 speculative round films the widget while the model reads one screen of it, then
 asks the film whether the board moved. The ask is what takes the time, so on a

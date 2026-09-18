@@ -475,10 +475,15 @@ export class CaptchaKrakenSolver {
       await this.ph(Phase.HCAPTCHA_IMAGES, () => this.waitForBoardImages(frame, SELECTORS[puzzleSource]));
     }
 
-    // EVERY QUESTION BELOW IS PUT TO A PAINTED BOARD. Which expert answers the round is read out of the DOM
-    // and whether the board cycles is read off its motion, and a widget that has not drawn yet has no text
-    // box to find and no motion but its own arrival.
-    await this.ph(Phase.BOARD_PAINT, () => this.waitForBoardPainted(captchaElement));
+    // THE TWO QUESTIONS BELOW ARE PUT TO A PAINTED BOARD. Which expert answers the round is read out of the
+    // DOM and whether the board cycles is read off its motion, and a widget that has not drawn yet has no
+    // text box to find and no motion but its own arrival.
+    //
+    // A reCAPTCHA board is asked NEITHER — it is never typed and never filmed — and it waits for its board
+    // at the grid gate below, on the cells themselves. Waiting here as well put 0.8-1.8s in front of that
+    // gate on every dynamic round, on the family with the tightest per-board budget.
+    const painted = puzzleSource === Vendor.RECAPTCHA ? null
+      : await this.ph(Phase.BOARD_PAINT, () => this.waitForBoardPainted(captchaElement));
 
     // Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
     const textMode = !VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && (await this.answerBox(scope, widget.at)) !== null;
@@ -528,9 +533,16 @@ export class CaptchaKrakenSolver {
       establishedGridSize = grid?.size ?? null;
     }
 
-    // The classifier watched a board that had already painted, so its last frame is that board at rest.
+    // The board a reCAPTCHA round photographs, for the rounds that do not take the grid path above.
+    if (puzzleSource === Vendor.RECAPTCHA) {
+      await this.ph(Phase.BOARD_PAINT, () => this.waitForBoardPainted(captchaElement));
+    }
+
+    // The classifier watched a board that had already painted, so its last frame is that board at rest —
+    // unless it never painted at all, where a fresh photograph is the better chance of catching one.
     const screenshotPath = tmp('captcha');
-    const settledFrame = isAnimated ? null : (this.pendingBurst?.stableFrame() ?? null);
+    const settledFrame = (isAnimated || painted?.verdict !== PaintVerdict.PAINTED)
+      ? null : (this.pendingBurst?.stableFrame() ?? null);
     if (settledFrame && fs.existsSync(settledFrame)) {
       fs.copyFileSync(settledFrame, screenshotPath);
     } else {
