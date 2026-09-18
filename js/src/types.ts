@@ -88,10 +88,6 @@ export interface CaptchaKrakenConfig {
   settlePollMs?: number;
   /** Consecutive still frame pairs that mean settled. Default 2. */
   settleFrames?: number;
-  /** Quiet polls needed to call a board settled ONCE IT HAS MOVED. A short quiet run is a PAUSE,
-   *  not a settle, and an animation that pauses is the common case: an item_animal bee lands on a
-   *  flower and sits. A board that never moved settles on `settleFrames` and pays nothing. */
-  settleFramesAfterMotion?: number;
   /** Settle monitor timeout. Default 9000. */
   settleTimeoutMs?: number;
   /** Still moving after this long means animated. Default 4500. */

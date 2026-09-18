@@ -1927,17 +1927,11 @@ export class CaptchaKrakenSolver {
     const maxMs = opts?.maxMs ?? cfg.settleTimeoutMs ?? 9000;
     const animatedAfterMs = opts?.animatedAfterMs ?? cfg.animatedChallengeAfterMs ?? 4500;
     const motionStreak = opts?.motionStreak ?? cfg.animatedMotionStreak ?? 5;
-    const quietAfterMotion = cfg.settleFramesAfterMotion ?? 12;
-    // 0.01 could not see a SMALL mover on a big board. Measured with the shared `movement_ratio`
-    // (share of pixels differing by >30 grey levels) 220ms apart: an item_animal bee peaks at
-    // 0.00429 and cleared 0.01 on NONE of 55 polls, while rotating_obj (0.01845) and tile_flip
-    // (0.05863) cleared it easily; every still board on the corpus measured exactly 0.00000.
-    const threshold = opts?.threshold ?? cfg.settleDiffThreshold ?? 0.002;
+    const threshold = opts?.threshold ?? cfg.settleDiffThreshold ?? 0.01;
     const start = Date.now();
     let prev: string | null = null;
     let stillStreak = 0;
     let movedStreak = 0;
-    let seenMotion = false;
     const frames: string[] = [];
     try {
       while (Date.now() - start < maxMs) {
@@ -1949,15 +1943,8 @@ export class CaptchaKrakenSolver {
           const moved = !!(res && res.has_movement);
           stillStreak = moved ? 0 : stillStreak + 1;
           movedStreak = moved ? movedStreak + 1 : 0;
-          if (moved) seenMotion = true;
           unlink(frames.shift());
-          // A BOARD THAT HAS MOVED NEEDS A LONGER QUIET RUN. Captured at 220ms over 12s, the bee
-          // board reads `.M...........MMMMMMM.......MMMMMMM........MMMM` — two quiet polls ends
-          // the check before a single move is seen, and the whole puzzle is what the bee does over
-          // time. Lowering the threshold alone does not fix it; measured, it still read SETTLED.
-          if (stillStreak >= (seenMotion && quietAfterMotion ? quietAfterMotion : settleFrames)) {
-            return SettleVerdict.SETTLED;
-          }
+          if (stillStreak >= settleFrames) return SettleVerdict.SETTLED;
           if (moved && (Date.now() - start) >= animatedAfterMs) return SettleVerdict.ANIMATED;
           if (motionStreak && movedStreak >= motionStreak) return SettleVerdict.ANIMATED;
         }

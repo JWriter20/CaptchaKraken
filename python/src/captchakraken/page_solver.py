@@ -149,35 +149,21 @@ BURST_ANIMATED_SCREENS = 6
 
 
 def settle_verdict(samples, *, settle_frames: int, animated_after_ms: int,
-                   motion_streak: int = 0, quiet_after_motion: int = 0) -> SettleVerdict:
+                   motion_streak: int = 0) -> SettleVerdict:
     """The pixel-settle rule over `(elapsed_ms, moved)` polls.
 
     `motion_streak` exits early: rotating_obj_video changes every 133-171ms, and without it 4.5s went on
     proving that before a fresh 4s burst filmed it again.
-
-    A BOARD THAT HAS MOVED NEEDS A LONGER QUIET RUN, which is `quiet_after_motion`. A short one is a
-    PAUSE, not a settle, and an animation that pauses is the common case rather than the exotic one: an
-    item_animal bee lands on a flower and sits there. Captured at 220ms over 12s, that board reads
-
-        .M...........MMMMMMM.......MMMMMMM........MMMM
-
-    and `settle_frames` of 2 returns SETTLED on the leading pair, before a single move is seen. The whole
-    puzzle is which flowers the bee visits over time, so answering it from one screen cannot be right —
-    and the gate says so in as many words: "THE DRIVER NEVER ASKED ABOUT THE KEYFRAMES ... 0 keyframe
-    calls, on an animated fixture."
-
-    A board that never moved settles on `settle_frames` exactly as before, so a still pays nothing.
     """
     still = moved = 0
-    seen_motion = False
     for elapsed_ms, did_move in samples:
         if did_move:
-            still, moved, seen_motion = 0, moved + 1, True
+            still, moved = 0, moved + 1
             if elapsed_ms >= animated_after_ms or (motion_streak and moved >= motion_streak):
                 return SettleVerdict.ANIMATED
         else:
             moved, still = 0, still + 1
-            if still >= (quiet_after_motion if (seen_motion and quiet_after_motion) else settle_frames):
+            if still >= settle_frames:
                 return SettleVerdict.SETTLED
     return SettleVerdict.TIMEOUT
 
@@ -225,17 +211,7 @@ class PageSolverConfig:
     settle_timeout_ms: int = 9_000
     animated_challenge_after_ms: int = 4_500
     animated_motion_streak: int = 5
-    settle_frames_after_motion: int = 12
-    # 0.01 could not see a SMALL mover on a big board. Measured with the solver's own
-    # `movement_ratio` (share of pixels differing by >30 grey levels), 220ms apart:
-    #   item_animal bee   max 0.00429   ← 0 of 55 polls over 0.01, 18 of 55 over 0.002
-    #   rotating_obj      max 0.01845   ← seen either way
-    #   tile_flip         max 0.05863   ← seen either way
-    #   still boards      max 0.00000   (yandex_text, missing_piece, grocery_list,
-    #                                    semicircle_match, geetest_v3/v4_slide)
-    # 0.002 is the same number `_MOVED_DURING_INFERENCE_DIFF` already uses, over a measured
-    # 0.001 noise floor, and every still board on the corpus reads exactly zero.
-    settle_diff_threshold: float = 0.002
+    settle_diff_threshold: float = 0.01
     post_submit_change_timeout_ms: int = 4_000
     video_solve_enabled: bool = True
     animated_probe_enabled: bool = True
@@ -1015,8 +991,7 @@ class PageSolver:
             samples.append((elapsed, self._has_movement(frames[0], frames[1], cfg.settle_diff_threshold)))
             verdict = settle_verdict(samples, settle_frames=cfg.settle_frames,
                                      animated_after_ms=cfg.animated_challenge_after_ms,
-                                     motion_streak=cfg.animated_motion_streak,
-                                     quiet_after_motion=cfg.settle_frames_after_motion)
+                                     motion_streak=cfg.animated_motion_streak)
             return None if verdict == SettleVerdict.TIMEOUT else verdict
 
         return self._poll(element, cfg.settle_timeout_ms, cfg.settle_poll_ms, judge,
