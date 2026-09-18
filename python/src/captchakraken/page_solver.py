@@ -78,6 +78,15 @@ class AnimatedChallengeError(CaptchaSolveError):
     pass
 
 
+class NothingFilmedError(AnimatedChallengeError):
+    """The burst caught no frame at all.
+
+    `_burst` only returns nothing when EVERY screenshot in its window failed, so this is not a verdict
+    about the board — a still photographs fine. It is a widget that would not screenshot, and the
+    commonest reason for that is that it is closing, because the answer was accepted.
+    """
+
+
 class UnsupportedChallengeError(CaptchaSolveError):
     pass
 
@@ -1276,6 +1285,13 @@ class PageSolver:
             element, known=self._film_digests,
             max_ms=float(cfg.video_burst_duration_ms) if reask and not self._film_cycled else None)
         if not frames:
+            # ONLY the speculative second look gets the soft landing. A board this solve has PROVEN
+            # animated is a real dead end when it will not film, and must fail loudly as it always
+            # has: measured, treating both the same took the two video types from 3 solved and 10
+            # keyframe calls to 0 and 0, because the first failed film spends `_animated_probe_done`
+            # and every round after it is answered as a still.
+            if not self._known_animated:
+                raise NothingFilmedError("could not record the animated challenge (no frame screenshotted)")
             raise AnimatedChallengeError("could not record the animated challenge (no frame screenshotted)")
         _log(f"[animated] recorded {len(frames)} frames in {burst_ms / 1000:.1f}s "
              f"({measured_fps(len(frames), burst_ms, cfg.video_burst_fps):.1f}fps)")
@@ -1848,6 +1864,30 @@ class PageSolver:
             retry_mode, pending_retry_mode = pending_retry_mode, None
             try:
                 did_interact, round_usage = self._solve_single(page, widget, retry_mode)
+            except NothingFilmedError as nothing_filmed:
+                # A WIDGET THAT WILL NOT SCREENSHOT IS USUALLY A WIDGET THAT IS CLOSING, and it closes
+                # because the answer was accepted. Every other failure in this loop asks
+                # `is_captcha_solved` before giving up; this one re-raised through the branch below and
+                # threw away boards the vendor had already taken. Measured: prosopo_grid_3x3 was 8/8
+                # green across six runs on 09-12 and 09-13, then lost four attempts on 09-17 to exactly
+                # this — each one after its FIRST board came back from /fx/verify graded `solved: true`,
+                # with the solve dying on the second board the vendor dealt.
+                if has_interacted:
+                    try:
+                        if self.is_captcha_solved(page):
+                            _log("nothing left to film because the board was accepted; finishing.")
+                            return done()
+                    except Exception:
+                        pass
+                    # Not solved: the handle is stale for the same reason it is unscreenshottable, so
+                    # take the stale-handle recovery rather than ending a solve with loops still in it.
+                    if stale_retries < cfg.max_stale_element_retries:
+                        stale_retries += 1
+                        _log(f"the widget would not screenshot; re-detecting "
+                             f"({stale_retries}/{cfg.max_stale_element_retries}).")
+                        _delay(cfg.stale_element_backoff_ms)
+                        continue
+                raise
             except AnimatedChallengeError:
                 raise
             except UnsupportedCaptchaError as unsupported:

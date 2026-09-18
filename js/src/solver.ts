@@ -327,6 +327,25 @@ export class CaptchaKrakenSolver {
       try {
         ({ didInteract, tokenUsage } = await this.solveSingle(page, widget, attempt, retryModeThisLoop));
       } catch (e: any) {
+        if (e?.nothingFilmed && hasInteracted) {
+          // Every other failure in this loop asks `isCaptchaSolved` before giving up; this one did not,
+          // and threw away boards the vendor had already taken. Measured on the python port, which fails
+          // the same way: prosopo_grid_3x3 was 8/8 green across six runs on 09-12 and 09-13, then lost
+          // four attempts on 09-17 to exactly this — each after its FIRST board came back from /fx/verify
+          // graded `solved: true`, with the solve dying on the second board the vendor dealt.
+          if (await this.isCaptchaSolved(page)) {
+            console.log('nothing left to film because the board was accepted; finishing.');
+            return done();
+          }
+          // Not solved: the handle is stale for the same reason it is unscreenshottable, so take the
+          // stale-handle recovery rather than ending a solve with loops still in it.
+          if (staleElementRetries < (cfg.maxStaleElementRetries ?? 3)) {
+            staleElementRetries++;
+            console.log(`the widget would not screenshot; re-detecting next round (${staleElementRetries}/${cfg.maxStaleElementRetries ?? 3}).`);
+            await delay(cfg.staleElementBackoffMs ?? 900);
+            continue;
+          }
+        }
         if (e?.animated) throw new Error(`Animated challenge could not be solved: ${e.message ?? 'recording failed'}`);
         if (e?.unsupported) {
           // Mid-solve, a transitional blank frame reads as unsupported; settle and retry.
@@ -1474,6 +1493,15 @@ export class CaptchaKrakenSolver {
         if (!names.length) {
           const e: any = new Error('ANIMATED_CHALLENGE: could not record the animated challenge (no frame screenshotted).');
           e.animated = true;
+          // NOTHING CAME BACK, which is not a verdict about the board: a still photographs fine. It is a
+          // widget that would not screenshot for the whole window, and the commonest reason for that is
+          // that it is CLOSING, because the answer was accepted. The loop asks before giving up.
+          // ONLY the speculative second look gets the soft landing. A board this solve has PROVEN
+          // animated is a real dead end when it will not film, and must fail loudly as it always has:
+          // measured on the python port, the two video types went from 3 solved and 10 keyframe calls
+          // to 0 and 0 when both cases shared a handler, because the first failed film spends the
+          // probe and every round after it is answered as a still.
+          if (!this.knownAnimated) e.nothingFilmed = true;
           throw e;
         }
         const out = fs.mkdtempSync(path.join(os.tmpdir(), 'ck_slice_'));
@@ -1519,6 +1547,15 @@ export class CaptchaKrakenSolver {
           rmdir(dir);
           const e: any = new Error('ANIMATED_CHALLENGE: could not record the animated challenge (no frame screenshotted).');
           e.animated = true;
+          // NOTHING CAME BACK, which is not a verdict about the board: a still photographs fine. It is a
+          // widget that would not screenshot for the whole window, and the commonest reason for that is
+          // that it is CLOSING, because the answer was accepted. The loop asks before giving up.
+          // ONLY the speculative second look gets the soft landing. A board this solve has PROVEN
+          // animated is a real dead end when it will not film, and must fail loudly as it always has:
+          // measured on the python port, the two video types went from 3 solved and 10 keyframe calls
+          // to 0 and 0 when both cases shared a handler, because the first failed film spends the
+          // probe and every round after it is answered as a still.
+          if (!this.knownAnimated) e.nothingFilmed = true;
           throw e;
         }
         const burstMs = Math.max(1, elapsed());

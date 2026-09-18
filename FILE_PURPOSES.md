@@ -171,6 +171,7 @@ a behaviour is a regression: the bug it describes actually happened.
 | `js/src/slide-aims-before-it-corrects.test.ts` | The slider opens with one sweep at the slot and corrects from what the screen shows, instead of spending two nudges calibrating before the drag starts. |
 | `js/src/slide-hidpi.test.ts` | The slider missed every attempt on a phone: device pixel ratio was applied twice. |
 | `js/src/board-paint-gate.test.ts` | A still board is not a loaded board: the driver waits for the widget to paint a puzzle before photographing it for the model. |
+| `js/src/a-board-that-will-not-film-may-already-be-solved.test.ts` | A recording that caught nothing is a widget that would not screenshot — usually one closing on an accepted answer — so the loop asks before it gives up. |
 | `js/src/a-missing-prompt-is-not-a-reason-to-wait.test.ts` | A readiness gate must not block on an element that is not there — a board with no `.prompt-text` paid the whole timeout, silently, per board. |
 | `js/src/geetest-accept-is-a-signal.test.ts` | GeeTest's accepted state is a banner inside the still-open panel, not a token and not an absence — reading it saves an inference per solve. |
 | `js/src/slide-reads-the-piece-off-the-page.test.ts` | The slider steers by the piece element's own box, not by a pixel diff whose under-measured width releases the drag short of the notch. |
@@ -289,6 +290,7 @@ happened. There is no `conftest.py`: nothing here needs a fixture that
 | File | Purpose |
 |---|---|
 | `python/tests/test_a_blank_board_is_not_photographed.py` | The load gate in front of every inference screenshot, and the fences that stop it stalling a legitimately sparse puzzle. |
+| `python/tests/test_a_board_that_will_not_film_may_already_be_solved.py` | A burst that caught no frame is not a verdict about the board; it must not discard a board the vendor already took. |
 | `python/tests/test_a_board_that_never_repeats_is_animated.py` | A continuous animation never repeats and never settles; the burst calls it animated rather than a still. |
 | `python/tests/test_geetest_accept_is_a_signal.py` | GeeTest's accept banner is a solve; its refuse banner, and its closed popup wrapper, are not. |
 | `python/tests/test_a_missing_prompt_is_not_a_reason_to_wait.py` | A readiness gate must not block on an element that is not there — a board with no `.prompt-text` paid the whole timeout, silently, per board. |
