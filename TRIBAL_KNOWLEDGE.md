@@ -427,6 +427,24 @@ blue sky plus something white.
 
 ## Rounds, bursts and gates
 
+**The board paints before the round asks anything about it.** A round opens on
+two questions — which expert answers it, read out of the DOM as "is there a text
+box in here", and whether the board cycles, read off its motion — and both were
+asked at the top of the round, before the widget had necessarily drawn. A
+resolved vendor frame holding nothing answers both wrongly in the same way: no
+box to find, and no motion but its own arrival. The paint wait is not new and
+was not added for this; it already ran a few lines further down, and it moved
+ahead of the two decisions that depend on it. Anything that wants to know what
+the board IS goes after it.
+
+**A verdict is read off the film, not off the clock the film ran on.** The
+speculative round films the widget while the model reads one screen of it, then
+asks the film whether the board moved. The ask is what takes the time, so on a
+slow round the recording is over before it is questioned — and a verdict that
+only ever read a film still rolling called every finished one a still. The
+Python port never had this: its burst is synchronous, so it computes its verdict
+at the end of its own window. The JS recorder now answers the same way.
+
 **The blank-board gate exists because the settle gate cannot see a blank
 rebuild.** Measured on gt4.geetest.com's slide demo on 2026-09-12 over ten live
 attempts: six of fifty-two requests carried a board with under 5% ink and every

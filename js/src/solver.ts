@@ -467,10 +467,6 @@ export class CaptchaKrakenSolver {
     const frame = await captchaElement.contentFrame();
     const scope: Scope = frame ?? widget.at;
 
-    // Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
-    const textMode = !VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && (await this.answerBox(scope, widget.at)) !== null;
-    if (textMode) console.log('Widget has a text box; solving as a distorted-text captcha.');
-
     if (frame && frameRole === FrameRole.CHALLENGE && SELECTORS[puzzleSource].images) {
       if (this.lastSubmitFrameHash) {
         await this.ph(Phase.AWAIT_NEXT_ROUND, () => this.waitForChangeSince(captchaElement, this.lastSubmitFrameHash as string));
@@ -478,6 +474,15 @@ export class CaptchaKrakenSolver {
       }
       await this.ph(Phase.HCAPTCHA_IMAGES, () => this.waitForBoardImages(frame, SELECTORS[puzzleSource]));
     }
+
+    // EVERY QUESTION BELOW IS PUT TO A PAINTED BOARD. Which expert answers the round is read out of the DOM
+    // and whether the board cycles is read off its motion, and a widget that has not drawn yet has no text
+    // box to find and no motion but its own arrival.
+    await this.ph(Phase.BOARD_PAINT, () => this.waitForBoardPainted(captchaElement));
+
+    // Only the DOM can tell a typed captcha from a click puzzle; hCaptcha and reCAPTCHA never type.
+    const textMode = !VENDORS_WITH_BESPOKE_HANDLING.has(puzzleSource) && (await this.answerBox(scope, widget.at)) !== null;
+    if (textMode) console.log('Widget has a text box; solving as a distorted-text captcha.');
 
     // A checkbox is clicked, not filmed, and a reCAPTCHA board is read by its grid below.
     const filmable = frameRole !== FrameRole.CHECKBOX && puzzleSource !== Vendor.RECAPTCHA && !textMode;
@@ -523,11 +528,9 @@ export class CaptchaKrakenSolver {
       establishedGridSize = grid?.size ?? null;
     }
 
-    const painted = await this.ph(Phase.BOARD_PAINT, () => this.waitForBoardPainted(captchaElement));
-
-    // The classifier's last frame is a settled still, unless the board painted while we watched.
+    // The classifier watched a board that had already painted, so its last frame is that board at rest.
     const screenshotPath = tmp('captcha');
-    const settledFrame = (isAnimated || painted.waitedMs >= (cfg.boardPaintPollMs ?? 180)) ? null : (this.pendingBurst?.stableFrame() ?? null);
+    const settledFrame = isAnimated ? null : (this.pendingBurst?.stableFrame() ?? null);
     if (settledFrame && fs.existsSync(settledFrame)) {
       fs.copyFileSync(settledFrame, screenshotPath);
     } else {
@@ -1294,6 +1297,7 @@ export class CaptchaKrakenSolver {
     let captured = 0;
     let lastDigest: string | null = null;
     let lastNewAt = t0;
+    let lastNewMs = 0;
     let lastChangeMs = 0;
     // WHERE THE BOARD ON SCREEN STARTED. A film can only describe ONE board, and a vendor that refuses an
     // answer sometimes deals a fresh puzzle rather than the same one again. The boundary is where OUR ANSWER
@@ -1345,7 +1349,7 @@ export class CaptchaKrakenSolver {
             if (d !== lastDigest) {
               lastChangeMs = elapsed();
               const seen = firstSeen.get(d);
-              if (seen === undefined) { firstSeen.set(d, seq - 1); order.push(d); lastNewAt = Date.now(); }
+              if (seen === undefined) { firstSeen.set(d, seq - 1); order.push(d); lastNewAt = Date.now(); lastNewMs = elapsed(); }
               else {
                 if (order.length >= 2) cycleClosed = true;
                 if (seen >= cutAt) segCycled = true;
@@ -1378,7 +1382,8 @@ export class CaptchaKrakenSolver {
       }
     })();
     let ended = false;
-    loop.then(() => { ended = true; }, () => { ended = true; });
+    let endedAtMs = 0;
+    loop.then(() => { ended = true; endedAtMs = elapsed(); }, () => { ended = true; endedAtMs = elapsed(); });
 
     return {
       moved: () => cycleClosed,
@@ -1412,6 +1417,15 @@ export class CaptchaKrakenSolver {
             if (order.length > BURST_ANIMATED_SCREENS) { animating = true; why = `${order.length} screens and still arriving — animating continuously`; break; }
           }
           await delay(intervalMs);
+        }
+        // A RECORDING THAT HAS ENDED STILL ANSWERS THE QUESTION, by the same rule and off its own clock
+        // rather than the wall's. The loop above only reads a film that is still rolling, so an ask that
+        // outlived the recording turned every finished film into "still" — and a board that cycles, filmed
+        // for its whole window, was then answered from one screen, clicked, and refused.
+        if (!cycleClosed && !animating && ended && order.length > BURST_ANIMATED_SCREENS
+            && endedAtMs - lastNewMs < floorMs) {
+          animating = true;
+          why = `${order.length} screens and still arriving when the recording ended`;
         }
         const moved = cycleClosed || animating;
         if (!moved && (ended || stopped)) why = ended ? 'the recording ended' : 'abandoned';
