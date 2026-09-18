@@ -123,5 +123,5 @@ def test_the_js_port_paints_before_it_routes():
     classify = src.index("this.classifyByRecording(")
     assert paint < route, "solver.ts chooses the expert before it waits for the board to paint"
     assert paint < classify, "solver.ts starts the classifier before the board has painted"
-    assert "if (puzzleSource !== Vendor.RECAPTCHA) {" in src[:paint][-200:], (
+    assert "puzzleSource === Vendor.RECAPTCHA ? null" in src[:paint][-200:], (
         "solver.ts makes a grid round wait for a paint it does not use")
